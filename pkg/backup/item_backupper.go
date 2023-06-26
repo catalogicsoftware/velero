@@ -76,6 +76,8 @@ type itemBackupper struct {
 	snapshotLocationVolumeSnapshotters map[string]vsv1.VolumeSnapshotter
 	hookTracker                        *hook.HookTracker
 	volumeHelperImpl                   volumehelper.VolumeHelper
+
+	excludedPvcs map[string]bool
 }
 
 type FileForArchive struct {
@@ -159,6 +161,30 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 	if metadata.GetDeletionTimestamp() != nil {
 		log.Info("Skipping item because it's being deleted.")
 		return false, itemFiles, nil
+	}
+
+	if ib.excludedPvcs != nil {
+		switch groupResource {
+		case kuberesource.PersistentVolumes:
+			pv := new(corev1api.PersistentVolume)
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pv); err != nil {
+				log.Errorf("Failed to convert unstructured PV %s to PersistentVolume structure: %v", metadata.GetName(), err)
+				return false, itemFiles, err
+			}
+
+			pvcPath := pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+			if _, isExcluded := ib.excludedPvcs[pvcPath]; isExcluded {
+				log.Infof("Excluding PV %s for PVC %s because it is excluded from backup", metadata.GetName(), pvcPath)
+				return false, itemFiles, nil
+			}
+
+		case kuberesource.PersistentVolumeClaims:
+			pvcPath := metadata.GetNamespace() + "/" + metadata.GetName()
+			if _, isExcluded := ib.excludedPvcs[pvcPath]; isExcluded {
+				log.Infof("Excluding PVC %s because it is excluded from backup", pvcPath)
+				return false, itemFiles, nil
+			}
+		}
 	}
 
 	key := itemKey{

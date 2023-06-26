@@ -21,7 +21,7 @@ BIN ?= velero
 PKG := github.com/vmware-tanzu/velero
 
 # Where to push the docker image.
-REGISTRY ?= velero
+REGISTRY ?= catalogicsoftware
 GCR_REGISTRY ?= gcr.io/velero-gcp
 
 # Image name
@@ -62,7 +62,7 @@ HUGO_IMAGE := hugo-builder
 local : ARCH ?= $(shell go env GOOS)-$(shell go env GOARCH)
 ARCH ?= linux-amd64
 
-VERSION ?= main
+VERSION ?= v1.11.1.1
 
 TAG_LATEST ?= false
 
