@@ -59,6 +59,8 @@ type itemBackupper struct {
 
 	itemHookHandler                    hook.ItemHookHandler
 	snapshotLocationVolumeSnapshotters map[string]velero.VolumeSnapshotter
+
+	excludedPvcs map[string]bool
 }
 
 // backupItem backs up an individual item to tarWriter. The item may be excluded based on the
@@ -105,6 +107,30 @@ func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstr
 	if metadata.GetDeletionTimestamp() != nil {
 		log.Info("Skipping item because it's being deleted.")
 		return false, nil
+	}
+
+	if ib.excludedPvcs != nil {
+		switch groupResource {
+		case kuberesource.PersistentVolumes:
+			pv := new(corev1api.PersistentVolume)
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pv); err != nil {
+				log.Errorf("Failed to convert unstructured PV %s to PersistentVolume structure: %v", metadata.GetName(), err)
+				return false, err
+			}
+
+			pvcPath := pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+			if _, isExcluded := ib.excludedPvcs[pvcPath]; isExcluded {
+				log.Infof("Excluding PV %s for PVC %s because it is excluded from backup", metadata.GetName(), pvcPath)
+				return false, nil
+			}
+
+		case kuberesource.PersistentVolumeClaims:
+			pvcPath := metadata.GetNamespace() + "/" + metadata.GetName()
+			if _, isExcluded := ib.excludedPvcs[pvcPath]; isExcluded {
+				log.Infof("Excluding PVC %s because it is excluded from backup", pvcPath)
+				return false, nil
+			}
+		}
 	}
 
 	key := itemKey{

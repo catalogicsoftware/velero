@@ -60,7 +60,7 @@ HUGO_IMAGE := hugo-builder
 local : ARCH ?= $(shell go env GOOS)-$(shell go env GOARCH)
 ARCH ?= linux-amd64
 
-VERSION ?= v1.9.2.1
+VERSION ?= v1.9.2.2
 
 TAG_LATEST ?= false
 
