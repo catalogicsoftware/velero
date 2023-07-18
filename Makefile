@@ -372,4 +372,12 @@ test-e2e: local
 docker-build:
 	docker buildx create --name multiarch
 	docker buildx use multiarch
-	docker buildx build -t $(IMAGE):$(VERSION) --platform=linux/arm64,linux/amd64 -f Dockerfile-common . --push
+	docker buildx build -t $(IMAGE):$(VERSION) --platform=linux/arm64,linux/amd64 \
+        --build-arg=PKG=$(PKG) \
+        --build-arg=BIN=$(BIN) \
+        --build-arg=VERSION=$(VERSION) \
+        --build-arg=GIT_SHA=$(GIT_SHA) \
+        --build-arg=GIT_TREE_STATE=$(GIT_TREE_STATE) \
+        --build-arg=REGISTRY=$(REGISTRY) \
+        --build-arg=RESTIC_VERSION=$(RESTIC_VERSION) \
+        -f Dockerfile-common . --push
