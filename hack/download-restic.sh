@@ -23,6 +23,8 @@ set -o pipefail
 output_dir=${OUTPUT_DIR:-/output/usr/bin}
 restic_bin=${output_dir}/restic
 BIN=velero
+RESTIC_VERSION=0.13.1
+
 
 if [[ -z "${BIN}" ]]; then
     echo "BIN must be set"
