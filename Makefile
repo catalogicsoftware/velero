@@ -49,7 +49,7 @@ else
 	BUILDER_IMAGE_TAG := $(shell git log -1 --pretty=%h $(BUILDER_IMAGE_DOCKERFILE))
 endif
 
-BUILDER_IMAGE := $(REGISTRY)/build-image:$(BUILDER_IMAGE_TAG)
+BUILDER_IMAGE := velero/build-image:$(BUILDER_IMAGE_TAG)
 BUILDER_IMAGE_CACHED := $(shell docker images -q ${BUILDER_IMAGE} 2>/dev/null )
 
 HUGO_IMAGE := hugo-builder
@@ -368,3 +368,8 @@ gen-docs:
 .PHONY: test-e2e
 test-e2e: local
 	$(MAKE) -e VERSION=$(VERSION) -C test/e2e run
+
+docker-build:
+	docker buildx create --name multiarch
+	docker buildx use multiarch
+	docker buildx build -t $(IMAGE):$(VERSION) --platform=linux/arm64,linux/amd64 -f Dockerfile-common . --push
