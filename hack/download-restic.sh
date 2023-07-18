@@ -20,7 +20,7 @@ set -o pipefail
 
 # Use /output/usr/bin/ as the default output directory as this
 # is the path expected by the Velero Dockerfile.
-output_dir=${OUTPUT_DIR:-${TARGETARCH}/output/usr/bin}
+output_dir=${OUTPUT_DIR:-/${TARGETARCH}/output/usr/bin}
 restic_bin=${output_dir}/restic
 BIN=velero
 RESTIC_VERSION=0.13.1

@@ -44,14 +44,15 @@ ENV GOOS=${TARGETOS} \
     GOARCH=${TARGETARCH} \
     GOARM=${TARGETVARIANT}
 
-RUN mkdir -p ${TARGETARCH}/output/usr/bin && \
+RUN mkdir -p /${TARGETARCH}/output/usr/bin && \
     bash ./hack/download-restic.sh && \
     export GOARM=$( echo "${GOARM}" | cut -c2-) && \
-    go build -o ${TARGETARCH}/output/${BIN} \
+    export GOARCH=${TARGETARCH} && \
+    go build -o /${TARGETARCH}/output/${BIN} \
     -ldflags "${LDFLAGS}" github.com/vmware-tanzu/velero/cmd/velero
 
 FROM registry.access.redhat.com/ubi8/ubi:8.8-854
 ARG TARGETARCH
-COPY --from=builder ${TARGETARCH}/output /
+COPY --from=builder /${TARGETARCH}/output /
 
 USER nonroot:nonroot
