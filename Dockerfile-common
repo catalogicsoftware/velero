@@ -47,7 +47,7 @@ ENV GOOS=${TARGETOS} \
 RUN mkdir -p ${TARGETARCH}/output/usr/bin && \
     bash ./hack/download-restic.sh && \
     export GOARM=$( echo "${GOARM}" | cut -c2-) && \
-    go build -o /output/${BIN} \
+    go build -o ${TARGETARCH}/output/${BIN} \
     -ldflags "${LDFLAGS}" ${PKG}/cmd/${BIN}
 
 FROM registry.access.redhat.com/ubi8/ubi:8.8-854
