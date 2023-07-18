@@ -22,6 +22,7 @@ set -o pipefail
 # is the path expected by the Velero Dockerfile.
 output_dir=${OUTPUT_DIR:-/output/usr/bin}
 restic_bin=${output_dir}/restic
+BIN=velero
 
 if [[ -z "${BIN}" ]]; then
     echo "BIN must be set"
