@@ -28,7 +28,7 @@ IMAGE ?= $(REGISTRY)/$(BIN)
 
 # We allow the Dockerfile to be configurable to enable the use of custom Dockerfiles
 # that pull base images from different registries.
-VELERO_DOCKERFILE ?= Dockerfile
+VELERO_DOCKERFILE ?= Dockerfile-common
 BUILDER_IMAGE_DOCKERFILE ?= hack/build-image/Dockerfile
 
 # Calculate the realpath of the build-image Dockerfile as we `cd` into the hack/build
@@ -60,7 +60,7 @@ HUGO_IMAGE := hugo-builder
 local : ARCH ?= $(shell go env GOOS)-$(shell go env GOARCH)
 ARCH ?= linux-amd64
 
-VERSION ?= v1.9.2.2
+VERSION ?= v1.9.2.3
 
 TAG_LATEST ?= false
 
