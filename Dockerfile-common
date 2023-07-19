@@ -53,6 +53,6 @@ RUN mkdir -p /${TARGETARCH}/output/usr/bin && \
 
 FROM registry.access.redhat.com/ubi8/ubi:8.8-854
 ARG TARGETARCH
+RUN groupadd nogroup
 COPY --from=builder /${TARGETARCH}/output /
-
-USER nonroot:nonroot
+USER nobody:nogroup
