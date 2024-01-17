@@ -14,6 +14,7 @@
 
 # Velero binary build section
 FROM --platform=$BUILDPLATFORM golang:1.22.2-bookworm as velero-builder
+FROM golang:1.20.10-bullseye as velero-builder
 
 ARG GOPROXY
 ARG BIN
@@ -48,6 +49,7 @@ RUN mkdir -p /output/usr/bin && \
 
 # Restic binary build section
 FROM --platform=$BUILDPLATFORM golang:1.22.2-bookworm as restic-builder
+FROM golang:1.20.10-bullseye as restic-builder
 
 ARG BIN
 ARG TARGETOS
