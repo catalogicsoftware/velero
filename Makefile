@@ -119,6 +119,8 @@ GOOS = $(word 1, $(platform_temp))
 GOARCH = $(word 2, $(platform_temp))
 GOPROXY ?= https://proxy.golang.org
 GOBIN=$$(pwd)/.go/bin
+DOCKER_BUILDER ?= multiarch
+DOCKER_IMAGE_VERSION = ${DOCKER_IMAGE_VERSION}
 
 # If you want to build all binaries, see the 'all-build' rule.
 # If you want to build all containers, see the 'all-containers' rule.
@@ -129,6 +131,11 @@ all:
 build-%:
 	@$(MAKE) --no-print-directory ARCH=$* build
 	@$(MAKE) --no-print-directory ARCH=$* build BIN=velero-restore-helper
+
+docker-build: 
+	docker buildx create --name ${DOCKER_BUILDER}
+	docker buildx use ${DOCKER_BUILDER}
+	docker buildx build -t $(IMAGE):$(DOCKER_IMAGE_VERSION) --platform=linux/arm64,linux/amd64 -f Dockerfile . --push
 
 all-build: $(addprefix build-, $(CLI_PLATFORMS))
 
