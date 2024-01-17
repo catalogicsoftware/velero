@@ -184,7 +184,7 @@ shell: build-dirs build-env
 	@docker run \
 		-e GOFLAGS \
 		-e GOPROXY \
-		-i $(TTY) \
+		-i \
 		--rm \
 		-u $$(id -u):$$(id -g) \
 		-v "$$(pwd):/github.com/vmware-tanzu/velero:delegated" \
