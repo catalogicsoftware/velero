@@ -74,7 +74,9 @@ RUN mkdir -p /output/usr/bin && \
 # Velero image packing section
 FROM paketobuildpacks/run-jammy-tiny:0.2.38
 
-LABEL maintainer="Xun Jiang <jxun@vmware.com>"
+FROM gcr.io/distroless/base-nossl-debian11:latest
+
+LABEL maintainer="CloudCasa <support@cloudcasa.io>"
 
 COPY --from=velero-builder /output /
 
