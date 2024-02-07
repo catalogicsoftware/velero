@@ -47,30 +47,6 @@ RUN mkdir -p /output/usr/bin && \
     -ldflags "${LDFLAGS}" ${PKG}/cmd/velero-helper && \
     go clean -modcache -cache
 
-# Restic binary build section
-FROM --platform=$BUILDPLATFORM golang:1.22.2-bookworm as restic-builder
-FROM golang:1.21.6-bullseye as restic-builder
-
-ARG BIN
-ARG TARGETOS
-ARG TARGETARCH
-ARG TARGETVARIANT
-ARG RESTIC_VERSION
-
-ENV CGO_ENABLED=0 \
-    GO111MODULE=on \
-    GOPROXY=${GOPROXY} \
-    GOOS=${TARGETOS} \
-    GOARCH=${TARGETARCH} \
-    GOARM=${TARGETVARIANT}
-
-COPY . /go/src/github.com/vmware-tanzu/velero
-
-RUN mkdir -p /output/usr/bin && \
-    export GOARM=$(echo "${GOARM}" | cut -c2-) && \
-    /go/src/github.com/vmware-tanzu/velero/hack/build-restic.sh && \
-    go clean -modcache -cache
-
 # Velero image packing section
 FROM paketobuildpacks/run-jammy-tiny:0.2.38
 
@@ -79,8 +55,6 @@ FROM gcr.io/distroless/base-nossl-debian11:latest
 LABEL maintainer="CloudCasa <support@cloudcasa.io>"
 
 COPY --from=velero-builder /output /
-
-COPY --from=restic-builder /output /
 
 USER cnb:cnb
 
