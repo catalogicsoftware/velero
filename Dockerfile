@@ -66,9 +66,9 @@ RUN mkdir -p /output/usr/bin && \
     /go/src/github.com/vmware-tanzu/velero/hack/build-restic.sh
 
 # Velero image packing section
-FROM gcr.io/distroless/base-nossl-debian11@sha256:9523ef8cf054e23a81e722d231c6f604ab43a03c5b174b5c8386c78c0b6473d0
+FROM gcr.io/distroless/base-nossl-debian11:latest
 
-LABEL maintainer="Nolan Brubaker <brubakern@vmware.com>"
+LABEL maintainer="CloudCasa <support@cloudcasa.io>"
 
 COPY --from=velero-builder /output /
 
