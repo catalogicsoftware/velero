@@ -196,7 +196,6 @@ endif
 	--build-arg=GIT_SHA=$(GIT_SHA) \
 	--build-arg=GIT_TREE_STATE=$(GIT_TREE_STATE) \
 	--build-arg=REGISTRY=$(REGISTRY) \
-	--build-arg=RESTIC_VERSION=$(RESTIC_VERSION) \
 	-f $(VELERO_DOCKERFILE) .
 	@echo "container: $(IMAGE):$(VERSION)"
 ifeq ($(BUILDX_OUTPUT_TYPE)_$(REGISTRY), registry_velero)
