@@ -14,7 +14,6 @@
 
 # Velero binary build section
 FROM --platform=$BUILDPLATFORM golang:1.22.2-bookworm as velero-builder
-FROM golang:1.21.6-bullseye as velero-builder
 
 ARG GOPROXY
 ARG BIN
