@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/vmware-tanzu/velero/internal/catalogic"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/stringptr"
@@ -410,6 +411,12 @@ func GetVolumeSnapshotClassForStorageClass(
 	// multiple VolumeSnapshotClasses for the same driver with different
 	// values for the other fields in the spec.
 	for _, sc := range snapshotClasses.Items {
+		_, hasCloudcasaLabelSelector := sc.Labels[velerov1api.CloudcasaVolumeSnapshotClassSelectorLabel]
+		if sc.Driver == provisioner && hasCloudcasaLabelSelector {
+			return &sc, nil
+		}
+	}
+	for _, sc := range snapshotClasses.Items {
 		_, hasLabelSelector := sc.Labels[velerov1api.VolumeSnapshotClassSelectorLabel]
 		if sc.Driver == provisioner {
 			n += 1
@@ -690,7 +697,33 @@ func WaitUntilVSCHandleIsReady(
 	interval := 5 * time.Second
 	vsc := new(snapshotv1api.VolumeSnapshotContent)
 
-	err := wait.PollUntilContextTimeout(
+	var err error
+
+	// catalogic variables
+	var snapshotState string
+	var snapshotStateMessage string
+	jobID := volSnap.Labels["velero.io/backup-name"]
+
+	defer catalogic.DeleteSnapshotProgressConfigMap(log)
+	defer func(err error) {
+		uErr := catalogic.UpdateSnapshotProgress(nil, volSnap, nil, snapshotState, snapshotStateMessage, jobID, log)
+		if uErr != nil {
+			log.Error(err, "<SNAPSHOT PROGRESS UPDATE> Failed to update snapshot progress. Continuing...")
+		}
+	}(err)
+
+	config, err := catalogic.GetPluginConfig(log)
+	if err != nil {
+		return nil, errors.Wrap(err, "error getting plugin config")
+	}
+
+	if config.CsiSnapshotTimeout > 0 {
+		csiSnapshotTimeout = time.Duration(config.CsiSnapshotTimeout) * time.Minute
+	}
+
+	log.Infof("Waiting up to %v for CSI driver to reconcile volumesnapshot %s/%s", csiSnapshotTimeout, volSnap.Namespace, volSnap.Name)
+
+	err = wait.PollUntilContextTimeout(
 		context.Background(),
 		interval,
 		csiSnapshotTimeout,
@@ -703,6 +736,7 @@ func WaitUntilVSCHandleIsReady(
 				vs,
 			); err != nil {
 				return false,
+					// TODO: Should we handle this case as well?
 					errors.Wrapf(err, fmt.Sprintf(
 						"failed to get volumesnapshot %s/%s",
 						volSnap.Namespace, volSnap.Name),
@@ -712,6 +746,10 @@ func WaitUntilVSCHandleIsReady(
 			if vs.Status == nil || vs.Status.BoundVolumeSnapshotContentName == nil {
 				log.Infof("Waiting for CSI driver to reconcile volumesnapshot %s/%s. Retrying in %ds",
 					volSnap.Namespace, volSnap.Name, interval/time.Second)
+				snapshotStateMessage = fmt.Sprintf("Waiting for CSI driver to reconcile volumesnapshot %s/%s. Retrying in %ds",
+					volSnap.Namespace, volSnap.Name, interval/time.Second)
+				snapshotState = "pending"
+				log.Infof(snapshotStateMessage)
 				return false, nil
 			}
 
@@ -722,6 +760,10 @@ func WaitUntilVSCHandleIsReady(
 				},
 				vsc,
 			); err != nil {
+				snapshotStateMessage = fmt.Sprintf("failed to get volumesnapshotcontent %s for volumesnapshot %s/%s",
+					*vs.Status.BoundVolumeSnapshotContentName, vs.Namespace, vs.Name)
+				snapshotState = "error"
+				log.Error(snapshotStateMessage)
 				return false,
 					errors.Wrapf(
 						err,
@@ -745,6 +787,10 @@ func WaitUntilVSCHandleIsReady(
 					log.Warnf("VolumeSnapshotContent %s has error: %v",
 						vsc.Name, *vsc.Status.Error.Message)
 				}
+				snapshotStateMessage = fmt.Sprintf("Waiting for CSI driver to reconcile volumesnapshot %s/%s. Retrying in %ds",
+					volSnap.Namespace, volSnap.Name, interval/time.Second)
+				snapshotState = "pending"
+				log.Infof(snapshotStateMessage)
 				return false, nil
 			}
 
@@ -768,8 +814,20 @@ func WaitUntilVSCHandleIsReady(
 					"Timed out awaiting reconciliation of volumesnapshot %s/%s",
 					volSnap.Namespace, volSnap.Name)
 			}
+
+			snapshotStateMessage = fmt.Sprintf("Timed out awaiting reconciliation of volumesnapshot %s/%s", volSnap.Namespace, volSnap.Name)
+			snapshotState = "error"
+			log.Error(snapshotStateMessage)
 		}
 		return nil, err
+	}
+
+	if vsc != nil && vsc.Status != nil && vsc.Status.ReadyToUse != nil && *vsc.Status.ReadyToUse {
+		snapshotState = "completed"
+		snapshotStateMessage = "CSI Snapshot Complete"
+	} else {
+		snapshotState = "pending"
+		snapshotStateMessage = fmt.Sprintf("Waiting for volume snapshot %s to be ready to use.", *vsc.Status.SnapshotHandle)
 	}
 
 	return vsc, nil

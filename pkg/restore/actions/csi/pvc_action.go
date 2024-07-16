@@ -43,6 +43,8 @@ import (
 	uploaderUtil "github.com/vmware-tanzu/velero/pkg/uploader/util"
 	"github.com/vmware-tanzu/velero/pkg/util"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
+	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
+	csiutil "github.com/vmware-tanzu/velero/test/util/csi"
 )
 
 const (
@@ -51,6 +53,7 @@ const (
 	AnnStorageProvisioner     = "volume.kubernetes.io/storage-provisioner"
 	AnnBetaStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
 	AnnSelectedNode           = "volume.kubernetes.io/selected-node"
+	HarvesterhCiIoOwnedBy     = "harvesterhci.io/owned-by"
 )
 
 const (
@@ -160,6 +163,7 @@ func (p *pvcRestoreItemAction) Execute(
 			AnnSelectedNode,
 			velerov1api.VolumeSnapshotLabel,
 			velerov1api.DataUploadNameAnnotation,
+			HarvesterhCiIoOwnedBy,
 		},
 	)
 
@@ -493,41 +497,52 @@ func restoreFromVolumeSnapshot(
 	volumeSnapshotName string,
 	logger logrus.FieldLogger,
 ) error {
-	vs := new(snapshotv1api.VolumeSnapshot)
-	if err := crClient.Get(context.TODO(),
-		crclient.ObjectKey{
-			Namespace: newNamespace,
-			Name:      volumeSnapshotName,
-		},
-		vs,
-	); err != nil {
-		return errors.Wrapf(err,
-			fmt.Sprintf("Failed to get Volumesnapshot %s/%s to restore PVC %s/%s",
-				newNamespace, volumeSnapshotName, newNamespace, pvc.Name),
-		)
+	csiDriverName, err := GetCSIDriverName(pvc, logger)
+	if err != nil {
+		return err
 	}
-
-	if _, exists := vs.Annotations[velerov1api.VolumeSnapshotRestoreSize]; exists {
-		restoreSize, err := resource.ParseQuantity(
-			vs.Annotations[velerov1api.VolumeSnapshotRestoreSize])
-		if err != nil {
-			return errors.Wrapf(err, fmt.Sprintf(
-				"Failed to parse %s from annotation on Volumesnapshot %s/%s into restore size",
-				vs.Annotations[velerov1api.VolumeSnapshotRestoreSize], vs.Namespace, vs.Name))
+	if csiDriverName != "file.csi.azure.com" {
+		vs := new(snapshotv1api.VolumeSnapshot)
+		if err := crClient.Get(context.TODO(),
+			crclient.ObjectKey{
+				Namespace: newNamespace,
+				Name:      volumeSnapshotName,
+			},
+			vs,
+		); err != nil {
+			return errors.Wrapf(err,
+				fmt.Sprintf("Failed to get Volumesnapshot %s/%s to restore PVC %s/%s",
+					newNamespace, volumeSnapshotName, newNamespace, pvc.Name),
+			)
 		}
-		// It is possible that the volume provider allocated a larger
-		// capacity volume than what was requested in the backed up PVC.
-		// In this scenario the volumesnapshot of the PVC will end being
-		// larger than its requested storage size.  Such a PVC, on restore
-		// as-is, will be stuck attempting to use a VolumeSnapshot as a
-		// data source for a PVC that is not large enough.
-		// To counter that, here we set the storage request on the PVC
-		// to the larger of the PVC's storage request and the size of the
-		// VolumeSnapshot
-		setPVCStorageResourceRequest(pvc, restoreSize, logger)
-	}
 
-	resetPVCSpec(pvc, volumeSnapshotName)
+		if _, exists := vs.Annotations[velerov1api.VolumeSnapshotRestoreSize]; exists {
+			restoreSize, err := resource.ParseQuantity(
+				vs.Annotations[velerov1api.VolumeSnapshotRestoreSize])
+			if err != nil {
+				return errors.Wrapf(err, fmt.Sprintf(
+					"Failed to parse %s from annotation on Volumesnapshot %s/%s into restore size",
+					vs.Annotations[velerov1api.VolumeSnapshotRestoreSize], vs.Namespace, vs.Name))
+			}
+			// It is possible that the volume provider allocated a larger
+			// capacity volume than what was requested in the backed up PVC.
+			// In this scenario the volumesnapshot of the PVC will end being
+			// larger than its requested storage size.  Such a PVC, on restore
+			// as-is, will be stuck attempting to use a VolumeSnapshot as a
+			// data source for a PVC that is not large enough.
+			// To counter that, here we set the storage request on the PVC
+			// to the larger of the PVC's storage request and the size of the
+			// VolumeSnapshot
+			setPVCStorageResourceRequest(pvc, restoreSize, logger)
+		}
+
+		resetPVCSpec(pvc, volumeSnapshotName)
+	} else {
+		err := ProcessAzureRestore(pvc, volumeSnapshotName, logger)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -608,4 +623,98 @@ func NewPvcRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
 			crClient: crClient,
 		}, nil
 	}
+}
+
+func GetCSIDriverName(pvc *corev1api.PersistentVolumeClaim, log logrus.FieldLogger) (string, error) {
+	clientset, _, err := csiutil.GetClients()
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	// Get the Storage Class
+	var csiDriverName string
+	storageClassName := pvc.Spec.StorageClassName
+	if storageClassName != nil {
+		storageClass, err := clientset.StorageV1().StorageClasses().Get(context.TODO(), *storageClassName, metav1.GetOptions{})
+		if err != nil {
+			return "", errors.Wrapf(err, fmt.Sprintf("Failed to get StorageClass %s to check PVC %s/%s provisioner", *storageClassName, pvc.Namespace, pvc.Name))
+		}
+		csiDriverName = storageClass.Provisioner
+		log.Infof("Found StorageClass %s for PVC %s/%s", csiDriverName, pvc.Namespace, pvc.Name)
+	} else {
+		log.Infof("StorageClass is not set for PVC %s/%s", pvc.Namespace, pvc.Name)
+	}
+	return csiDriverName, nil
+}
+
+func ProcessAzureRestore(pvc *corev1api.PersistentVolumeClaim, volumeSnapshotName string, log logrus.FieldLogger) error {
+	clientset, snapClient, err := csiutil.GetClients()
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	// Get the Storage Class
+	var csiDriverName string
+	storageClassName := pvc.Spec.StorageClassName
+	if storageClassName != nil {
+		storageClass, err := clientset.StorageV1().StorageClasses().Get(context.TODO(), *storageClassName, metav1.GetOptions{})
+		if err != nil {
+			return errors.Wrapf(err, fmt.Sprintf("Failed to get StorageClass %s to check PVC %s/%s provisioner", *storageClassName, pvc.Namespace, pvc.Name))
+		}
+		csiDriverName = storageClass.Provisioner
+		log.Infof("Found StorageClass %s for PVC %s/%s", csiDriverName, pvc.Namespace, pvc.Name)
+	} else {
+		log.Infof("StorageClass is not set for PVC %s/%s", pvc.Namespace, pvc.Name)
+	}
+
+	if csiDriverName != "file.csi.azure.com" {
+		vs, err := snapClient.SnapshotV1().VolumeSnapshots(pvc.Namespace).Get(context.TODO(), volumeSnapshotName, metav1.GetOptions{})
+		if err != nil {
+			return errors.Wrapf(err, fmt.Sprintf("Failed to get Volumesnapshot %s/%s to restore PVC %s/%s", pvc.Namespace, volumeSnapshotName, pvc.Namespace, pvc.Name))
+		}
+
+		if _, exists := vs.Annotations[velerov1api.VolumeSnapshotRestoreSize]; exists {
+			restoreSize, err := resource.ParseQuantity(vs.Annotations[velerov1api.VolumeSnapshotRestoreSize])
+			if err != nil {
+				return errors.Wrapf(err, fmt.Sprintf("Failed to parse %s from annotation on Volumesnapshot %s/%s into restore size",
+					vs.Annotations[velerov1api.VolumeSnapshotRestoreSize], vs.Namespace, vs.Name))
+			}
+			// It is possible that the volume provider allocated a larger capacity volume than what was requested in the backed up PVC.
+			// In this scenario the volumesnapshot of the PVC will endup being larger than its requested storage size.
+			// Such a PVC, on restore as-is, will be stuck attempting to use a Volumesnapshot as a data source for a PVC that
+			// is not large enough.
+			// To counter that, here we set the storage request on the PVC to the larger of the PVC's storage request and the size of the
+			// VolumeSnapshot
+			setPVCStorageResourceRequest(pvc, restoreSize, log)
+		}
+		resetPVCSpec(pvc, volumeSnapshotName)
+	} else {
+		// Set annotation that the PVC users Azure File CSI driver
+		annotations := map[string]string{
+			"cloudcasa-csi-driver-name": "file.csi.azure.com",
+		}
+		kubeutil.AddAnnotations(&pvc.ObjectMeta, annotations)
+		log.Infof("Found Azure Files CSI driver. PVC data source will not be changed.")
+
+		// Add annotation to the PVC with VolumeSnapshotContent name
+		vscList, err := snapClient.SnapshotV1().VolumeSnapshotContents().List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			return errors.Wrapf(err, fmt.Sprintf("Failed to list VolumeSnapshotContents to restore PVC %s/%s", pvc.Namespace, pvc.Name))
+		}
+		var volumeSnapshotContentName string
+		for _, vsc := range vscList.Items {
+			if vsc.Spec.VolumeSnapshotRef.Name == volumeSnapshotName {
+				volumeSnapshotContentName = vsc.Name
+				break
+			}
+		}
+		if volumeSnapshotContentName == "" {
+			return fmt.Errorf("Failed to get VolumeSnapshotContent for VolumeSnapshot %s/%s", pvc.Namespace, volumeSnapshotName)
+		}
+		vscAnnotations := map[string]string{
+			"cloudcasa-volume-snapshot-content-name": volumeSnapshotContentName,
+		}
+		kubeutil.AddAnnotations(&pvc.ObjectMeta, vscAnnotations)
+	}
+	return nil
 }
