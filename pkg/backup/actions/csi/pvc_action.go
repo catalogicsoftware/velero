@@ -19,6 +19,7 @@ package csi
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/pkg/errors"
@@ -181,6 +182,19 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 			p.log.Infof("Skipping PVC %s/%s, associated PV %s with provisioner %s is not supported",
 				pvc.Namespace, pvc.Name, pv.Name, storageClass.Provisioner)
 			return nil, nil, true, nil
+		}
+	}
+
+	if backupMethod, found := config.StorageClassBackupMethodMap[*pvc.Spec.StorageClassName]; found {
+		if strings.HasPrefix(backupMethod, "LIVE") {
+			if *pvc.Spec.VolumeMode != corev1api.PersistentVolumeBlock {
+				p.log.Infof("Skipping PVC %s/%s with storage class %s and backup method %s",
+					pvc.Namespace, pvc.Name, *pvc.Spec.StorageClassName, backupMethod)
+				return nil, nil, true, nil
+			} else {
+				p.log.Infof("Ignoring PVC %s/%s backup method %s because it is a block volume",
+					pvc.Namespace, pvc.Name, backupMethod)
+			}
 		}
 	}
 
