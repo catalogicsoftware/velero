@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/velero/internal/catalogic"
@@ -41,6 +42,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/stringptr"
 	"github.com/vmware-tanzu/velero/pkg/util/stringslice"
+	util "github.com/vmware-tanzu/velero/test/util/csi"
 )
 
 const (
@@ -753,24 +755,64 @@ func WaitUntilVSCHandleIsReady(
 				return false, nil
 			}
 
-			if err := crClient.Get(
-				ctx,
-				crclient.ObjectKey{
-					Name: *vs.Status.BoundVolumeSnapshotContentName,
-				},
-				vsc,
-			); err != nil {
-				snapshotStateMessage = fmt.Sprintf("failed to get volumesnapshotcontent %s for volumesnapshot %s/%s",
-					*vs.Status.BoundVolumeSnapshotContentName, vs.Namespace, vs.Name)
-				snapshotState = "error"
-				log.Error(snapshotStateMessage)
-				return false,
-					errors.Wrapf(
+			// RetryOnConflict uses exponential backoff to avoid exhausting the apiserver
+			retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := crClient.Get(
+					ctx,
+					crclient.ObjectKey{
+						Name: *vs.Status.BoundVolumeSnapshotContentName,
+					},
+					vsc,
+				); err != nil {
+					snapshotStateMessage = fmt.Sprintf("failed to get volumesnapshotcontent %s for volumesnapshot %s/%s",
+						*vs.Status.BoundVolumeSnapshotContentName, vs.Namespace, vs.Name)
+					snapshotState = "error"
+					log.Error(snapshotStateMessage)
+					return errors.Wrapf(
 						err,
 						fmt.Sprintf("failed to get VolumeSnapshotContent %s for VolumeSnapshot %s/%s",
 							*vs.Status.BoundVolumeSnapshotContentName, vs.Namespace, vs.Name),
 					)
+				}
+
+				if vsc.Annotations == nil {
+					vsc.Annotations = make(map[string]string)
+				}
+				// Check here if the annotations contain the PVC name and namespace
+
+				var vscAnnotationsNeedsToBeUpdated bool
+
+				if _, ok := vsc.GetAnnotations()["cc-pvc-name"]; !ok {
+					if vs.Spec.Source.PersistentVolumeClaimName != nil {
+						vsc.GetAnnotations()["cc-pvc-name"] = *vs.Spec.Source.PersistentVolumeClaimName
+						vscAnnotationsNeedsToBeUpdated = true
+					}
+				}
+				if _, ok := vsc.GetAnnotations()["cc-pvc-namespace"]; !ok {
+					vsc.GetAnnotations()["cc-pvc-namespace"] = vs.GetNamespace()
+					vscAnnotationsNeedsToBeUpdated = true
+				}
+				if vscAnnotationsNeedsToBeUpdated {
+					err = nil
+					_, snapshotClient, err := util.GetClients()
+					if err != nil {
+						return errors.WithStack(err)
+					}
+					vsc, err = snapshotClient.SnapshotV1().VolumeSnapshotContents().Update(context.TODO(), vsc, metav1.UpdateOptions{})
+					if err != nil {
+						log.Infof("Failed to update VolumeSnapshotContent %s, Error is %v . Will backoff and try again...", *vs.Status.BoundVolumeSnapshotContentName, err)
+						return err
+					}
+					log.Infof("VolumeSnapshotContent %s successfully updated with PVC details", *vs.Status.BoundVolumeSnapshotContentName)
+				}
+				return nil
+			})
+			if retryErr != nil {
+				log.Errorf("Failed to update VolumeSnapshotContent %s with pvc details in annotations. Error is %v", *vs.Status.BoundVolumeSnapshotContentName, retryErr)
+				return false, errors.WithStack(retryErr)
 			}
+
+			// If its not present, then, update the volumesnapshotcontent object with this information
 
 			// we need to wait for the VolumeSnapshotContent
 			// to have a snapshot handle because during restore,
