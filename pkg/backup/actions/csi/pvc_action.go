@@ -58,7 +58,8 @@ type pvcBackupItemAction struct {
 
 // liveCopyDrivers is a list of drivers for which we will skip creating the snapshot and will copy data live
 // Must match liveCopyDrivers in amdslib/utils/utils.go
-var liveCopyDrivers = []string{"nfs.csi.k8s.io", "efs.csi.aws.com", "driver.longhorn.io"}
+var liveCopyDrivers = []string{"nfs.csi.k8s.io", "efs.csi.aws.com", "driver.longhorn.io", "linodebs.csi.linode.com",
+	"rancher.io/local-path", "k8s.io/minikube-hostpath"}
 
 // AppliesTo returns information indicating that the PVCBackupItemAction
 // should be invoked to backup PVCs.
