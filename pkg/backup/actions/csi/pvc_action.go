@@ -169,33 +169,10 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 		return nil, nil, false, errors.Wrap(err, "error getting storage class")
 	}
 
-	config, err := catalogic.GetPluginConfig(p.log)
-	if err != nil {
-		return nil, nil, false, errors.Wrap(err, "error getting plugin config")
-	}
-
-	for _, driver := range liveCopyDrivers {
-		if config.SnapshotLonghorn && (driver == "driver.longhorn.io") {
-			continue
-		}
-		if storageClass.Provisioner == driver {
-			p.log.Infof("Skipping PVC %s/%s, associated PV %s with provisioner %s is not supported",
-				pvc.Namespace, pvc.Name, pv.Name, storageClass.Provisioner)
-			return nil, nil, true, nil
-		}
-	}
-
-	if backupMethod, found := config.StorageClassBackupMethodMap[*pvc.Spec.StorageClassName]; found {
-		if strings.HasPrefix(backupMethod, "LIVE") {
-			if *pvc.Spec.VolumeMode != corev1api.PersistentVolumeBlock {
-				p.log.Infof("Skipping PVC %s/%s with storage class %s and backup method %s",
-					pvc.Namespace, pvc.Name, *pvc.Spec.StorageClassName, backupMethod)
-				return nil, nil, true, nil
-			} else {
-				p.log.Infof("Ignoring PVC %s/%s backup method %s because it is a block volume",
-					pvc.Namespace, pvc.Name, backupMethod)
-			}
-		}
+	if shouldSkipSnapshot, err := p.shouldSkipSnapshot(&pvc, pv.Name, storageClass.Provisioner); err != nil {
+		return nil, nil, false, err
+	} else if shouldSkipSnapshot {
+		return nil, nil, true, nil
 	}
 
 	p.log.Debugf("Fetching VolumeSnapshotClass for %s", storageClass.Provisioner)
@@ -644,4 +621,52 @@ func NewPvcBackupItemAction(f client.Factory) plugincommon.HandlerInitializer {
 			crClient: crClient,
 		}, nil
 	}
+}
+
+func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolumeClaim, pvName string, provisioner string) (bool, error) {
+	config, err := catalogic.GetPluginConfig(p.log)
+	if err != nil {
+		return false, errors.Wrap(err, "error getting plugin config")
+	}
+
+	if config.SnapshotLonghorn && (provisioner == "driver.longhorn.io") {
+		p.log.Infof("Longhorn PVC %s/%s will be snapshotted as SnapshotLonghorn is set", pvc.Namespace, pvc.Name)
+		return false, nil
+	}
+
+	for _, driver := range liveCopyDrivers {
+		if provisioner == driver {
+			p.log.Infof("PVC %s/%s, associated PV %s with provisioner %s is not supported for snapshotting", pvc.Namespace, pvc.Name,
+				pvName, provisioner)
+			return true, nil
+		}
+	}
+
+	if backupMethod, found := config.StorageClassBackupMethodMap[*pvc.Spec.StorageClassName]; found {
+		if backupMethod == "SNAPSHOT" {
+			return false, nil
+		}
+
+		if backupMethod == "SKIP" {
+			p.log.Infof("Skipping snapshot of PVC %s/%s because backupMethod is set to SKIP", pvc.Namespace, pvc.Name)
+			return true, nil
+		}
+
+		if strings.HasPrefix(backupMethod, "LIVE") {
+			if *pvc.Spec.VolumeMode != corev1api.PersistentVolumeBlock {
+				p.log.Infof("Skipping snapshot of PVC %s/%s with storage class %s and backup method %s", pvc.Namespace, pvc.Name,
+					*pvc.Spec.StorageClassName, backupMethod)
+				return true, nil
+			} else {
+				p.log.Infof("Ignoring PVC %s/%s backup method %s because it is a block volume", pvc.Namespace, pvc.Name, backupMethod)
+			}
+		}
+	}
+
+	if !config.SnapshotWherePossible {
+		p.log.Infof("Skipping snapshot of PVC %s/%s because SnapshotWherePossible is false", pvc.Namespace, pvc.Name)
+		return true, nil
+	}
+
+	return false, nil
 }
