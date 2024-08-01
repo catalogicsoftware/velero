@@ -311,10 +311,9 @@ func (p *pvcBackupItemAction) Execute(
 		catalogic.SetStaticAzureAnotation(&pvc, labels, storageClass, p.log)
 	}
 
-	annotations := map[string]string{
-		velerov1api.VolumeSnapshotLabel:                 vs.Name,
-		velerov1api.MustIncludeAdditionalItemAnnotation: "true",
-	}
+	annotations := labels
+	annotations[velerov1api.VolumeNamespaceLabel] = vs.Name
+	annotations[velerov1api.MustIncludeAdditionalItemAnnotation] = "true"
 
 	var additionalItems []velero.ResourceIdentifier
 	operationID := ""
