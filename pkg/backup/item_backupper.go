@@ -156,6 +156,11 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 			log.Info("Excluding item because resource is excluded")
 			return false, itemFiles, nil
 		}
+
+		if namespace == "" && groupResource == kuberesource.Namespaces && !ib.backupRequest.NamespaceIncludesExcludes.ShouldInclude(name) {
+			log.Infof("Excluding namespace %s because it is excluded", name)
+			return false, itemFiles, nil
+		}
 	}
 
 	if metadata.GetDeletionTimestamp() != nil {
