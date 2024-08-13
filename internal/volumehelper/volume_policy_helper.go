@@ -68,7 +68,8 @@ func (v *volumeHelperImpl) ShouldPerformSnapshot(obj runtime.Unstructured, group
 
 		pv, err = kubeutil.GetPVForPVC(pvc, v.client)
 		if err != nil {
-			v.logger.WithError(err).Errorf("fail to get PV for PVC %s", pvc.Namespace+"/"+pvc.Name)
+			// Due to this log message, some errors are counted twice. For this reason, we have commented it out.
+			//v.logger.WithError(err).Errorf("fail to get PV for PVC %s", pvc.Namespace+"/"+pvc.Name)
 			return false, err
 		}
 	}
