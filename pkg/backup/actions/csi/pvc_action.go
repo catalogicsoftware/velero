@@ -19,6 +19,7 @@ package csi
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
@@ -642,23 +643,36 @@ func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolume
 		}
 	}
 
-	if backupMethod, found := config.StorageClassBackupMethodMap[*pvc.Spec.StorageClassName]; found {
-		if backupMethod == "SNAPSHOT" {
+	setBackupMethod, isBackupMethodSet := config.StorageClassBackupMethodMap[*pvc.Spec.StorageClassName]
+
+	annotations := pvc.GetAnnotations()
+	if backupMethod, found := annotations["cloudcasa.io/backup-method"]; found {
+		backupMethod = strings.ToUpper(strings.TrimSpace(backupMethod))
+		if slices.Contains([]string{"SNAPSHOT", "LIVE_FROM_PVC", "LIVE_FROM_HOST_POD_VOL", "LIVE", "SKIP"}, backupMethod) {
+			setBackupMethod = backupMethod
+			isBackupMethodSet = true
+		} else {
+			p.log.Infof("Ignoring invalid backup method %s for PVC %s/%s", backupMethod, pvc.Namespace, pvc.Name)
+		}
+	}
+
+	if isBackupMethodSet {
+		if setBackupMethod == "SNAPSHOT" {
 			return false, nil
 		}
 
-		if backupMethod == "SKIP" {
+		if setBackupMethod == "SKIP" {
 			p.log.Infof("Skipping snapshot of PVC %s/%s because backupMethod is set to SKIP", pvc.Namespace, pvc.Name)
 			return true, nil
 		}
 
-		if strings.HasPrefix(backupMethod, "LIVE") {
+		if strings.HasPrefix(setBackupMethod, "LIVE") {
 			if *pvc.Spec.VolumeMode != corev1api.PersistentVolumeBlock {
 				p.log.Infof("Skipping snapshot of PVC %s/%s with storage class %s and backup method %s", pvc.Namespace, pvc.Name,
-					*pvc.Spec.StorageClassName, backupMethod)
+					*pvc.Spec.StorageClassName, setBackupMethod)
 				return true, nil
 			} else {
-				p.log.Infof("Ignoring PVC %s/%s backup method %s because it is a block volume", pvc.Namespace, pvc.Name, backupMethod)
+				p.log.Infof("Ignoring PVC %s/%s backup method %s because it is a block volume", pvc.Namespace, pvc.Name, setBackupMethod)
 			}
 		}
 	}
