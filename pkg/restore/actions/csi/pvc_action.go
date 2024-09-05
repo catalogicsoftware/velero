@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
@@ -502,11 +503,10 @@ func restoreFromVolumeSnapshot(
 	logger logrus.FieldLogger,
 	input *velero.RestoreItemActionExecuteInput,
 ) error {
-	csiDriverName, err := GetCSIDriverName(pvc, logger)
-	if err != nil {
-		return err
-	}
-	if csiDriverName != "file.csi.azure.com" {
+
+	annotations := input.Restore.Annotations
+	_, azureFilesRestoreWithCloudCasaMover := annotations["cloudcasa-restore-from-azure-files-snapshot"]
+	if !azureFilesRestoreWithCloudCasaMover {
 		vs := new(snapshotv1api.VolumeSnapshot)
 		if err := crClient.Get(context.TODO(),
 			crclient.ObjectKey{
@@ -670,7 +670,7 @@ func ProcessAzureRestore(pvc *corev1api.PersistentVolumeClaim, volumeSnapshotNam
 	}
 	var volumeSnapshotContentName string
 	for _, vsc := range vscList.Items {
-		if vsc.Spec.VolumeSnapshotRef.Name == volumeSnapshotName {
+		if vsc.Spec.VolumeSnapshotRef.Name == volumeSnapshotName && strings.HasPrefix(vsc.Name, "snapcontent-") {
 			volumeSnapshotContentName = vsc.Name
 			break
 		}

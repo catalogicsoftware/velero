@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	"github.com/vmware-tanzu/velero/pkg/label"
@@ -93,14 +92,13 @@ func (p *volumeSnapshotRestoreItemAction) Execute(
 
 	// Check for VolumeSnapshotClass. If it uses "file.csi.azure.com" driver,
 	// skip VolumeSnapshotRestore action.
-	csiDriverName, exists := vs.Annotations[volume.CSIDriverNameAnnotation]
-	if exists {
-		if csiDriverName == "file.csi.azure.com" {
-			p.log.Infof("Found Azure Files CSI driver. VolumeSnapshot will not be restored.")
-			return &velero.RestoreItemActionExecuteOutput{
-				SkipRestore: true,
-			}, nil
-		}
+	annotations := input.Restore.Annotations
+	_, azureFilesRestoreWithCloudCasaMover := annotations["cloudcasa-restore-from-azure-files-snapshot"]
+	if azureFilesRestoreWithCloudCasaMover {
+		p.log.Infof("Azure Files restore will be performed using CloudCasa Azure Files Mover. VolumeSnapshot will not be restored.")
+		return &velero.RestoreItemActionExecuteOutput{
+			SkipRestore: true,
+		}, nil
 	}
 
 	// If cross-namespace restore is configured, change the namespace
