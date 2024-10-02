@@ -504,50 +504,70 @@ func restoreFromVolumeSnapshot(
 	input *velero.RestoreItemActionExecuteInput,
 ) error {
 
+	// Check if Azure Files should be restored using CSI or CloudCasa Azure Files Mover method.
 	annotations := input.Restore.Annotations
 	_, azureFilesRestoreWithCloudCasaMover := annotations["cloudcasa-restore-from-azure-files-snapshot"]
-	if !azureFilesRestoreWithCloudCasaMover {
-		vs := new(snapshotv1api.VolumeSnapshot)
-		if err := crClient.Get(context.TODO(),
-			crclient.ObjectKey{
-				Namespace: newNamespace,
-				Name:      volumeSnapshotName,
-			},
-			vs,
-		); err != nil {
-			return errors.Wrapf(err,
-				fmt.Sprintf("Failed to get Volumesnapshot %s/%s to restore PVC %s/%s",
-					newNamespace, volumeSnapshotName, newNamespace, pvc.Name),
-			)
-		}
-
-		if _, exists := vs.Annotations[velerov1api.VolumeSnapshotRestoreSize]; exists {
-			restoreSize, err := resource.ParseQuantity(
-				vs.Annotations[velerov1api.VolumeSnapshotRestoreSize])
-			if err != nil {
-				return errors.Wrapf(err, fmt.Sprintf(
-					"Failed to parse %s from annotation on Volumesnapshot %s/%s into restore size",
-					vs.Annotations[velerov1api.VolumeSnapshotRestoreSize], vs.Namespace, vs.Name))
-			}
-			// It is possible that the volume provider allocated a larger
-			// capacity volume than what was requested in the backed up PVC.
-			// In this scenario the volumesnapshot of the PVC will end being
-			// larger than its requested storage size.  Such a PVC, on restore
-			// as-is, will be stuck attempting to use a VolumeSnapshot as a
-			// data source for a PVC that is not large enough.
-			// To counter that, here we set the storage request on the PVC
-			// to the larger of the PVC's storage request and the size of the
-			// VolumeSnapshot
-			setPVCStorageResourceRequest(pvc, restoreSize, logger)
-		}
-
-		resetPVCSpec(pvc, volumeSnapshotName)
-	} else {
-		err := ProcessAzureRestore(pvc, volumeSnapshotName, input.Restore, logger)
-		if err != nil {
-			return err
-		}
+	clientset, _, err := csiutil.GetClients()
+	if err != nil {
+		return errors.WithStack(err)
 	}
+
+	// Get CSI Driver name
+	var csiDriverName string
+	storageClassName := pvc.Spec.StorageClassName
+	if storageClassName != nil {
+		storageClass, err := clientset.StorageV1().StorageClasses().Get(context.TODO(), *storageClassName, metav1.GetOptions{})
+		if err != nil {
+			return errors.Wrapf(err, fmt.Sprintf("Failed to get StorageClass %s to check PVC %s/%s provisioner", *storageClassName, pvc.Namespace, pvc.Name))
+		}
+		csiDriverName = storageClass.Provisioner
+		logger.Infof("Found StorageClass %s for PVC %s/%s", csiDriverName, pvc.Namespace, pvc.Name)
+	} else {
+		logger.Infof("StorageClass is not set for PVC %s/%s", pvc.Namespace, pvc.Name)
+	}
+
+	// Azure Files restore using CloudCasa method
+	if azureFilesRestoreWithCloudCasaMover && csiDriverName == "file.csi.azure.com" {
+		logger.Infof("Processing Azure Files Restore using CloudCasa method. PVC %s/%s. CSI Driver: %s", pvc.Namespace, pvc.Name, csiDriverName)
+		return ProcessAzureRestore(pvc, volumeSnapshotName, input.Restore, logger)
+	}
+
+	// Regular CSI snapshot restore
+	vs := new(snapshotv1api.VolumeSnapshot)
+	if err := crClient.Get(context.TODO(),
+		crclient.ObjectKey{
+			Namespace: newNamespace,
+			Name:      volumeSnapshotName,
+		},
+		vs,
+	); err != nil {
+		return errors.Wrapf(err,
+			fmt.Sprintf("Failed to get Volumesnapshot %s/%s to restore PVC %s/%s",
+				newNamespace, volumeSnapshotName, newNamespace, pvc.Name),
+		)
+	}
+
+	if _, exists := vs.Annotations[velerov1api.VolumeSnapshotRestoreSize]; exists {
+		restoreSize, err := resource.ParseQuantity(
+			vs.Annotations[velerov1api.VolumeSnapshotRestoreSize])
+		if err != nil {
+			return errors.Wrapf(err, fmt.Sprintf(
+				"Failed to parse %s from annotation on Volumesnapshot %s/%s into restore size",
+				vs.Annotations[velerov1api.VolumeSnapshotRestoreSize], vs.Namespace, vs.Name))
+		}
+		// It is possible that the volume provider allocated a larger
+		// capacity volume than what was requested in the backed up PVC.
+		// In this scenario the volumesnapshot of the PVC will end being
+		// larger than its requested storage size.  Such a PVC, on restore
+		// as-is, will be stuck attempting to use a VolumeSnapshot as a
+		// data source for a PVC that is not large enough.
+		// To counter that, here we set the storage request on the PVC
+		// to the larger of the PVC's storage request and the size of the
+		// VolumeSnapshot
+		setPVCStorageResourceRequest(pvc, restoreSize, logger)
+	}
+
+	resetPVCSpec(pvc, volumeSnapshotName)
 
 	return nil
 }

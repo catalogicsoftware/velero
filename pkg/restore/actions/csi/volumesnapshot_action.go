@@ -90,17 +90,6 @@ func (p *volumeSnapshotRestoreItemAction) Execute(
 			errors.Wrapf(err, "failed to convert input.Item from unstructured")
 	}
 
-	// Check for VolumeSnapshotClass. If it uses "file.csi.azure.com" driver,
-	// skip VolumeSnapshotRestore action.
-	annotations := input.Restore.Annotations
-	_, azureFilesRestoreWithCloudCasaMover := annotations["cloudcasa-restore-from-azure-files-snapshot"]
-	if azureFilesRestoreWithCloudCasaMover {
-		p.log.Infof("Azure Files restore will be performed using CloudCasa Azure Files Mover. VolumeSnapshot will not be restored.")
-		return &velero.RestoreItemActionExecuteOutput{
-			SkipRestore: true,
-		}, nil
-	}
-
 	// If cross-namespace restore is configured, change the namespace
 	// for VolumeSnapshot object to be restored
 	newNamespace, ok := input.Restore.Spec.NamespaceMapping[vs.GetNamespace()]
@@ -125,6 +114,17 @@ func (p *volumeSnapshotRestoreItemAction) Execute(
 			return nil, errors.Errorf(
 				"VolumeSnapshot %s/%s does not have a %s annotation",
 				vs.Namespace, vs.Name, velerov1api.DriverNameAnnotation)
+		}
+
+		// Check for VolumeSnapshotClass. If it uses "file.csi.azure.com" driver,
+		// skip VolumeSnapshotRestore action.
+		annotations := input.Restore.Annotations
+		_, azureFilesRestoreWithCloudCasaMover := annotations["cloudcasa-restore-from-azure-files-snapshot"]
+		if azureFilesRestoreWithCloudCasaMover && csiDriverName == "file.csi.azure.com" {
+			p.log.Infof("Azure Files restore will be performed using CloudCasa Azure Files Mover. VolumeSnapshot will not be restored.")
+			return &velero.RestoreItemActionExecuteOutput{
+				SkipRestore: true,
+			}, nil
 		}
 
 		p.log.Debugf("Set VolumeSnapshotContent %s/%s DeletionPolicy to Retain to make sure VS deletion in namespace will not delete Snapshot on cloud provider.",
