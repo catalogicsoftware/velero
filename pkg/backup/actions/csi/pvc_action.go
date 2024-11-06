@@ -147,6 +147,7 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 	skip bool,
 	err error,
 ) {
+	jobID := backup.Name
 	p.log.Debugf("Fetching storage class for PV %s", *pvc.Spec.StorageClassName)
 	storageClass = new(storagev1api.StorageClass)
 	if err := p.crClient.Get(
@@ -162,7 +163,7 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 			nil,
 			"error",
 			message,
-			backup.Name,
+			jobID,
 			p.log,
 		)
 		if uErr != nil {
@@ -171,7 +172,7 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 		return nil, nil, false, errors.Wrap(err, "error getting storage class")
 	}
 
-	if shouldSkipSnapshot, err := p.shouldSkipSnapshot(&pvc, pv.Name, storageClass.Provisioner); err != nil {
+	if shouldSkipSnapshot, err := p.shouldSkipSnapshot(&pvc, pv.Name, storageClass.Provisioner, jobID); err != nil {
 		return nil, nil, false, err
 	} else if shouldSkipSnapshot {
 		return nil, nil, true, nil
@@ -624,8 +625,10 @@ func NewPvcBackupItemAction(f client.Factory) plugincommon.HandlerInitializer {
 	}
 }
 
-func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolumeClaim, pvName string, provisioner string) (bool, error) {
-	config, err := catalogic.GetPluginConfig(p.log)
+func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolumeClaim, pvName string, provisioner string,
+	jobID string) (bool, error) {
+
+	config, err := catalogic.GetPluginConfig(jobID, p.log)
 	if err != nil {
 		return false, errors.Wrap(err, "error getting plugin config")
 	}

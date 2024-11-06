@@ -706,7 +706,7 @@ func WaitUntilVSCHandleIsReady(
 	var snapshotStateMessage string
 	jobID := volSnap.Labels["velero.io/backup-name"]
 
-	defer catalogic.DeleteSnapshotProgressConfigMap(log)
+	defer catalogic.DeleteSnapshotProgressConfigMap(jobID, log)
 	defer func(err error) {
 		uErr := catalogic.UpdateSnapshotProgress(nil, volSnap, nil, snapshotState, snapshotStateMessage, jobID, log)
 		if uErr != nil {
@@ -714,7 +714,7 @@ func WaitUntilVSCHandleIsReady(
 		}
 	}(err)
 
-	config, err := catalogic.GetPluginConfig(log)
+	config, err := catalogic.GetPluginConfig(jobID, log)
 	if err != nil {
 		return nil, errors.Wrap(err, "error getting plugin config")
 	}

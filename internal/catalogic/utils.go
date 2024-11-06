@@ -79,7 +79,7 @@ func UpdateSnapshotProgress(
 			APIVersion: "v1",
 		},
 		ObjectMeta: v1.ObjectMeta{
-			Name:      SnapshotProgressUpdateConfigMapName,
+			Name:      SnapshotProgressUpdateConfigMapPrefix + jobID,
 			Namespace: CloudCasaNamespace,
 		},
 		BinaryData: requestData,
@@ -104,7 +104,9 @@ func UpdateSnapshotProgress(
 	log.Info("Update Snapshot Progress -", "Created clientset")
 	//Create or update the configmap
 	var mcm *corev1api.ConfigMap
-	if _, mErr := clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Get(context.TODO(), SnapshotProgressUpdateConfigMapName, v1.GetOptions{}); kerror.IsNotFound(mErr) {
+	if _, mErr := clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Get(context.TODO(), SnapshotProgressUpdateConfigMapPrefix+jobID,
+		v1.GetOptions{}); kerror.IsNotFound(mErr) {
+
 		mcm, err = clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Create(context.TODO(), &moverConfigMap, v1.CreateOptions{})
 		if err != nil {
 			newErr := errors.Wrap(err, "Failed to create configmap to report snapshotprogress")
@@ -127,7 +129,7 @@ func UpdateSnapshotProgress(
 }
 
 // DeleteSnapshotProgressConfigMap deletes the configmap used to report snapshot progress
-func DeleteSnapshotProgressConfigMap(log logrus.FieldLogger) {
+func DeleteSnapshotProgressConfigMap(jobID string, log logrus.FieldLogger) {
 	// creates the in-cluster config
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -138,24 +140,26 @@ func DeleteSnapshotProgressConfigMap(log logrus.FieldLogger) {
 	if err != nil {
 		log.Error(errors.Wrap(err, "Failed to create in-cluster clientset"))
 	}
-	err = clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Delete(context.TODO(), SnapshotProgressUpdateConfigMapName, v1.DeleteOptions{})
+	snapshotProgressUpdateConfigMapName := SnapshotProgressUpdateConfigMapPrefix + jobID
+	err = clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Delete(context.TODO(), snapshotProgressUpdateConfigMapName, v1.DeleteOptions{})
 	if err != nil {
 		log.Error(errors.Wrap(err, "Failed to delete configmap used to report snapshot progress"))
 	} else {
-		log.Info("Deleted configmap used to report snapshot progress", "Configmap Name", SnapshotProgressUpdateConfigMapName)
+		log.Info("Deleted configmap used to report snapshot progress", "Configmap Name", snapshotProgressUpdateConfigMapName)
 	}
 }
 
 // GetPluginConfig reads the configmap that contains config parameters for this plugin
-func GetPluginConfig(log logrus.FieldLogger) (*PluginConfig, error) {
+func GetPluginConfig(jobID string, log logrus.FieldLogger) (*PluginConfig, error) {
 	clientset, err := GetClientset(log)
 	if err != nil {
 		return nil, err
 	}
 
-	configMap, err := clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Get(context.TODO(), VeleroCsiPluginConfigMapName, v1.GetOptions{})
+	veleroCsiPluginConfigMapName := VeleroCsiPluginConfigMapPrefix + jobID
+	configMap, err := clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Get(context.TODO(), veleroCsiPluginConfigMapName, v1.GetOptions{})
 	if err != nil {
-		log.Error(errors.Wrapf(err, "Failed to get %q configmap in %q namespace", VeleroCsiPluginConfigMapName, CloudCasaNamespace))
+		log.Error(errors.Wrapf(err, "Failed to get %q configmap in %q namespace", veleroCsiPluginConfigMapName, CloudCasaNamespace))
 		return nil, err
 	}
 
@@ -163,7 +167,7 @@ func GetPluginConfig(log logrus.FieldLogger) (*PluginConfig, error) {
 	snapshotWherePossible, err := strconv.ParseBool(snapshotWherePossibleString)
 	if err != nil {
 		log.Error(errors.Wrapf(err, "Failed to parse snapshotWherePossible value %q from %q", snapshotWherePossibleString,
-			VeleroCsiPluginConfigMapName))
+			veleroCsiPluginConfigMapName))
 		return nil, err
 	}
 	if snapshotWherePossible {
@@ -175,7 +179,7 @@ func GetPluginConfig(log logrus.FieldLogger) (*PluginConfig, error) {
 	snapshotLonghornString := string(configMap.BinaryData["snapshotLonghorn"])
 	snapshotLonghorn, err := strconv.ParseBool(snapshotLonghornString)
 	if err != nil {
-		log.Error(errors.Wrapf(err, "Failed to parse snapshotLonghorn value %q from %q", snapshotLonghornString, VeleroCsiPluginConfigMapName))
+		log.Error(errors.Wrapf(err, "Failed to parse snapshotLonghorn value %q from %q", snapshotLonghornString, veleroCsiPluginConfigMapName))
 		return nil, err
 	}
 	if snapshotLonghorn {
@@ -185,7 +189,7 @@ func GetPluginConfig(log logrus.FieldLogger) (*PluginConfig, error) {
 	csiSnapshotTimeoutString := string(configMap.BinaryData["csiSnapshotTimeout"])
 	csiSnapshotTimeout, err := strconv.Atoi(csiSnapshotTimeoutString)
 	if err != nil {
-		log.Error(errors.Wrapf(err, "Failed to parse csiSnapshotTimeout value %q from %q", csiSnapshotTimeoutString, VeleroCsiPluginConfigMapName))
+		log.Error(errors.Wrapf(err, "Failed to parse csiSnapshotTimeout value %q from %q", csiSnapshotTimeoutString, veleroCsiPluginConfigMapName))
 		return nil, err
 	}
 	if csiSnapshotTimeout != 0 {
@@ -196,7 +200,7 @@ func GetPluginConfig(log logrus.FieldLogger) (*PluginConfig, error) {
 	var storageClassBackupMethodMap map[string]string
 	if err := json.Unmarshal(storageClassBackupMethodMapBytes, &storageClassBackupMethodMap); err != nil {
 		log.Error(errors.Wrapf(err, "Failed to parse storageClassBackupMethodMap value %q from %q", string(storageClassBackupMethodMapBytes),
-			VeleroCsiPluginConfigMapName))
+			veleroCsiPluginConfigMapName))
 		return nil, err
 	}
 	if len(storageClassBackupMethodMap) != 0 {
