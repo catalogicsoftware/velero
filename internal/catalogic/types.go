@@ -27,13 +27,13 @@ type PluginConfig struct {
 const (
 	CloudCasaNamespace = "cloudcasa-io"
 
-	// Name of configmap used to to report progress of snapshot
-	SnapshotProgressUpdateConfigMapName = "cloudcasa-io-snapshot-updater"
+	// Prefix name of configmap used to to report progress of snapshot
+	SnapshotProgressUpdateConfigMapPrefix = "cloudcasa-io-snapshot-updater-"
 
 	TimeFormat = "2006-01-06 15:04:05 UTC: "
 
-	// VeleroCsiPluginConfigMapName is the name of the configmap used to store configuration parameters
-	VeleroCsiPluginConfigMapName = "cloudcasa-io-velero-csi-plugin"
+	// VeleroCsiPluginConfigMapPrefix is the name prefix of the configmap used to store configuration parameters
+	VeleroCsiPluginConfigMapPrefix = "cloudcasa-io-velero-csi-plugin-"
 )
 
 const (
