@@ -100,8 +100,8 @@ type BackupRepository struct {
 // the k8s:deepcopy marker will no longer be needed and should be removed.
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
-// +kubebuilder:rbac:groups=velero.io,resources=backuprepositories,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=backuprepositories/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backuprepositories,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backuprepositories/status,verbs=get;update;patch
 
 // BackupRepositoryList is a list of BackupRepositories.
 type BackupRepositoryList struct {

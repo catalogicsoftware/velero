@@ -148,8 +148,8 @@ type DataDownload struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:generate=true
 // +kubebuilder:object:root=true
-// +kubebuilder:rbac:groups=velero.io,resources=datadownloads,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=datadownloads/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=datadownloads,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=datadownloads/status,verbs=get;update;patch
 
 // DataDownloadList is a list of DataDownloads.
 type DataDownloadList struct {

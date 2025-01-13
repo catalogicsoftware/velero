@@ -96,9 +96,9 @@ func (c *backupOperationsReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(c)
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=get;list;watch;update
-// +kubebuilder:rbac:groups=velero.io,resources=backups/status,verbs=get
-// +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations,verbs=get
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backups,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backups/status,verbs=get
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backupstoragelocations,verbs=get
 
 func (c *backupOperationsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := c.logger.WithField("backup operations for backup", req.String())

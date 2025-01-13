@@ -72,8 +72,8 @@ type PodVolumeRestoreReconciler struct {
 	dataPathMgr       *datapath.Manager
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=podvolumerestores,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=podvolumerestores/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=podvolumerestores,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=podvolumerestores/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumerclaims,verbs=get

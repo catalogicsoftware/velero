@@ -108,9 +108,9 @@ func (r *backupDeletionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=deletebackuprequests,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=deletebackuprequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=deletebackuprequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=deletebackuprequests/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backups,verbs=delete
 
 func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.logger.WithFields(logrus.Fields{

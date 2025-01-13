@@ -90,8 +90,8 @@ func (r *restoreFinalizerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=get;list;watch;update
-// +kubebuilder:rbac:groups=velero.io,resources=restores/status,verbs=get
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=restores,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=restores/status,verbs=get
 func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.logger.WithField("restore finalizer", req.String())
 	log.Debug("restoreFinalizerReconciler getting restore")

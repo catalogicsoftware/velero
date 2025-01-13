@@ -91,8 +91,8 @@ type ServerStatusRequestStatus struct {
 // the k8s:deepcopy marker will no longer be needed and should be removed.
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
-// +kubebuilder:rbac:groups=velero.io,resources=serverstatusrequests,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=serverstatusrequests/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=serverstatusrequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=serverstatusrequests/status,verbs=get;update;patch
 
 // ServerStatusRequestList is a list of ServerStatusRequests.
 type ServerStatusRequestList struct {

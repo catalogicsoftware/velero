@@ -92,11 +92,11 @@ func (c *gcReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(c)
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=get;list;watch;update
-// +kubebuilder:rbac:groups=velero.io,resources=backups/status,verbs=get
-// +kubebuilder:rbac:groups=velero.io,resources=deletebackuprequests,verbs=get;list;watch;create;
-// +kubebuilder:rbac:groups=velero.io,resources=deletebackuprequests/status,verbs=get
-// +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations,verbs=get
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backups,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backups/status,verbs=get
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=deletebackuprequests,verbs=get;list;watch;create;
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=deletebackuprequests/status,verbs=get
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backupstoragelocations,verbs=get
 
 func (c *gcReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := c.logger.WithField("gc backup", req.String())
