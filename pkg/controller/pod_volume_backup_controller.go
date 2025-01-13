@@ -77,8 +77,8 @@ type PodVolumeBackupReconciler struct {
 	dataPathMgr       *datapath.Manager
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=podvolumebackups,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=podvolumebackups/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=podvolumebackups,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=podvolumebackups/status,verbs=get;update;patch
 
 func (r *PodVolumeBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.logger.WithFields(logrus.Fields{

@@ -120,8 +120,8 @@ type BackupStorageLocation struct {
 // the k8s:deepcopy marker will no longer be needed and should be removed.
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
-// +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backupstoragelocations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backupstoragelocations/status,verbs=get;update;patch
 
 // BackupStorageLocationList contains a list of BackupStorageLocation
 type BackupStorageLocationList struct {

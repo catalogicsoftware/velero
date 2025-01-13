@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package v2alpha1 contains API Schema definitions for the velero v2alpha1 API group
 // +kubebuilder:object:generate=true
-// +groupName=velero.io
+// +groupName=cloudcasa.io
 package v2alpha1
 
 import (
@@ -26,7 +26,7 @@ import (
 
 var (
 	// SchemeGroupVersion is group version used to register these objects
-	SchemeGroupVersion = schema.GroupVersion{Group: "velero.io", Version: "v2alpha1"}
+	SchemeGroupVersion = schema.GroupVersion{Group: "cloudcasa.io", Version: "v2alpha1"}
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme
 	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)

@@ -73,8 +73,8 @@ func NewBackupStorageLocationReconciler(
 	}
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backupstoragelocations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backupstoragelocations/status,verbs=get;update;patch
 
 func (r *backupStorageLocationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var unavailableErrors []string

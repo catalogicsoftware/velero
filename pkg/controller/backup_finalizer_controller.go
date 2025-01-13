@@ -78,8 +78,8 @@ func NewBackupFinalizerReconciler(
 	}
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=backups/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backups,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backups/status,verbs=get;update;patch
 
 func (r *backupFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.log.WithFields(logrus.Fields{

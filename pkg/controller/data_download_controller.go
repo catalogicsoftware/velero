@@ -86,8 +86,8 @@ func NewDataDownloadReconciler(client client.Client, kubeClient kubernetes.Inter
 	}
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=datadownloads,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=datadownloads/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=datadownloads,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=datadownloads/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumerclaims,verbs=get
