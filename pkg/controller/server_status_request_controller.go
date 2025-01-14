@@ -72,8 +72,8 @@ func NewServerStatusRequestReconciler(
 	}
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=serverstatusrequests,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=serverstatusrequests/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=serverstatusrequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=serverstatusrequests/status,verbs=get;update;patch
 
 func (r *serverStatusRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.log.WithFields(logrus.Fields{
