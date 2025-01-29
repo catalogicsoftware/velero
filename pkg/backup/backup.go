@@ -122,8 +122,8 @@ type veleroConfig struct {
 const (
 	CloudCasaNamespace = "cloudcasa-io"
 
-	// VeleroConfigMapName is the name of the configmap used to store configuration parameters
-	VeleroConfigMapName = "cloudcasa-io-velero-config"
+	// VeleroConfigMapPrefix is the name prefix of the configmap used to store configuration parameters
+	VeleroConfigMapPrefix = "cloudcasa-io-velero-config-"
 )
 
 func (i *itemKey) String() string {
@@ -341,7 +341,7 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		resourcePolicy = backupRequest.ResPolicies
 	}
 
-	veleroConfig, err := GetVeleroConfig(log)
+	veleroConfig, err := GetVeleroConfig(log, backupRequest.Backup.Name)
 	if err != nil {
 		return errors.Wrap(err, "Failed to get velero configuration")
 	}
@@ -927,19 +927,21 @@ func putVolumeInfos(
 }
 
 // GetVeleroConfig reads the configmap that contains Velero config parameters
-func GetVeleroConfig(log logrus.FieldLogger) (*veleroConfig, error) {
+func GetVeleroConfig(log logrus.FieldLogger, jobID string) (*veleroConfig, error) {
 	clientset, err := GetClientset(log)
 	if err != nil {
 		return nil, err
 	}
 
-	configMap, err := clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Get(context.TODO(), VeleroConfigMapName, metav1.GetOptions{})
+	configmapName := VeleroConfigMapPrefix + jobID
+	configMap, err := clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Get(context.TODO(), configmapName,
+		metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			log.Infof("Velero configuration configmap %q not found", VeleroConfigMapName)
+			log.Infof("Velero configuration configmap %q not found", configmapName)
 			return &veleroConfig{}, nil
 		}
-		log.Error(errors.Wrapf(err, "Failed to get %q configmap in %q namespace", VeleroConfigMapName, CloudCasaNamespace))
+		log.Error(errors.Wrapf(err, "Failed to get %q configmap in %q namespace", configmapName, CloudCasaNamespace))
 		return nil, err
 	}
 
@@ -947,7 +949,7 @@ func GetVeleroConfig(log logrus.FieldLogger) (*veleroConfig, error) {
 	if excludedPvcsJson, found := configMap.BinaryData["excludedPvcs"]; found {
 		if err := json.Unmarshal(excludedPvcsJson, &excludedPvcs); err != nil {
 			log.Error(errors.Wrapf(err, "Failed to parse excludedPvcs value %q from %q",
-				string(excludedPvcsJson), VeleroConfigMapName))
+				string(excludedPvcsJson), configmapName))
 			return nil, err
 		}
 	}
