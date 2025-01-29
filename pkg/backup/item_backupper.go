@@ -190,13 +190,19 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 		return false, itemFiles, nil
 	}
 
-	if ib.excludedPvcs != nil {
+	if ib.excludedPvcs != nil { // used only for the purpose of excluding unattached PVCs
 		switch groupResource {
 		case kuberesource.PersistentVolumes:
 			pv := new(corev1api.PersistentVolume)
 			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pv); err != nil {
 				log.Errorf("Failed to convert unstructured PV %s to PersistentVolume structure: %v", metadata.GetName(), err)
 				return false, itemFiles, err
+			}
+
+			// PV that does not have a ClaimRef is not attached to a PVC so it can't be attached to a pod either
+			if pv.Spec.ClaimRef == nil {
+				log.Infof("Excluding PV %s because it is not bound to a PVC", metadata.GetName())
+				return false, itemFiles, nil
 			}
 
 			pvcPath := pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
