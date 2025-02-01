@@ -249,16 +249,74 @@ type finalizerContext struct {
 	resourceTimeout  time.Duration
 }
 
-func (ctx *finalizerContext) execute() (results.Result, results.Result) { //nolint:unparam //temporarily ignore the lint report: result 0 is always nil (unparam)
+func (ctx *finalizerContext) execute() (results.Result, results.Result) {
+	//nolint:unparam //temporarily ignore the lint report: result 0 is always nil (unparam)
+
+	// Initialize empty result objects to track warnings and errors.
 	warnings, errs := results.Result{}, results.Result{}
 
-	// implement finalization tasks
+	// Step 1: Attempt to patch dynamically provisioned PersistentVolumes (PVs) with backup metadata.
+	ctx.logger.Info("Starting patching process for dynamically provisioned PVs.")
+
 	pdpErrs := ctx.patchDynamicPVWithVolumeInfo()
-	errs.Merge(&pdpErrs)
+	errs.Merge(&pdpErrs) // Merge PV patching errors into the main error result.
 
-	rehErrs := ctx.WaitRestoreExecHook()
-	errs.Merge(&rehErrs)
+	// Check if PV patching resulted in errors (corrected method)
+	if len(pdpErrs.Velero) > 0 || len(pdpErrs.Cluster) > 0 || len(pdpErrs.Namespaces) > 0 {
+		// Log warning if PV patching fails
+		ctx.logger.Warn("PV patching failed. Skipping restore exec hook wait.")
 
+		// Log each error message from the Velero slice
+		for _, msg := range pdpErrs.Velero {
+			ctx.logger.Warnf("Velero error: %s", msg)
+		}
+
+		// Log each error message from the Cluster slice
+		for _, msg := range pdpErrs.Cluster {
+			ctx.logger.Warnf("Cluster error: %s", msg)
+		}
+
+		// Log each error message from the Namespaces map
+		for ns, msgs := range pdpErrs.Namespaces {
+			for _, msg := range msgs {
+				ctx.logger.Warnf("Namespace: %s, error: %s", ns, msg)
+			}
+		}
+
+	} else {
+		// Step 2: If PV patching succeeded, proceed to execute post-restore hooks.
+		ctx.logger.Info("PV patching completed successfully. Proceeding to restore exec hooks.")
+
+		rehErrs := ctx.WaitRestoreExecHook()
+		errs.Merge(&rehErrs) // Merge hook execution errors into the main error result.
+
+		// Check if restore exec hooks encountered errors (corrected method)
+		if len(rehErrs.Velero) > 0 || len(rehErrs.Cluster) > 0 || len(rehErrs.Namespaces) > 0 {
+			ctx.logger.Warn("Restore exec hooks encountered errors.")
+
+			// Log each error message from the Velero slice
+			for _, msg := range rehErrs.Velero {
+				ctx.logger.Warnf("Velero error: %s", msg)
+			}
+
+			// Log each error message from the Cluster slice
+			for _, msg := range rehErrs.Cluster {
+				ctx.logger.Warnf("Cluster error: %s", msg)
+			}
+
+			// Log each error message from the Namespaces map
+			for ns, msgs := range rehErrs.Namespaces {
+				for _, msg := range msgs {
+					ctx.logger.Warnf("Namespace: %s, error: %s", ns, msg)
+				}
+			}
+		} else {
+			ctx.logger.Info("Restore exec hooks completed successfully.")
+		}
+	}
+
+	// Step 3: Return final results containing any warnings or errors encountered.
+	ctx.logger.Info("Finalizer execution completed.")
 	return warnings, errs
 }
 
@@ -408,44 +466,60 @@ func needPatch(newPV *v1.PersistentVolume, pvInfo *volume.PVInfo) bool {
 	return false
 }
 
-// WaitRestoreExecHook waits for restore exec hooks to finish then update the hook execution results
+// WaitRestoreExecHook waits for restore exec hooks to finish then updates the hook execution results.
 func (ctx *finalizerContext) WaitRestoreExecHook() (errs results.Result) {
 	log := ctx.logger.WithField("restore", ctx.restore.Name)
 	log.Info("Waiting for restore exec hooks starts")
 
-	// wait for restore exec hooks to finish
-	err := wait.PollUntilContextCancel(context.Background(), 1*time.Second, true, func(context.Context) (bool, error) {
-		log.Debug("Checking the progress of hooks execution")
-		if ctx.multiHookTracker.IsComplete(ctx.restore.Name) {
-			return true, nil
-		}
-		return false, nil
-	})
+	// Step 1: Wait for restore exec hooks to complete, but enforce a maximum timeout.
+	err := wait.PollUntilContextTimeout(
+		context.Background(),
+		10*time.Minute, // Maximum wait time before timeout
+		1*time.Second,  // Interval between checks
+		true,
+		func(context.Context) (bool, error) {
+			// Step 1a: Check if all restore exec hooks have completed.
+			if ctx.multiHookTracker.IsComplete(ctx.restore.Name) {
+				return true, nil // Hooks are done, exit polling loop.
+			}
+			return false, nil // Hooks are still running, continue polling.
+		})
+
+	// Step 2: Handle timeout or errors from the polling process.
 	if err != nil {
+		// If timeout occurs, log an error and return it.
+		log.WithError(err).Error("Timeout waiting for restore exec hooks to complete")
 		errs.Add(ctx.restore.Namespace, err)
 		return errs
 	}
+
+	// Step 3: Restore exec hooks finished successfully.
 	log.Info("Done waiting for restore exec hooks starts")
 
+	// Step 4: Collect any errors from executed hooks.
 	for _, ei := range ctx.multiHookTracker.HookErrs(ctx.restore.Name) {
 		errs.Add(ei.Namespace, ei.Err)
 	}
 
-	// update hooks execution status
+	// Step 5: Update the restore object with hook execution status.
 	updated := ctx.restore.DeepCopy()
 	if updated.Status.HookStatus == nil {
 		updated.Status.HookStatus = &velerov1api.HookStatus{}
 	}
+
+	// Fetch and log statistics on attempted and failed hooks.
 	updated.Status.HookStatus.HooksAttempted, updated.Status.HookStatus.HooksFailed = ctx.multiHookTracker.Stat(ctx.restore.Name)
 	log.Debugf("hookAttempted: %d, hookFailed: %d", updated.Status.HookStatus.HooksAttempted, updated.Status.HookStatus.HooksFailed)
 
+	// Step 6: Patch the restore object with updated hook execution status.
 	if err := kubeutil.PatchResource(ctx.restore, updated, ctx.crClient); err != nil {
-		log.WithError(errors.WithStack((err))).Error("Updating restore status")
+		log.WithError(errors.WithStack(err)).Error("Updating restore status")
 		errs.Add(ctx.restore.Namespace, err)
 	}
 
-	// delete the hook data for this restore
+	// Step 7: Cleanup - Remove hook tracking data for this restore.
 	ctx.multiHookTracker.Delete(ctx.restore.Name)
 
+	// Step 8: Return any collected errors.
 	return errs
 }
