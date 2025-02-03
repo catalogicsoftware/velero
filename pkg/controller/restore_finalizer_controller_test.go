@@ -39,6 +39,7 @@ import (
 	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
+	"github.com/vmware-tanzu/velero/pkg/itemoperation"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	persistencemocks "github.com/vmware-tanzu/velero/pkg/persistence/mocks"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
@@ -145,6 +146,7 @@ func TestRestoreFinalizerReconcile(t *testing.T) {
 			if test.restore != nil && test.restore.Namespace == velerov1api.DefaultNamespace {
 				require.NoError(t, r.Client.Create(context.Background(), test.restore))
 				backupStore.On("GetRestoredResourceList", test.restore.Name).Return(map[string][]string{}, nil)
+				backupStore.On("GetRestoreItemOperations", test.restore.Name).Return([]*itemoperation.RestoreOperation{}, nil)
 			}
 			if test.backup != nil {
 				assert.NoError(t, r.Client.Create(context.Background(), test.backup))
