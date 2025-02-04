@@ -402,11 +402,43 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 					pvc := &v1.PersistentVolumeClaim{}
 					err := ctx.crClient.Get(context.Background(), client.ObjectKey{Name: volInfo.PVCName, Namespace: restoredNamespace}, pvc)
 					if apierrors.IsNotFound(err) {
-						log.Debug("error not finding PVC")
+						log.Debug("error not finding PVC. Listing all available PVCs for debugging.")
+
+						// List all PVCs in the cluster for debugging
+						pvcList := &v1.PersistentVolumeClaimList{}
+						if listErr := ctx.crClient.List(context.Background(), pvcList); listErr != nil {
+							ctx.logger.WithError(listErr).Error("Failed to list PVCs")
+						} else {
+							for _, p := range pvcList.Items {
+								ctx.logger.Infof("Found PVC: %s in Namespace: %s", p.Name, p.Namespace)
+							}
+						}
+
+						// Log where the function expects the PVC to exist
+						ctx.logger.Warnf("Expected PVC %s to be in namespace %s, but it was not found.", volInfo.PVCName, restoredNamespace)
+
 						return false, nil
 					}
 					if err != nil {
 						return false, err
+					}
+
+					// **🛠️ Handling the WaitForFirstConsumer case (Restored Code)**
+					if pvc != nil && pvc.Status.Phase == v1.ClaimPending {
+						scName := *pvc.Spec.StorageClassName
+						sc := &storagev1api.StorageClass{}
+						err = ctx.crClient.Get(context.Background(), client.ObjectKey{Name: scName}, sc)
+
+						if err != nil {
+							errs.Add(restoredNamespace, err)
+							return false, err
+						}
+
+						// If StorageClass has `WaitForFirstConsumer`, **skip PV patching**.
+						if *sc.VolumeBindingMode == storagev1api.VolumeBindingWaitForFirstConsumer {
+							log.Warnf("Skipping PV patch: StorageClass %s used by PVC %s has VolumeBindingMode set to WaitForFirstConsumer, and the PVC is in Pending state", scName, pvc.Name)
+							return true, nil
+						}
 					}
 
 					// Check whether the async operation to populate the PVC is successful.  If it's not, will skip patching the PV, instead of waiting.
@@ -416,27 +448,6 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 							op.Status.Phase != itemoperation.OperationPhaseCompleted {
 							log.Warnf("skipping PV patch, because the operation to restore the PVC is not completed, "+
 								"operation: %s, phase: %s", op.Spec.OperationID, op.Status.Phase)
-							return true, nil
-						}
-					}
-
-					// We are handling a common but specific scenario where a PVC is in a pending state and uses a storage class with
-					// VolumeBindingMode set to WaitForFirstConsumer. In this case, the PV patch step is skipped to avoid
-					// failures due to the PVC not being bound, which could cause a timeout and result in a failed restore.
-					if pvc != nil && pvc.Status.Phase == v1.ClaimPending {
-						// check if storage class used has VolumeBindingMode as WaitForFirstConsumer
-						scName := *pvc.Spec.StorageClassName
-						sc := &storagev1api.StorageClass{}
-						err = ctx.crClient.Get(context.Background(), client.ObjectKey{Name: scName}, sc)
-
-						if err != nil {
-							errs.Add(restoredNamespace, err)
-							return false, err
-						}
-						// skip PV patch step for this scenario
-						// because pvc would not be bound and the PV patch step would fail due to timeout thus failing the restore
-						if *sc.VolumeBindingMode == storagev1api.VolumeBindingWaitForFirstConsumer {
-							log.Warnf("skipping PV patch to restore custom reclaim policy, if any: StorageClass %s used by PVC %s has VolumeBindingMode set to WaitForFirstConsumer, and the PVC is also in a pending state", scName, pvc.Name)
 							return true, nil
 						}
 					}
