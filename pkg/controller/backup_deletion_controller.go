@@ -179,12 +179,14 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// Couldn't find backup - update status to Processed and record the not-found error
 		_, err = r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
 			r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
-			r.Status.Errors = []string{"backup not found"}
+			r.Status.Errors = []string{fmt.Sprintf("backup %q not found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)}
 		})
+		r.logger.Infof("Backup %q NOT found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)
 		return ctrl.Result{}, err
 	} else if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "error getting backup")
 	}
+	r.logger.Infof("Backup %q found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)
 
 	// Don't allow deleting backups in read-only storage locations
 	location := &velerov1api.BackupStorageLocation{}
