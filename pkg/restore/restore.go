@@ -529,6 +529,7 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 		totalItems += selectedResource.totalItems
 	}
 
+	pvcTree := map[string][]string{} // keeps track of created PVCs in each namespace
 	for _, selectedResource := range crdResourceCollection {
 		var w, e results.Result
 		// Restore this resource, the update channel is set to nil, to avoid misleading value of "totalItems"
@@ -538,6 +539,7 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 			totalItems,
 			processedItems,
 			existingNamespaces,
+			pvcTree,
 			nil,
 		)
 		warnings.Merge(&w)
@@ -614,10 +616,63 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 			totalItems,
 			processedItems,
 			existingNamespaces,
+			pvcTree,
 			update,
 		)
 		warnings.Merge(&w)
 		errs.Merge(&e)
+	}
+
+	// Call Cloudcasa pod plugin for each namespace containing PVCs that Velero created
+	// Supply all PVCs in the namespace as volumes to the plugin so that plugin can restore PVCs
+	// that were not already restored as part of the pod
+	cloudcasaRestorePodName := "cloudcasa-pvc-restore"
+	for pvcNamespace, pvcNames := range pvcTree {
+		volumes := []v1.Volume{}
+		for _, pvcName := range pvcNames {
+			volumes = append(volumes, v1.Volume{
+				Name: pvcName,
+				VolumeSource: v1.VolumeSource{
+					PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+						ClaimName: pvcName,
+					},
+				},
+			})
+		}
+
+		// dummy pod spec
+		pod := &v1.Pod{
+			TypeMeta: metav1.TypeMeta{
+				Kind: "Pod",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: pvcNamespace,
+				Name:      cloudcasaRestorePodName,
+			},
+			Spec: v1.PodSpec{
+				Volumes: volumes,
+			},
+		}
+
+		if unstructuredPod, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod); err == nil {
+			obj := &unstructured.Unstructured{Object: unstructuredPod}
+			for _, action := range ctx.getApplicableActions(kuberesource.Pods, pvcNamespace) {
+				if action.Name() != "catalogicsoftware.com/offload-restore-pod-action-plugin" {
+					continue
+				}
+				_, err := action.RestoreItemAction.Execute(&velero.RestoreItemActionExecuteInput{
+					Item:           obj,
+					ItemFromBackup: obj,
+					Restore:        ctx.restore,
+				})
+				if err != nil {
+					errs.Add(pvcNamespace, fmt.Errorf("Failed to execute restore item action for %s pod: %v",
+						cloudcasaRestorePodName, err))
+				}
+			}
+		} else {
+			errs.Add(pvcNamespace, fmt.Errorf("Failed to convert %s pod to unstructured: %v", cloudcasaRestorePodName, err))
+		}
 	}
 
 	// Close the progress update channel.
@@ -686,6 +741,7 @@ func (ctx *restoreContext) processSelectedResource(
 	totalItems int,
 	processedItems int,
 	existingNamespaces sets.Set[string],
+	pvcTree map[string][]string,
 	update chan progressUpdate,
 ) (int, results.Result, results.Result) {
 	warnings, errs := results.Result{}, results.Result{}
@@ -757,7 +813,7 @@ func (ctx *restoreContext) processSelectedResource(
 				continue
 			}
 
-			w, e, _ := ctx.restoreItem(obj, groupResource, targetNS)
+			w, e, _ := ctx.restoreItem(obj, groupResource, targetNS, pvcTree)
 			warnings.Merge(&w)
 			errs.Merge(&e)
 			processedItems++
@@ -1083,7 +1139,9 @@ func (ctx *restoreContext) getResource(groupResource schema.GroupResource, obj *
 	return u, nil
 }
 
-func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupResource schema.GroupResource, namespace string) (results.Result, results.Result, bool) {
+func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupResource schema.GroupResource, namespace string,
+	pvcTree map[string][]string) (results.Result, results.Result, bool) {
+
 	warnings, errs := results.Result{}, results.Result{}
 	// itemExists bool is used to determine whether to include this item in the "wait for additional items" list
 	itemExists := false
@@ -1411,7 +1469,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 				}
 			}
 
-			w, e, additionalItemExists := ctx.restoreItem(additionalObj, additionalItem.GroupResource, additionalItemNamespace)
+			w, e, additionalItemExists := ctx.restoreItem(additionalObj, additionalItem.GroupResource, additionalItemNamespace, pvcTree)
 			if additionalItemExists {
 				filteredAdditionalItems = append(filteredAdditionalItems, additionalItem)
 			}
@@ -1458,6 +1516,11 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			errs.Add(namespace, err)
 			return warnings, errs, itemExists
 		}
+
+		if _, ok := pvcTree[namespace]; !ok {
+			pvcTree[namespace] = []string{}
+		}
+		pvcTree[namespace] = append(pvcTree[namespace], pvc.Name)
 
 		if pvc.Spec.VolumeName != "" {
 			// This used to only happen with PVB volumes, but now always remove this binding metadata
