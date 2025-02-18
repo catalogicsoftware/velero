@@ -16,6 +16,13 @@ limitations under the License.
 
 package util
 
+import (
+	"context"
+	"time"
+
+	"github.com/sirupsen/logrus"
+)
+
 func Contains(slice []string, key string) bool {
 	for _, i := range slice {
 		if i == key {
@@ -23,4 +30,20 @@ func Contains(slice []string, key string) bool {
 		}
 	}
 	return false
+}
+
+// RetryOnError calls the retryFunc after specified retryInterval until it won't return an error
+// or then the max number of attempts has been reached.
+func RetryOnError(ctx context.Context, maxRetries int, retryInterval time.Duration, logger logrus.FieldLogger, retryFunc func() error) error {
+	var err error
+	for retries := 0; retries < maxRetries; retries++ {
+		err = retryFunc()
+		if err == nil {
+			return nil
+		}
+
+		logger.Infof("Error occurred: %v. Retrying (%d/%d)...", err, retries+1, maxRetries)
+		time.Sleep(retryInterval)
+	}
+	return err
 }
