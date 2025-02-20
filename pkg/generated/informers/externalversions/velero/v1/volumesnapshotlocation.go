@@ -62,13 +62,13 @@ func NewFilteredVolumeSnapshotLocationInformer(client versioned.Interface, names
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV1().VolumeSnapshotLocations(namespace).List(context.TODO(), options)
+				return client.CloudcasaV1().VolumeSnapshotLocations(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV1().VolumeSnapshotLocations(namespace).Watch(context.TODO(), options)
+				return client.CloudcasaV1().VolumeSnapshotLocations(namespace).Watch(context.TODO(), options)
 			},
 		},
 		&velerov1.VolumeSnapshotLocation{},

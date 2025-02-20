@@ -57,7 +57,7 @@ type dataUploads struct {
 }
 
 // newDataUploads returns a DataUploads
-func newDataUploads(c *VeleroV2alpha1Client, namespace string) *dataUploads {
+func newDataUploads(c *CloudcasaV2alpha1Client, namespace string) *dataUploads {
 	return &dataUploads{
 		client: c.RESTClient(),
 		ns:     namespace,

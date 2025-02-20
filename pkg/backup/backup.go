@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -322,7 +323,39 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		pageSize:              kb.clientPageSize,
 	}
 
-	items := collector.getAllItems()
+	/*
+		Check if the Backup spec’s IncludeNamedResources field is non‑empty. If it is, instead of calling
+		the normal getAllItems method (which applies namespace and label filters), this code converts the map
+		into a slice of ResourceIdentifiers (using a helper like parseIncludeNamedResources) and then calls
+		getItemsFromResourceIdentifiers. This ensures that only the explicitly named objects are collected for backup.
+	*/
+	var items []*kubernetesResource
+	if len(backupRequest.Backup.Spec.IncludeNamedResources) > 0 {
+		// Log that includeNamedResources has been specified along with its content.
+		log.Infof("IncludeNamedResources: IncludeNamedResources specified in Backup spec: %v", backupRequest.Backup.Spec.IncludeNamedResources)
+
+		// Parse the includeNamedResources map into a slice of ResourceIdentifiers.
+		resourceIDs := parseIncludeNamedResources(backupRequest.Backup.Spec.IncludeNamedResources, log)
+		// Instead of printing the slice directly, log the count and then each identifier individually.
+		log.Infof("IncludeNamedResources: Parsed %d resource identifiers", len(resourceIDs))
+		for i, rid := range resourceIDs {
+			log.Infof("ResourceIdentifier[%d]: GroupResource=%s, Namespace='%s', Name='%s'",
+				i,
+				rid.GroupResource.String(),
+				rid.Namespace,
+				rid.Name,
+			)
+		}
+
+		// Use getItemsFromResourceIdentifiers to collect only those items that match the given resource IDs.
+		items = collector.getItemsFromResourceIdentifiers(resourceIDs)
+		log.Infof("IncludeNamedResources: Collected %d items using getItemsFromResourceIdentifiers", len(items))
+	} else {
+		// If no includeNamedResources are specified, fall back to the default item collection.
+		log.Infof("No IncludeNamedResources specified; using default item collection with getAllItems")
+		items = collector.getAllItems()
+	}
+
 	log.WithField("progress", "").Infof("Collected %d items matching the backup spec from the Kubernetes API (actual number of items backed up may be more or less depending on velero.io/exclude-from-backup annotation, plugins returning additional related items to back up, etc.)", len(items))
 
 	updated := backupRequest.Backup.DeepCopy()
@@ -973,4 +1006,44 @@ func GetClientset(log logrus.FieldLogger) (*kubernetes.Clientset, error) {
 		return nil, err
 	}
 	return clientset, nil
+}
+
+func parseIncludeNamedResources(includeMap map[string]string, log logrus.FieldLogger) []velero.ResourceIdentifier {
+	var resourceIDs []velero.ResourceIdentifier
+
+	// Log the start of parsing.
+	log.Infof("Starting to parse IncludeNamedResources: %v", includeMap)
+
+	// Iterate over each resource type in the includeMap.
+	for resourceType, namesStr := range includeMap {
+		log.Infof("Parsing resource type '%s' with names string: '%s'", resourceType, namesStr)
+		names := strings.Split(namesStr, ",")
+		// Process each resource identifier in the comma-separated list.
+		for _, n := range names {
+			n = strings.TrimSpace(n)
+			var ns, name string
+			// If the identifier contains a slash, it's in "namespace/objectname" format.
+			if strings.Contains(n, "/") {
+				parts := strings.SplitN(n, "/", 2)
+				ns = parts[0]
+				name = parts[1]
+				log.Infof("Parsed namespaced resource identifier: namespace='%s', name='%s'", ns, name)
+			} else {
+				// Otherwise, it's a cluster-scoped resource.
+				name = n
+				log.Infof("Parsed cluster-scoped resource identifier: name='%s'", name)
+			}
+			// Create the ResourceIdentifier for the given resourceType.
+			resourceID := velero.ResourceIdentifier{
+				GroupResource: schema.ParseGroupResource(resourceType),
+				Namespace:     ns,
+				Name:          name,
+			}
+			resourceIDs = append(resourceIDs, resourceID)
+			log.Debugf("Appended ResourceIdentifier: %+v", resourceID)
+		}
+	}
+	// Log the final count of parsed resource identifiers.
+	log.Infof("Completed parsing IncludeNamedResources: parsed %d identifiers", len(resourceIDs))
+	return resourceIDs
 }

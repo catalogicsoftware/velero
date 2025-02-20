@@ -488,6 +488,8 @@ func (b *backupReconciler) prepareBackupRequest(backup *velerov1api.Backup, logg
 		request.ResPolicies = res
 	}
 
+	request.IncludeNamedResources = backup.Spec.IncludeNamedResources
+
 	return request
 }
 

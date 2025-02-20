@@ -57,7 +57,7 @@ type backupRepositories struct {
 }
 
 // newBackupRepositories returns a BackupRepositories
-func newBackupRepositories(c *VeleroV1Client, namespace string) *backupRepositories {
+func newBackupRepositories(c *CloudcasaV1Client, namespace string) *backupRepositories {
 	return &backupRepositories{
 		client: c.RESTClient(),
 		ns:     namespace,

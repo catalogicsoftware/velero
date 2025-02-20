@@ -152,6 +152,12 @@ type BackupSpec struct {
 	// +nullable
 	OrderedResources map[string]string `json:"orderedResources,omitempty"`
 
+	// IncludeNamedResources specifies the specific resources by name to include in the backup.
+	// The key is the plural resource name and the value is a comma-separated list of resource identifiers.
+	// For namespaced resources, use "namespace/objectname"; for cluster-scoped resources, simply "objectname".
+	// +optional
+	IncludeNamedResources map[string]string `json:"includeNamedResources,omitempty"`
+
 	// CSISnapshotTimeout specifies the time used to wait for CSI VolumeSnapshot status turns to
 	// ReadyToUse during creation, before returning error as timeout.
 	// The default value is 10 minute.

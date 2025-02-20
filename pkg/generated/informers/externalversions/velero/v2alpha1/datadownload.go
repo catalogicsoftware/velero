@@ -62,13 +62,13 @@ func NewFilteredDataDownloadInformer(client versioned.Interface, namespace strin
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV2alpha1().DataDownloads(namespace).List(context.TODO(), options)
+				return client.CloudcasaV2alpha1().DataDownloads(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV2alpha1().DataDownloads(namespace).Watch(context.TODO(), options)
+				return client.CloudcasaV2alpha1().DataDownloads(namespace).Watch(context.TODO(), options)
 			},
 		},
 		&velerov2alpha1.DataDownload{},

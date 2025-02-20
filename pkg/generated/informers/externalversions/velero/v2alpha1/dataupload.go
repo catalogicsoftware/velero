@@ -62,13 +62,13 @@ func NewFilteredDataUploadInformer(client versioned.Interface, namespace string,
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV2alpha1().DataUploads(namespace).List(context.TODO(), options)
+				return client.CloudcasaV2alpha1().DataUploads(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV2alpha1().DataUploads(namespace).Watch(context.TODO(), options)
+				return client.CloudcasaV2alpha1().DataUploads(namespace).Watch(context.TODO(), options)
 			},
 		},
 		&velerov2alpha1.DataUpload{},

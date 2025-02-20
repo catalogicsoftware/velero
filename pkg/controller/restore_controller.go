@@ -561,6 +561,7 @@ func (r *restoreReconciler) runValidatedRestore(restore *api.Restore, info backu
 		CSIVolumeSnapshots:       csiVolumeSnapshots,
 		BackupVolumeInfoMap:      backupVolumeInfoMap,
 		RestoreVolumeInfoTracker: volume.NewRestoreVolInfoTracker(restore, restoreLog, r.globalCrClient),
+		IncludeNamedResources:    restore.Spec.IncludeNamedResources,
 	}
 	restoreWarnings, restoreErrors := r.restorer.RestoreWithResolvers(restoreReq, actionsResolver, pluginManager)
 

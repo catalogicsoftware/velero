@@ -466,6 +466,30 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 		return warnings, errs
 	}
 
+	/*
+		After the backup archive is parsed, this code now checks if the Restore spec includes IncludeNamedResources.
+		If it does, you then call the helper function (filterBackupResourcesByNamedResources) that iterates over each
+		resource’s ItemsByNamespace map (instead of an Items slice) and picks out only those items whose name (and optional namespace)
+		match the values provided. This way, only the named resources are restored, bypassing the usual filtering based on label
+		selectors or namespace inclusions/exclusions.
+	*/
+	if len(ctx.restore.Spec.IncludeNamedResources) > 0 {
+		// Log that IncludeNamedResources is specified along with its value.
+		ctx.log.Infof("Restore spec includes IncludeNamedResources: %v", ctx.restore.Spec.IncludeNamedResources)
+
+		// Filter the backupResources using our helper that logs detailed info.
+		backupResources = filterBackupResourcesByNamedResources(backupResources, ctx.restore.Spec.IncludeNamedResources, ctx.log)
+
+		// Log the keys (resource types) remaining in the filtered map.
+		var keys []string
+		for k := range backupResources {
+			keys = append(keys, k)
+		}
+		ctx.log.Infof("Filtered backup resources; resource types retained: %v", keys)
+	} else {
+		ctx.log.Infof("No IncludeNamedResources specified; proceeding with full backupResources.")
+	}
+
 	// TODO: Remove outer feature flag check to make this feature a default in Velero.
 	if features.IsEnabled(velerov1api.APIGroupVersionsFeatureFlag) {
 		if ctx.backup.Status.FormatVersion >= "1.1.0" {
@@ -2629,4 +2653,72 @@ func (ctx *restoreContext) handleSkippedPVHasRetainPolicy(
 
 	obj = resetVolumeBindingInfo(obj)
 	return obj, nil
+}
+
+/*
+filterBackupResourcesByNamedResources takes the full set of backup resources and an includeMap
+(where keys are resource types and values are comma-separated resource names in the format "namespace/objectname"
+for namespaced resources or simply "objectname" for cluster-scoped resources). It returns a filtered map
+containing only the specified named resources.
+*/
+func filterBackupResourcesByNamedResources(resources map[string]*archive.ResourceItems, includeMap map[string]string, log logrus.FieldLogger) map[string]*archive.ResourceItems {
+	// Create an empty map to hold the filtered resources.
+	filtered := make(map[string]*archive.ResourceItems)
+	log.Infof("Starting filterBackupResourcesByNamedResources with includeMap: %v", includeMap)
+
+	// Iterate over each resource type in the includeMap.
+	for resourceType, namesStr := range includeMap {
+		log.Infof("Filtering resource type '%s' with names string: '%s'", resourceType, namesStr)
+		// Split the comma-separated string into individual resource identifiers.
+		names := strings.Split(namesStr, ",")
+		// Process each resource identifier.
+		for _, n := range names {
+			// Remove any extra whitespace.
+			n = strings.TrimSpace(n)
+			var ns, name string
+			// Check if the identifier includes a slash (i.e. namespace is specified).
+			if strings.Contains(n, "/") {
+				parts := strings.SplitN(n, "/", 2)
+				ns = parts[0]
+				name = parts[1]
+				log.Debugf("Parsed namespaced identifier: namespace='%s', name='%s'", ns, name)
+			} else {
+				name = n
+				log.Debugf("Parsed cluster-scoped identifier: name='%s'", name)
+			}
+
+			// Look up the resource items for the current resource type.
+			if resItems, ok := resources[resourceType]; ok {
+				log.Infof("Found resource items for type '%s' with GroupResource: %s", resourceType, resItems.GroupResource)
+				// Iterate over the ItemsByNamespace map.
+				for namespace, items := range resItems.ItemsByNamespace {
+					// If a namespace was specified in the include and it doesn't match, skip these items.
+					if ns != "" && ns != namespace {
+						log.Debugf("Skipping namespace '%s' for resource type '%s' because it does not match specified namespace '%s'", namespace, resourceType, ns)
+						continue
+					}
+					// Iterate over each resource name within the current namespace.
+					for _, itemName := range items {
+						if itemName == name {
+							log.Infof("Match found: resource type '%s', namespace '%s', item name '%s'", resourceType, namespace, itemName)
+							// Initialize the filtered entry if not already done.
+							if _, exists := filtered[resourceType]; !exists {
+								filtered[resourceType] = &archive.ResourceItems{
+									GroupResource:    resItems.GroupResource,
+									ItemsByNamespace: make(map[string][]string),
+								}
+								log.Debugf("Initialized filtered entry for resource type '%s'", resourceType)
+							}
+							// Append the matching resource name to the corresponding namespace slice.
+							filtered[resourceType].ItemsByNamespace[namespace] = append(filtered[resourceType].ItemsByNamespace[namespace], itemName)
+						}
+					}
+				}
+			} else {
+				log.Warnf("No resource items found for resource type '%s'", resourceType)
+			}
+		}
+	}
+	log.Infof("Completed filtering. Filtered resources: %v", filtered)
+	return filtered
 }

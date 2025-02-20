@@ -32,13 +32,13 @@ import (
 
 // FakeRestores implements RestoreInterface
 type FakeRestores struct {
-	Fake *FakeVeleroV1
+	Fake *FakeCloudcasaV1
 	ns   string
 }
 
-var restoresResource = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "restores"}
+var restoresResource = schema.GroupVersionResource{Group: "cloudcasa.io", Version: "v1", Resource: "restores"}
 
-var restoresKind = schema.GroupVersionKind{Group: "velero.io", Version: "v1", Kind: "Restore"}
+var restoresKind = schema.GroupVersionKind{Group: "cloudcasa.io", Version: "v1", Kind: "Restore"}
 
 // Get takes name of the restore, and returns the corresponding restore object, and an error if there is any.
 func (c *FakeRestores) Get(ctx context.Context, name string, options v1.GetOptions) (result *velerov1.Restore, err error) {

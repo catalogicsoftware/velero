@@ -62,13 +62,13 @@ func NewFilteredBackupInformer(client versioned.Interface, namespace string, res
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV1().Backups(namespace).List(context.TODO(), options)
+				return client.CloudcasaV1().Backups(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV1().Backups(namespace).Watch(context.TODO(), options)
+				return client.CloudcasaV1().Backups(namespace).Watch(context.TODO(), options)
 			},
 		},
 		&velerov1.Backup{},

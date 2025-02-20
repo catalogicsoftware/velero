@@ -32,13 +32,13 @@ import (
 
 // FakeSchedules implements ScheduleInterface
 type FakeSchedules struct {
-	Fake *FakeVeleroV1
+	Fake *FakeCloudcasaV1
 	ns   string
 }
 
-var schedulesResource = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "schedules"}
+var schedulesResource = schema.GroupVersionResource{Group: "cloudcasa.io", Version: "v1", Resource: "schedules"}
 
-var schedulesKind = schema.GroupVersionKind{Group: "velero.io", Version: "v1", Kind: "Schedule"}
+var schedulesKind = schema.GroupVersionKind{Group: "cloudcasa.io", Version: "v1", Kind: "Schedule"}
 
 // Get takes name of the schedule, and returns the corresponding schedule object, and an error if there is any.
 func (c *FakeSchedules) Get(ctx context.Context, name string, options v1.GetOptions) (result *velerov1.Schedule, err error) {

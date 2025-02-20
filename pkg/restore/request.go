@@ -64,6 +64,7 @@ type Request struct {
 	CSIVolumeSnapshots       []*snapshotv1api.VolumeSnapshot
 	BackupVolumeInfoMap      map[string]volume.BackupVolumeInfo
 	RestoreVolumeInfoTracker *volume.RestoreVolumeInfoTracker
+	IncludeNamedResources    map[string]string
 }
 
 type restoredItemStatus struct {

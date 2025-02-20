@@ -32,13 +32,13 @@ import (
 
 // FakePodVolumeBackups implements PodVolumeBackupInterface
 type FakePodVolumeBackups struct {
-	Fake *FakeVeleroV1
+	Fake *FakeCloudcasaV1
 	ns   string
 }
 
-var podvolumebackupsResource = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "podvolumebackups"}
+var podvolumebackupsResource = schema.GroupVersionResource{Group: "cloudcasa.io", Version: "v1", Resource: "podvolumebackups"}
 
-var podvolumebackupsKind = schema.GroupVersionKind{Group: "velero.io", Version: "v1", Kind: "PodVolumeBackup"}
+var podvolumebackupsKind = schema.GroupVersionKind{Group: "cloudcasa.io", Version: "v1", Kind: "PodVolumeBackup"}
 
 // Get takes name of the podVolumeBackup, and returns the corresponding podVolumeBackup object, and an error if there is any.
 func (c *FakePodVolumeBackups) Get(ctx context.Context, name string, options v1.GetOptions) (result *velerov1.PodVolumeBackup, err error) {

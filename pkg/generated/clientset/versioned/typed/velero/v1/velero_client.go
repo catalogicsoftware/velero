@@ -24,7 +24,7 @@ import (
 	rest "k8s.io/client-go/rest"
 )
 
-type VeleroV1Interface interface {
+type CloudcasaV1Interface interface {
 	RESTClient() rest.Interface
 	BackupsGetter
 	BackupRepositoriesGetter
@@ -39,57 +39,57 @@ type VeleroV1Interface interface {
 	VolumeSnapshotLocationsGetter
 }
 
-// VeleroV1Client is used to interact with features provided by the velero.io group.
-type VeleroV1Client struct {
+// CloudcasaV1Client is used to interact with features provided by the cloudcasa.io group.
+type CloudcasaV1Client struct {
 	restClient rest.Interface
 }
 
-func (c *VeleroV1Client) Backups(namespace string) BackupInterface {
+func (c *CloudcasaV1Client) Backups(namespace string) BackupInterface {
 	return newBackups(c, namespace)
 }
 
-func (c *VeleroV1Client) BackupRepositories(namespace string) BackupRepositoryInterface {
+func (c *CloudcasaV1Client) BackupRepositories(namespace string) BackupRepositoryInterface {
 	return newBackupRepositories(c, namespace)
 }
 
-func (c *VeleroV1Client) BackupStorageLocations(namespace string) BackupStorageLocationInterface {
+func (c *CloudcasaV1Client) BackupStorageLocations(namespace string) BackupStorageLocationInterface {
 	return newBackupStorageLocations(c, namespace)
 }
 
-func (c *VeleroV1Client) DeleteBackupRequests(namespace string) DeleteBackupRequestInterface {
+func (c *CloudcasaV1Client) DeleteBackupRequests(namespace string) DeleteBackupRequestInterface {
 	return newDeleteBackupRequests(c, namespace)
 }
 
-func (c *VeleroV1Client) DownloadRequests(namespace string) DownloadRequestInterface {
+func (c *CloudcasaV1Client) DownloadRequests(namespace string) DownloadRequestInterface {
 	return newDownloadRequests(c, namespace)
 }
 
-func (c *VeleroV1Client) PodVolumeBackups(namespace string) PodVolumeBackupInterface {
+func (c *CloudcasaV1Client) PodVolumeBackups(namespace string) PodVolumeBackupInterface {
 	return newPodVolumeBackups(c, namespace)
 }
 
-func (c *VeleroV1Client) PodVolumeRestores(namespace string) PodVolumeRestoreInterface {
+func (c *CloudcasaV1Client) PodVolumeRestores(namespace string) PodVolumeRestoreInterface {
 	return newPodVolumeRestores(c, namespace)
 }
 
-func (c *VeleroV1Client) Restores(namespace string) RestoreInterface {
+func (c *CloudcasaV1Client) Restores(namespace string) RestoreInterface {
 	return newRestores(c, namespace)
 }
 
-func (c *VeleroV1Client) Schedules(namespace string) ScheduleInterface {
+func (c *CloudcasaV1Client) Schedules(namespace string) ScheduleInterface {
 	return newSchedules(c, namespace)
 }
 
-func (c *VeleroV1Client) ServerStatusRequests(namespace string) ServerStatusRequestInterface {
+func (c *CloudcasaV1Client) ServerStatusRequests(namespace string) ServerStatusRequestInterface {
 	return newServerStatusRequests(c, namespace)
 }
 
-func (c *VeleroV1Client) VolumeSnapshotLocations(namespace string) VolumeSnapshotLocationInterface {
+func (c *CloudcasaV1Client) VolumeSnapshotLocations(namespace string) VolumeSnapshotLocationInterface {
 	return newVolumeSnapshotLocations(c, namespace)
 }
 
-// NewForConfig creates a new VeleroV1Client for the given config.
-func NewForConfig(c *rest.Config) (*VeleroV1Client, error) {
+// NewForConfig creates a new CloudcasaV1Client for the given config.
+func NewForConfig(c *rest.Config) (*CloudcasaV1Client, error) {
 	config := *c
 	if err := setConfigDefaults(&config); err != nil {
 		return nil, err
@@ -98,12 +98,12 @@ func NewForConfig(c *rest.Config) (*VeleroV1Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &VeleroV1Client{client}, nil
+	return &CloudcasaV1Client{client}, nil
 }
 
-// NewForConfigOrDie creates a new VeleroV1Client for the given config and
+// NewForConfigOrDie creates a new CloudcasaV1Client for the given config and
 // panics if there is an error in the config.
-func NewForConfigOrDie(c *rest.Config) *VeleroV1Client {
+func NewForConfigOrDie(c *rest.Config) *CloudcasaV1Client {
 	client, err := NewForConfig(c)
 	if err != nil {
 		panic(err)
@@ -111,9 +111,9 @@ func NewForConfigOrDie(c *rest.Config) *VeleroV1Client {
 	return client
 }
 
-// New creates a new VeleroV1Client for the given RESTClient.
-func New(c rest.Interface) *VeleroV1Client {
-	return &VeleroV1Client{c}
+// New creates a new CloudcasaV1Client for the given RESTClient.
+func New(c rest.Interface) *CloudcasaV1Client {
+	return &CloudcasaV1Client{c}
 }
 
 func setConfigDefaults(config *rest.Config) error {
@@ -131,7 +131,7 @@ func setConfigDefaults(config *rest.Config) error {
 
 // RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
-func (c *VeleroV1Client) RESTClient() rest.Interface {
+func (c *CloudcasaV1Client) RESTClient() rest.Interface {
 	if c == nil {
 		return nil
 	}

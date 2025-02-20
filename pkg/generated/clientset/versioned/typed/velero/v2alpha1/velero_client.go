@@ -24,27 +24,27 @@ import (
 	rest "k8s.io/client-go/rest"
 )
 
-type VeleroV2alpha1Interface interface {
+type CloudcasaV2alpha1Interface interface {
 	RESTClient() rest.Interface
 	DataDownloadsGetter
 	DataUploadsGetter
 }
 
-// VeleroV2alpha1Client is used to interact with features provided by the velero.io group.
-type VeleroV2alpha1Client struct {
+// CloudcasaV2alpha1Client is used to interact with features provided by the cloudcasa.io group.
+type CloudcasaV2alpha1Client struct {
 	restClient rest.Interface
 }
 
-func (c *VeleroV2alpha1Client) DataDownloads(namespace string) DataDownloadInterface {
+func (c *CloudcasaV2alpha1Client) DataDownloads(namespace string) DataDownloadInterface {
 	return newDataDownloads(c, namespace)
 }
 
-func (c *VeleroV2alpha1Client) DataUploads(namespace string) DataUploadInterface {
+func (c *CloudcasaV2alpha1Client) DataUploads(namespace string) DataUploadInterface {
 	return newDataUploads(c, namespace)
 }
 
-// NewForConfig creates a new VeleroV2alpha1Client for the given config.
-func NewForConfig(c *rest.Config) (*VeleroV2alpha1Client, error) {
+// NewForConfig creates a new CloudcasaV2alpha1Client for the given config.
+func NewForConfig(c *rest.Config) (*CloudcasaV2alpha1Client, error) {
 	config := *c
 	if err := setConfigDefaults(&config); err != nil {
 		return nil, err
@@ -53,12 +53,12 @@ func NewForConfig(c *rest.Config) (*VeleroV2alpha1Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &VeleroV2alpha1Client{client}, nil
+	return &CloudcasaV2alpha1Client{client}, nil
 }
 
-// NewForConfigOrDie creates a new VeleroV2alpha1Client for the given config and
+// NewForConfigOrDie creates a new CloudcasaV2alpha1Client for the given config and
 // panics if there is an error in the config.
-func NewForConfigOrDie(c *rest.Config) *VeleroV2alpha1Client {
+func NewForConfigOrDie(c *rest.Config) *CloudcasaV2alpha1Client {
 	client, err := NewForConfig(c)
 	if err != nil {
 		panic(err)
@@ -66,9 +66,9 @@ func NewForConfigOrDie(c *rest.Config) *VeleroV2alpha1Client {
 	return client
 }
 
-// New creates a new VeleroV2alpha1Client for the given RESTClient.
-func New(c rest.Interface) *VeleroV2alpha1Client {
-	return &VeleroV2alpha1Client{c}
+// New creates a new CloudcasaV2alpha1Client for the given RESTClient.
+func New(c rest.Interface) *CloudcasaV2alpha1Client {
+	return &CloudcasaV2alpha1Client{c}
 }
 
 func setConfigDefaults(config *rest.Config) error {
@@ -86,7 +86,7 @@ func setConfigDefaults(config *rest.Config) error {
 
 // RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
-func (c *VeleroV2alpha1Client) RESTClient() rest.Interface {
+func (c *CloudcasaV2alpha1Client) RESTClient() rest.Interface {
 	if c == nil {
 		return nil
 	}

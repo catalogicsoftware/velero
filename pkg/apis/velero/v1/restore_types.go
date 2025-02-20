@@ -129,6 +129,12 @@ type RestoreSpec struct {
 	// +optional
 	// +nullable
 	UploaderConfig *UploaderConfigForRestore `json:"uploaderConfig,omitempty"`
+
+	// IncludeNamedResources specifies the specific resources by name to include in the restore.
+	// The key is the plural resource name and the value is a comma-separated list of resource identifiers.
+	// For namespaced resources, use "namespace/objectname"; for cluster-scoped resources, simply "objectname".
+	// +optional
+	IncludeNamedResources map[string]string `json:"includeNamedResources,omitempty"`
 }
 
 // UploaderConfigForRestore defines the configuration for the restore.
