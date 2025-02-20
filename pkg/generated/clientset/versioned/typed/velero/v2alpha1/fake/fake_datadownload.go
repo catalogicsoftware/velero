@@ -32,13 +32,13 @@ import (
 
 // FakeDataDownloads implements DataDownloadInterface
 type FakeDataDownloads struct {
-	Fake *FakeVeleroV2alpha1
+	Fake *FakeCloudcasaV2alpha1
 	ns   string
 }
 
-var datadownloadsResource = schema.GroupVersionResource{Group: "velero.io", Version: "v2alpha1", Resource: "datadownloads"}
+var datadownloadsResource = schema.GroupVersionResource{Group: "cloudcasa.io", Version: "v2alpha1", Resource: "datadownloads"}
 
-var datadownloadsKind = schema.GroupVersionKind{Group: "velero.io", Version: "v2alpha1", Kind: "DataDownload"}
+var datadownloadsKind = schema.GroupVersionKind{Group: "cloudcasa.io", Version: "v2alpha1", Kind: "DataDownload"}
 
 // Get takes name of the dataDownload, and returns the corresponding dataDownload object, and an error if there is any.
 func (c *FakeDataDownloads) Get(ctx context.Context, name string, options v1.GetOptions) (result *v2alpha1.DataDownload, err error) {

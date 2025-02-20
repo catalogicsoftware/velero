@@ -32,13 +32,13 @@ import (
 
 // FakeBackupRepositories implements BackupRepositoryInterface
 type FakeBackupRepositories struct {
-	Fake *FakeVeleroV1
+	Fake *FakeCloudcasaV1
 	ns   string
 }
 
-var backuprepositoriesResource = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "backuprepositories"}
+var backuprepositoriesResource = schema.GroupVersionResource{Group: "cloudcasa.io", Version: "v1", Resource: "backuprepositories"}
 
-var backuprepositoriesKind = schema.GroupVersionKind{Group: "velero.io", Version: "v1", Kind: "BackupRepository"}
+var backuprepositoriesKind = schema.GroupVersionKind{Group: "cloudcasa.io", Version: "v1", Kind: "BackupRepository"}
 
 // Get takes name of the backupRepository, and returns the corresponding backupRepository object, and an error if there is any.
 func (c *FakeBackupRepositories) Get(ctx context.Context, name string, options v1.GetOptions) (result *velerov1.BackupRepository, err error) {

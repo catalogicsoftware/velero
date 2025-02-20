@@ -172,9 +172,9 @@ type SharedInformerFactory interface {
 	ForResource(resource schema.GroupVersionResource) (GenericInformer, error)
 	WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
 
-	Velero() velero.Interface
+	Cloudcasa() velero.Interface
 }
 
-func (f *sharedInformerFactory) Velero() velero.Interface {
+func (f *sharedInformerFactory) Cloudcasa() velero.Interface {
 	return velero.New(f, f.namespace, f.tweakListOptions)
 }

@@ -53,35 +53,35 @@ func (f *genericInformer) Lister() cache.GenericLister {
 // TODO extend this to unknown resources with a client pool
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
-	// Group=velero.io, Version=v1
+	// Group=cloudcasa.io, Version=v1
 	case v1.SchemeGroupVersion.WithResource("backups"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().Backups().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().Backups().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("backuprepositories"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().BackupRepositories().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().BackupRepositories().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("backupstoragelocations"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().BackupStorageLocations().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().BackupStorageLocations().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("deletebackuprequests"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().DeleteBackupRequests().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().DeleteBackupRequests().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("downloadrequests"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().DownloadRequests().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().DownloadRequests().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("podvolumebackups"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().PodVolumeBackups().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().PodVolumeBackups().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("podvolumerestores"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().PodVolumeRestores().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().PodVolumeRestores().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("restores"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().Restores().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().Restores().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("schedules"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().Schedules().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().Schedules().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("serverstatusrequests"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().ServerStatusRequests().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().ServerStatusRequests().Informer()}, nil
 	case v1.SchemeGroupVersion.WithResource("volumesnapshotlocations"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V1().VolumeSnapshotLocations().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V1().VolumeSnapshotLocations().Informer()}, nil
 
-		// Group=velero.io, Version=v2alpha1
+		// Group=cloudcasa.io, Version=v2alpha1
 	case v2alpha1.SchemeGroupVersion.WithResource("datadownloads"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V2alpha1().DataDownloads().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V2alpha1().DataDownloads().Informer()}, nil
 	case v2alpha1.SchemeGroupVersion.WithResource("datauploads"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Velero().V2alpha1().DataUploads().Informer()}, nil
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Cloudcasa().V2alpha1().DataUploads().Informer()}, nil
 
 	}
 

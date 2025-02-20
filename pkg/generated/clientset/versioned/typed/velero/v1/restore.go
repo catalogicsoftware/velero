@@ -57,7 +57,7 @@ type restores struct {
 }
 
 // newRestores returns a Restores
-func newRestores(c *VeleroV1Client, namespace string) *restores {
+func newRestores(c *CloudcasaV1Client, namespace string) *restores {
 	return &restores{
 		client: c.RESTClient(),
 		ns:     namespace,

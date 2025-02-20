@@ -57,7 +57,7 @@ type serverStatusRequests struct {
 }
 
 // newServerStatusRequests returns a ServerStatusRequests
-func newServerStatusRequests(c *VeleroV1Client, namespace string) *serverStatusRequests {
+func newServerStatusRequests(c *CloudcasaV1Client, namespace string) *serverStatusRequests {
 	return &serverStatusRequests{
 		client: c.RESTClient(),
 		ns:     namespace,

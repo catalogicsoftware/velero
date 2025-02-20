@@ -53,6 +53,7 @@ type Request struct {
 	ResPolicies               *resourcepolicies.Policies
 	SkippedPVTracker          *skipPVTracker
 	VolumesInformation        volume.BackupVolumesInformation
+	IncludeNamedResources     map[string]string
 }
 
 // BackupVolumesInformation contains the information needs by generating

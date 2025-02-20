@@ -32,13 +32,13 @@ import (
 
 // FakeVolumeSnapshotLocations implements VolumeSnapshotLocationInterface
 type FakeVolumeSnapshotLocations struct {
-	Fake *FakeVeleroV1
+	Fake *FakeCloudcasaV1
 	ns   string
 }
 
-var volumesnapshotlocationsResource = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "volumesnapshotlocations"}
+var volumesnapshotlocationsResource = schema.GroupVersionResource{Group: "cloudcasa.io", Version: "v1", Resource: "volumesnapshotlocations"}
 
-var volumesnapshotlocationsKind = schema.GroupVersionKind{Group: "velero.io", Version: "v1", Kind: "VolumeSnapshotLocation"}
+var volumesnapshotlocationsKind = schema.GroupVersionKind{Group: "cloudcasa.io", Version: "v1", Kind: "VolumeSnapshotLocation"}
 
 // Get takes name of the volumeSnapshotLocation, and returns the corresponding volumeSnapshotLocation object, and an error if there is any.
 func (c *FakeVolumeSnapshotLocations) Get(ctx context.Context, name string, options v1.GetOptions) (result *velerov1.VolumeSnapshotLocation, err error) {

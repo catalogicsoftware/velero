@@ -368,6 +368,13 @@ func (in *BackupSpec) DeepCopyInto(out *BackupSpec) {
 			(*out)[key] = val
 		}
 	}
+	if in.IncludeNamedResources != nil {
+		in, out := &in.IncludeNamedResources, &out.IncludeNamedResources
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	out.CSISnapshotTimeout = in.CSISnapshotTimeout
 	out.ItemOperationTimeout = in.ItemOperationTimeout
 	if in.ResourcePolicy != nil {
@@ -1369,6 +1376,13 @@ func (in *RestoreSpec) DeepCopyInto(out *RestoreSpec) {
 		in, out := &in.UploaderConfig, &out.UploaderConfig
 		*out = new(UploaderConfigForRestore)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.IncludeNamedResources != nil {
+		in, out := &in.IncludeNamedResources, &out.IncludeNamedResources
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
 	}
 }
 

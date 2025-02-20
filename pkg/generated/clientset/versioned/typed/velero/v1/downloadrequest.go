@@ -57,7 +57,7 @@ type downloadRequests struct {
 }
 
 // newDownloadRequests returns a DownloadRequests
-func newDownloadRequests(c *VeleroV1Client, namespace string) *downloadRequests {
+func newDownloadRequests(c *CloudcasaV1Client, namespace string) *downloadRequests {
 	return &downloadRequests{
 		client: c.RESTClient(),
 		ns:     namespace,

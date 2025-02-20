@@ -57,7 +57,7 @@ type dataDownloads struct {
 }
 
 // newDataDownloads returns a DataDownloads
-func newDataDownloads(c *VeleroV2alpha1Client, namespace string) *dataDownloads {
+func newDataDownloads(c *CloudcasaV2alpha1Client, namespace string) *dataDownloads {
 	return &dataDownloads{
 		client: c.RESTClient(),
 		ns:     namespace,

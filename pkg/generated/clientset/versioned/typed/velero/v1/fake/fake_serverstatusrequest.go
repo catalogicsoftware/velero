@@ -32,13 +32,13 @@ import (
 
 // FakeServerStatusRequests implements ServerStatusRequestInterface
 type FakeServerStatusRequests struct {
-	Fake *FakeVeleroV1
+	Fake *FakeCloudcasaV1
 	ns   string
 }
 
-var serverstatusrequestsResource = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "serverstatusrequests"}
+var serverstatusrequestsResource = schema.GroupVersionResource{Group: "cloudcasa.io", Version: "v1", Resource: "serverstatusrequests"}
 
-var serverstatusrequestsKind = schema.GroupVersionKind{Group: "velero.io", Version: "v1", Kind: "ServerStatusRequest"}
+var serverstatusrequestsKind = schema.GroupVersionKind{Group: "cloudcasa.io", Version: "v1", Kind: "ServerStatusRequest"}
 
 // Get takes name of the serverStatusRequest, and returns the corresponding serverStatusRequest object, and an error if there is any.
 func (c *FakeServerStatusRequests) Get(ctx context.Context, name string, options v1.GetOptions) (result *velerov1.ServerStatusRequest, err error) {

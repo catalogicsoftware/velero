@@ -32,13 +32,13 @@ import (
 
 // FakeBackupStorageLocations implements BackupStorageLocationInterface
 type FakeBackupStorageLocations struct {
-	Fake *FakeVeleroV1
+	Fake *FakeCloudcasaV1
 	ns   string
 }
 
-var backupstoragelocationsResource = schema.GroupVersionResource{Group: "velero.io", Version: "v1", Resource: "backupstoragelocations"}
+var backupstoragelocationsResource = schema.GroupVersionResource{Group: "cloudcasa.io", Version: "v1", Resource: "backupstoragelocations"}
 
-var backupstoragelocationsKind = schema.GroupVersionKind{Group: "velero.io", Version: "v1", Kind: "BackupStorageLocation"}
+var backupstoragelocationsKind = schema.GroupVersionKind{Group: "cloudcasa.io", Version: "v1", Kind: "BackupStorageLocation"}
 
 // Get takes name of the backupStorageLocation, and returns the corresponding backupStorageLocation object, and an error if there is any.
 func (c *FakeBackupStorageLocations) Get(ctx context.Context, name string, options v1.GetOptions) (result *velerov1.BackupStorageLocation, err error) {

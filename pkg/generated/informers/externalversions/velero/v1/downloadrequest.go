@@ -62,13 +62,13 @@ func NewFilteredDownloadRequestInformer(client versioned.Interface, namespace st
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV1().DownloadRequests(namespace).List(context.TODO(), options)
+				return client.CloudcasaV1().DownloadRequests(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV1().DownloadRequests(namespace).Watch(context.TODO(), options)
+				return client.CloudcasaV1().DownloadRequests(namespace).Watch(context.TODO(), options)
 			},
 		},
 		&velerov1.DownloadRequest{},

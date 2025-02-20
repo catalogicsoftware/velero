@@ -62,13 +62,13 @@ func NewFilteredRestoreInformer(client versioned.Interface, namespace string, re
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV1().Restores(namespace).List(context.TODO(), options)
+				return client.CloudcasaV1().Restores(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.VeleroV1().Restores(namespace).Watch(context.TODO(), options)
+				return client.CloudcasaV1().Restores(namespace).Watch(context.TODO(), options)
 			},
 		},
 		&velerov1.Restore{},

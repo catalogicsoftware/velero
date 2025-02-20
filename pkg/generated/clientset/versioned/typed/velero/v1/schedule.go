@@ -57,7 +57,7 @@ type schedules struct {
 }
 
 // newSchedules returns a Schedules
-func newSchedules(c *VeleroV1Client, namespace string) *schedules {
+func newSchedules(c *CloudcasaV1Client, namespace string) *schedules {
 	return &schedules{
 		client: c.RESTClient(),
 		ns:     namespace,

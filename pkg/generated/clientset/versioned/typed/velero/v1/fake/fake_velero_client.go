@@ -24,57 +24,57 @@ import (
 	testing "k8s.io/client-go/testing"
 )
 
-type FakeVeleroV1 struct {
+type FakeCloudcasaV1 struct {
 	*testing.Fake
 }
 
-func (c *FakeVeleroV1) Backups(namespace string) v1.BackupInterface {
+func (c *FakeCloudcasaV1) Backups(namespace string) v1.BackupInterface {
 	return &FakeBackups{c, namespace}
 }
 
-func (c *FakeVeleroV1) BackupRepositories(namespace string) v1.BackupRepositoryInterface {
+func (c *FakeCloudcasaV1) BackupRepositories(namespace string) v1.BackupRepositoryInterface {
 	return &FakeBackupRepositories{c, namespace}
 }
 
-func (c *FakeVeleroV1) BackupStorageLocations(namespace string) v1.BackupStorageLocationInterface {
+func (c *FakeCloudcasaV1) BackupStorageLocations(namespace string) v1.BackupStorageLocationInterface {
 	return &FakeBackupStorageLocations{c, namespace}
 }
 
-func (c *FakeVeleroV1) DeleteBackupRequests(namespace string) v1.DeleteBackupRequestInterface {
+func (c *FakeCloudcasaV1) DeleteBackupRequests(namespace string) v1.DeleteBackupRequestInterface {
 	return &FakeDeleteBackupRequests{c, namespace}
 }
 
-func (c *FakeVeleroV1) DownloadRequests(namespace string) v1.DownloadRequestInterface {
+func (c *FakeCloudcasaV1) DownloadRequests(namespace string) v1.DownloadRequestInterface {
 	return &FakeDownloadRequests{c, namespace}
 }
 
-func (c *FakeVeleroV1) PodVolumeBackups(namespace string) v1.PodVolumeBackupInterface {
+func (c *FakeCloudcasaV1) PodVolumeBackups(namespace string) v1.PodVolumeBackupInterface {
 	return &FakePodVolumeBackups{c, namespace}
 }
 
-func (c *FakeVeleroV1) PodVolumeRestores(namespace string) v1.PodVolumeRestoreInterface {
+func (c *FakeCloudcasaV1) PodVolumeRestores(namespace string) v1.PodVolumeRestoreInterface {
 	return &FakePodVolumeRestores{c, namespace}
 }
 
-func (c *FakeVeleroV1) Restores(namespace string) v1.RestoreInterface {
+func (c *FakeCloudcasaV1) Restores(namespace string) v1.RestoreInterface {
 	return &FakeRestores{c, namespace}
 }
 
-func (c *FakeVeleroV1) Schedules(namespace string) v1.ScheduleInterface {
+func (c *FakeCloudcasaV1) Schedules(namespace string) v1.ScheduleInterface {
 	return &FakeSchedules{c, namespace}
 }
 
-func (c *FakeVeleroV1) ServerStatusRequests(namespace string) v1.ServerStatusRequestInterface {
+func (c *FakeCloudcasaV1) ServerStatusRequests(namespace string) v1.ServerStatusRequestInterface {
 	return &FakeServerStatusRequests{c, namespace}
 }
 
-func (c *FakeVeleroV1) VolumeSnapshotLocations(namespace string) v1.VolumeSnapshotLocationInterface {
+func (c *FakeCloudcasaV1) VolumeSnapshotLocations(namespace string) v1.VolumeSnapshotLocationInterface {
 	return &FakeVolumeSnapshotLocations{c, namespace}
 }
 
 // RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
-func (c *FakeVeleroV1) RESTClient() rest.Interface {
+func (c *FakeCloudcasaV1) RESTClient() rest.Interface {
 	var ret *rest.RESTClient
 	return ret
 }

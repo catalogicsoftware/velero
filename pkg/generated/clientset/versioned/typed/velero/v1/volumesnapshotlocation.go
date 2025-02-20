@@ -57,7 +57,7 @@ type volumeSnapshotLocations struct {
 }
 
 // newVolumeSnapshotLocations returns a VolumeSnapshotLocations
-func newVolumeSnapshotLocations(c *VeleroV1Client, namespace string) *volumeSnapshotLocations {
+func newVolumeSnapshotLocations(c *CloudcasaV1Client, namespace string) *volumeSnapshotLocations {
 	return &volumeSnapshotLocations{
 		client: c.RESTClient(),
 		ns:     namespace,

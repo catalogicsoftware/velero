@@ -57,7 +57,7 @@ type podVolumeRestores struct {
 }
 
 // newPodVolumeRestores returns a PodVolumeRestores
-func newPodVolumeRestores(c *VeleroV1Client, namespace string) *podVolumeRestores {
+func newPodVolumeRestores(c *CloudcasaV1Client, namespace string) *podVolumeRestores {
 	return &podVolumeRestores{
 		client: c.RESTClient(),
 		ns:     namespace,

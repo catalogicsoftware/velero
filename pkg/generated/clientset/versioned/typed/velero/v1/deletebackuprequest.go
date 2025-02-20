@@ -57,7 +57,7 @@ type deleteBackupRequests struct {
 }
 
 // newDeleteBackupRequests returns a DeleteBackupRequests
-func newDeleteBackupRequests(c *VeleroV1Client, namespace string) *deleteBackupRequests {
+func newDeleteBackupRequests(c *CloudcasaV1Client, namespace string) *deleteBackupRequests {
 	return &deleteBackupRequests{
 		client: c.RESTClient(),
 		ns:     namespace,

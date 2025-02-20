@@ -32,13 +32,13 @@ import (
 
 // FakeDataUploads implements DataUploadInterface
 type FakeDataUploads struct {
-	Fake *FakeVeleroV2alpha1
+	Fake *FakeCloudcasaV2alpha1
 	ns   string
 }
 
-var datauploadsResource = schema.GroupVersionResource{Group: "velero.io", Version: "v2alpha1", Resource: "datauploads"}
+var datauploadsResource = schema.GroupVersionResource{Group: "cloudcasa.io", Version: "v2alpha1", Resource: "datauploads"}
 
-var datauploadsKind = schema.GroupVersionKind{Group: "velero.io", Version: "v2alpha1", Kind: "DataUpload"}
+var datauploadsKind = schema.GroupVersionKind{Group: "cloudcasa.io", Version: "v2alpha1", Kind: "DataUpload"}
 
 // Get takes name of the dataUpload, and returns the corresponding dataUpload object, and an error if there is any.
 func (c *FakeDataUploads) Get(ctx context.Context, name string, options v1.GetOptions) (result *v2alpha1.DataUpload, err error) {

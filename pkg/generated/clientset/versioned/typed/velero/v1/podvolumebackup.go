@@ -57,7 +57,7 @@ type podVolumeBackups struct {
 }
 
 // newPodVolumeBackups returns a PodVolumeBackups
-func newPodVolumeBackups(c *VeleroV1Client, namespace string) *podVolumeBackups {
+func newPodVolumeBackups(c *CloudcasaV1Client, namespace string) *podVolumeBackups {
 	return &podVolumeBackups{
 		client: c.RESTClient(),
 		ns:     namespace,

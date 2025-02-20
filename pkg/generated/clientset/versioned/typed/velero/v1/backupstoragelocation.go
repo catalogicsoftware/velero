@@ -57,7 +57,7 @@ type backupStorageLocations struct {
 }
 
 // newBackupStorageLocations returns a BackupStorageLocations
-func newBackupStorageLocations(c *VeleroV1Client, namespace string) *backupStorageLocations {
+func newBackupStorageLocations(c *CloudcasaV1Client, namespace string) *backupStorageLocations {
 	return &backupStorageLocations{
 		client: c.RESTClient(),
 		ns:     namespace,

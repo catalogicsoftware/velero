@@ -23,7 +23,7 @@ rules:
   verbs:
   - get
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - backuprepositories
   verbs:
@@ -35,7 +35,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - backuprepositories/status
   verbs:
@@ -43,7 +43,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - backups
   verbs:
@@ -55,7 +55,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - backups/status
   verbs:
@@ -63,7 +63,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - backupstoragelocations
   verbs:
@@ -75,7 +75,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - backupstoragelocations/status
   verbs:
@@ -83,7 +83,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - datadownloads
   verbs:
@@ -95,7 +95,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - datadownloads/status
   verbs:
@@ -103,7 +103,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - datauploads
   verbs:
@@ -115,7 +115,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - datauploads/status
   verbs:
@@ -123,7 +123,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - deletebackuprequests
   verbs:
@@ -135,7 +135,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - deletebackuprequests/status
   verbs:
@@ -143,7 +143,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - downloadrequests
   verbs:
@@ -155,7 +155,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - downloadrequests/status
   verbs:
@@ -163,7 +163,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - podvolumebackups
   verbs:
@@ -175,7 +175,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - podvolumebackups/status
   verbs:
@@ -183,7 +183,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - podvolumerestores
   verbs:
@@ -195,7 +195,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - podvolumerestores/status
   verbs:
@@ -203,7 +203,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - restores
   verbs:
@@ -215,7 +215,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - restores/status
   verbs:
@@ -223,7 +223,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - schedules
   verbs:
@@ -235,7 +235,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - schedules/status
   verbs:
@@ -243,7 +243,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - serverstatusrequests
   verbs:
@@ -255,7 +255,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - serverstatusrequests/status
   verbs:
@@ -263,7 +263,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - velero.io
+  - cloudcasa.io
   resources:
   - volumesnapshotlocations
   verbs:
