@@ -48,6 +48,7 @@ import (
 	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
 	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	"github.com/vmware-tanzu/velero/pkg/repository"
+	"github.com/vmware-tanzu/velero/pkg/util"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
@@ -171,19 +172,24 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// Get the backup we're trying to delete
+	maxRetries := 10
+	retryInterval := 3 * time.Second
 	backup := &velerov1api.Backup{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Namespace: dbr.Namespace,
-		Name:      dbr.Spec.BackupName,
-	}, backup); apierrors.IsNotFound(err) {
+	if err := util.RetryOnError(ctx, maxRetries, retryInterval, r.logger, func() error {
+		return r.Get(ctx, types.NamespacedName{
+			Namespace: dbr.Namespace,
+			Name:      dbr.Spec.BackupName,
+		}, backup)
+	}); err != nil {
 		// Couldn't find backup - update status to Processed and record the not-found error
-		_, err = r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
-			r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
-			r.Status.Errors = []string{fmt.Sprintf("backup %q not found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)}
-		})
-		r.logger.Infof("Backup %q NOT found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)
-		return ctrl.Result{}, err
-	} else if err != nil {
+		if apierrors.IsNotFound(err) {
+			_, err = r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
+				r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
+				r.Status.Errors = []string{fmt.Sprintf("backup %q not found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)}
+			})
+			r.logger.Infof("Backup %q NOT found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, errors.Wrap(err, "error getting backup")
 	}
 	r.logger.Infof("Backup %q found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)
