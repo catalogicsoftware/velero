@@ -47,15 +47,18 @@ RUN mkdir -p /output/usr/bin && \
     go clean -modcache -cache
 
 # Velero image packing section
-FROM registry.access.redhat.com/ubi8/ubi:latest
+FROM registry.access.redhat.com/ubi9/ubi:latest
+
+ARG VERSION
+ARG GIT_SHA
 
 LABEL name="CloudCasa Velero" \
-      maintainer="support@cloudcasa.io" \
+      maintainer="CloudCasa <support@cloudcasa.io>" \
       vendor="Catalogic Software" \
       version="${VERSION}" \
       release="${VERSION}" \
       summary="CloudCasa Velero" \
-      description="Velero for CloudCasa"
+      description="Velero for CloudCasa built on ubi9"
 
 ENV GIT_COMMIT_SHA=${GIT_SHA}
 
