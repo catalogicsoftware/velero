@@ -61,7 +61,7 @@ ENV GIT_COMMIT_SHA=${GIT_SHA}
 
 COPY --from=velero-builder /output /
 
-RUN groupadd -r nogroup && mkdir /licenses
+RUN groupadd -r cnb && mkdir /licenses
 COPY LICENSE /licenses
 
 USER cnb:cnb
