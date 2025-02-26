@@ -50,7 +50,7 @@ RUN mkdir -p /output/usr/bin && \
 FROM registry.access.redhat.com/ubi8/ubi:latest
 
 LABEL name="CloudCasa Velero" \
-      maintainer="CloudCasa <support@cloudcasa.io>" \
+      maintainer="support@cloudcasa.io" \
       vendor="Catalogic Software" \
       version="${VERSION}" \
       release="${VERSION}" \
