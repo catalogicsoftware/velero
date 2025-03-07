@@ -47,23 +47,11 @@ RUN mkdir -p /output/usr/bin && \
     go clean -modcache -cache
 
 # Velero image packing section
-FROM registry.access.redhat.com/ubi9/ubi:latest
+FROM paketobuildpacks/run-jammy-tiny:0.2.38
 
-ARG VERSION
-ARG GIT_SHA
+LABEL maintainer="CloudCasa <support@cloudcasa.io>"
 
-LABEL name="CloudCasa Velero" \
-      maintainer="CloudCasa <support@cloudcasa.io>" \
-      vendor="Catalogic Software" \
-      version="${VERSION}" \
-      release="${VERSION}" \
-      summary="CloudCasa Velero" \
-      description="Velero for CloudCasa built on ubi9"
-
-ENV GIT_COMMIT_SHA=${GIT_SHA}
 COPY --from=velero-builder /output /
 
-RUN groupadd -r cnb && mkdir /licenses
-COPY LICENSE /licenses
-
 USER cnb:cnb
+
