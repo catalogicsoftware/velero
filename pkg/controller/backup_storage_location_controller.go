@@ -100,7 +100,8 @@ func (r *backupStorageLocationReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	if location.Name == "" || location.Namespace == "" {
-		log.WithError(err).Error("BackupStorageLocation is not found")
+		log.WithError(err).Errorf("BackupStorageLocation %s/%s is not found", req.Namespace, req.Name)
+		log.Infof("Found BSLs: %v", locationList.Items)
 		return ctrl.Result{}, nil
 	}
 
