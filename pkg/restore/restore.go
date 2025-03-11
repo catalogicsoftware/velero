@@ -49,6 +49,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"slices"
+
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	"github.com/vmware-tanzu/velero/internal/hook"
 	"github.com/vmware-tanzu/velero/internal/resourcemodifiers"
@@ -370,6 +372,7 @@ type restoreContext struct {
 	restoreVolumeInfoTracker       *volume.RestoreVolumeInfoTracker
 	hooksWaitExecutor              *hooksWaitExecutor
 	vmRelatedAdditionalItems       map[kubevirtutil.ItemKey]kubevirtutil.ItemKey // Map to track VM's additional items
+	includeNamedResourcesSpecified bool
 }
 
 type resourceClientKey struct {
@@ -477,8 +480,14 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 		// Log that IncludeNamedResources is specified along with its value.
 		ctx.log.Infof("Restore spec includes IncludeNamedResources: %v", ctx.restore.Spec.IncludeNamedResources)
 
+		// enable cluster scoped resource restoration as the dependent resources may be cluster scoped.
+		enableClusterScopedResourcesInRestore := true
+		ctx.restore.Spec.IncludeClusterResources = &enableClusterScopedResourcesInRestore
+
 		// Filter the backupResources using our helper that logs detailed info.
-		backupResources = filterBackupResourcesByNamedResources(backupResources, ctx.restore.Spec.IncludeNamedResources, ctx.log)
+		backupResources = filterBackupResourcesByNamedResources(ctx, backupResources, ctx.restore.Spec.IncludeNamedResources)
+
+		ctx.includeNamedResourcesSpecified = true
 
 		// Log the keys (resource types) remaining in the filtered map.
 		var keys []string
@@ -1178,10 +1187,14 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		"groupResource": groupResource.String(),
 	})
 
-	// Check if group/resource should be restored. We need to do this here since
-	// this method may be getting called for an additional item which is a group/resource
-	// that's excluded.
-	if !ctx.resourceIncludesExcludes.ShouldInclude(groupResource.String()) && !ctx.resourceMustHave.Has(groupResource.String()) {
+	// If the restore was NOT initiated with IncludeNamedResources,
+	// then enforce the regular inclusion check.Check if group/resource
+	// should be restored. We need to do this here since this method
+	// may be getting called for an additional item which is a
+	// group/resource that's excluded.
+	if !ctx.includeNamedResourcesSpecified &&
+		!ctx.resourceIncludesExcludes.ShouldInclude(groupResource.String()) &&
+		!ctx.resourceMustHave.Has(groupResource.String()) {
 		restoreLogger.Info("Not restoring item because resource is excluded")
 		return warnings, errs, itemExists
 	}
@@ -2655,70 +2668,267 @@ func (ctx *restoreContext) handleSkippedPVHasRetainPolicy(
 	return obj, nil
 }
 
-/*
-filterBackupResourcesByNamedResources takes the full set of backup resources and an includeMap
-(where keys are resource types and values are comma-separated resource names in the format "namespace/objectname"
-for namespaced resources or simply "objectname" for cluster-scoped resources). It returns a filtered map
-containing only the specified named resources.
-*/
-func filterBackupResourcesByNamedResources(resources map[string]*archive.ResourceItems, includeMap map[string]string, log logrus.FieldLogger) map[string]*archive.ResourceItems {
-	// Create an empty map to hold the filtered resources.
-	filtered := make(map[string]*archive.ResourceItems)
-	log.Infof("Starting filterBackupResourcesByNamedResources with includeMap: %v", includeMap)
+// filterBackupResourcesByNamedResources filters backup resources based on explicitly named resources in the restore request.
+func filterBackupResourcesByNamedResources(
+	ctx *restoreContext, // Restore context containing necessary clients and configuration
+	backupResources map[string]*archive.ResourceItems, // Map of all available backup resources
+	namedResources map[string]string, // Named resources explicitly specified for restore
+) map[string]*archive.ResourceItems {
+	log := ctx.log
+	log.Infof("Starting to filter backup resources based on named resources. Total resources: %d", len(namedResources))
 
-	// Iterate over each resource type in the includeMap.
-	for resourceType, namesStr := range includeMap {
-		log.Infof("Filtering resource type '%s' with names string: '%s'", resourceType, namesStr)
-		// Split the comma-separated string into individual resource identifiers.
+	filteredResources := make(map[string]*archive.ResourceItems) // Initialize map for filtered resources
+
+	// Iterate over each resource type provided in namedResources
+	for resourceType, namesStr := range namedResources {
+		log.Infof("Processing resource type: '%s' with specified names: '%s'", resourceType, namesStr)
+
+		// Split comma-separated names into a list
 		names := strings.Split(namesStr, ",")
-		// Process each resource identifier.
+
+		// Iterate over each specified name for this resource type
 		for _, n := range names {
-			// Remove any extra whitespace.
-			n = strings.TrimSpace(n)
-			var ns, name string
-			// Check if the identifier includes a slash (i.e. namespace is specified).
+			n = strings.TrimSpace(n) // Trim any leading or trailing whitespace
+
+			var ns, name string // Variables to hold namespace and resource name
+
+			// Check if the name contains a namespace (e.g., "namespace/resourceName")
 			if strings.Contains(n, "/") {
-				parts := strings.SplitN(n, "/", 2)
+				parts := strings.SplitN(n, "/", 2) // Split at the first "/"
 				ns = parts[0]
 				name = parts[1]
-				log.Debugf("Parsed namespaced identifier: namespace='%s', name='%s'", ns, name)
+				log.Infof("Parsed namespaced identifier: namespace='%s', name='%s'", ns, name)
 			} else {
-				name = n
-				log.Debugf("Parsed cluster-scoped identifier: name='%s'", name)
+				name = n // If no namespace, it's a cluster-scoped resource
+				log.Infof("Parsed cluster-scoped identifier: name='%s'", name)
 			}
 
-			// Look up the resource items for the current resource type.
-			if resItems, ok := resources[resourceType]; ok {
-				log.Infof("Found resource items for type '%s' with GroupResource: %s", resourceType, resItems.GroupResource)
-				// Iterate over the ItemsByNamespace map.
-				for namespace, items := range resItems.ItemsByNamespace {
-					// If a namespace was specified in the include and it doesn't match, skip these items.
-					if ns != "" && ns != namespace {
-						log.Debugf("Skipping namespace '%s' for resource type '%s' because it does not match specified namespace '%s'", namespace, resourceType, ns)
-						continue
-					}
-					// Iterate over each resource name within the current namespace.
-					for _, itemName := range items {
-						if itemName == name {
-							log.Infof("Match found: resource type '%s', namespace '%s', item name '%s'", resourceType, namespace, itemName)
-							// Initialize the filtered entry if not already done.
-							if _, exists := filtered[resourceType]; !exists {
-								filtered[resourceType] = &archive.ResourceItems{
-									GroupResource:    resItems.GroupResource,
-									ItemsByNamespace: make(map[string][]string),
-								}
-								log.Debugf("Initialized filtered entry for resource type '%s'", resourceType)
+			// Check if the resource type exists in the backup
+			if items, exists := backupResources[resourceType]; exists {
+				log.Infof("Resource type '%s' found in backupResources, checking for matches...", resourceType)
+
+				switch resourceType {
+				case "persistentvolumeclaims": // Special handling for PersistentVolumeClaims
+					log.Infof("Handling persistent volume claims for namespace='%s', name='%s'", ns, name)
+					handlePersistentVolumeClaims(ctx, resourceType, items, ns, name, filteredResources)
+
+				default: // General case for other resource types
+					if itemList, nsExists := items.ItemsByNamespace[ns]; nsExists {
+						log.Infof("Namespace '%s' exists in resource type '%s'. Checking item list...", ns, resourceType)
+
+						// Check if the resource name exists in the namespace
+						for _, itemName := range itemList {
+							if itemName == name {
+								log.Infof("Match found for resourceType='%s', namespace='%s', name='%s'", resourceType, ns, name)
+								addItemToFilteredResources(resourceType, ns, name, filteredResources, log)
 							}
-							// Append the matching resource name to the corresponding namespace slice.
-							filtered[resourceType].ItemsByNamespace[namespace] = append(filtered[resourceType].ItemsByNamespace[namespace], itemName)
 						}
+					} else {
+						log.Infof("Namespace '%s' not found in resource type '%s'", ns, resourceType)
 					}
 				}
 			} else {
-				log.Warnf("No resource items found for resource type '%s'", resourceType)
+				log.Infof("Resource type '%s' not found in backupResources", resourceType)
 			}
 		}
 	}
-	log.Infof("Completed filtering. Filtered resources: %v", filtered)
-	return filtered
+	log.Infof("Filtering complete. Filtered resources count: %d", len(filteredResources))
+	return filteredResources
+}
+
+// handlePersistentVolumeClaims processes PersistentVolumeClaims (PVCs) and adds related snapshot resources to filteredResources.
+func handlePersistentVolumeClaims(
+	ctx *restoreContext,
+	resource string,
+	items *archive.ResourceItems,
+	namespace string,
+	name string,
+	filteredResources map[string]*archive.ResourceItems,
+) {
+	log := ctx.log
+	log.Infof("Handling PersistentVolumeClaim (PVC): namespace='%s', name='%s'", namespace, name)
+
+	// Check if the PVC exists in the backup
+	if itemList, nsExists := items.ItemsByNamespace[namespace]; !nsExists || !slices.Contains(itemList, name) {
+		log.Infof("PVC '%s/%s' not found in backup items for namespace '%s'", namespace, name, namespace)
+		return
+	}
+
+	log.Infof("PersistentVolumeClaim '%s/%s' found in backup resources.", namespace, name)
+
+	volumeInfo := findBackupVolumeInfo(ctx, namespace, name) // Retrieve backup volume info
+	if volumeInfo == nil {
+		log.Infof("No BackupVolumeInfo found for PVC '%s/%s', skipping CSI snapshot processing", namespace, name)
+		return
+	}
+
+	log.Infof("BackupVolumeInfo found: %+v", volumeInfo)
+
+	// Check if the backup method is CSI Snapshot
+	if volumeInfo.BackupMethod == volume.CSISnapshot {
+		log.Infof("PVC '%s/%s' was backed up using CSI Snapshot", namespace, name)
+
+		// Retrieve the VolumeSnapshot and VolumeSnapshotClass names
+		vsName, vsclsName := getVolumeSnapshotDetails(resource, namespace, name, volumeInfo, log)
+
+		// If VolumeSnapshotClass doesn't exist in the cluster, add it to filtered resources
+		if vsclsName != "" && !slices.Contains(ctx.restore.Spec.ExcludedResources, "volumesnapshotclasses.snapshot.storage.k8s.io") && !checkVolumeSnapshotClassExists(ctx, vsclsName) {
+			log.Infof("Adding VolumeSnapshotClass '%s' to filtered resources", vsclsName)
+			addItemToFilteredResources("volumesnapshotclasses.snapshot.storage.k8s.io", "", vsclsName, filteredResources, log)
+		}
+
+		// Add VolumeSnapshot to filtered resources
+		if vsName != "" && !slices.Contains(ctx.restore.Spec.ExcludedResources, "volumesnapshots.snapshot.storage.k8s.io") {
+			log.Infof("Adding VolumeSnapshot '%s/%s' to filtered resources", namespace, vsName)
+			addItemToFilteredResources("volumesnapshots.snapshot.storage.k8s.io", namespace, vsName, filteredResources, log)
+		}
+	}
+
+	// Add the original PVC to filtered resources
+	log.Infof("Adding PersistentVolumeClaim '%s/%s' to filtered resources", namespace, name)
+	addItemToFilteredResources(resource, namespace, name, filteredResources, log)
+}
+
+// findBackupVolumeInfo retrieves BackupVolumeInfo for a given PVC name and namespace
+func findBackupVolumeInfo(ctx *restoreContext, namespace, name string) *volume.BackupVolumeInfo {
+	for _, vInfo := range ctx.backupVolumeInfoMap {
+		if vInfo.PVCName == name && vInfo.PVCNamespace == namespace {
+			return &vInfo
+		}
+	}
+	return nil
+}
+
+// getVolumeSnapshotDetails retrieves the VolumeSnapshot and VolumeSnapshotClass names
+func getVolumeSnapshotDetails(
+	resource, namespace, name string,
+	volumeInfo *volume.BackupVolumeInfo,
+	log logrus.FieldLogger,
+) (string, string) {
+	vsName, vsclsName := volumeInfo.CSISnapshotInfo.VSName, volumeInfo.CSISnapshotInfo.VSCLSName
+
+	if vsName != "" && vsclsName != "" {
+		return vsName, vsclsName
+	}
+
+	log.Warnf("Missing CSI Snapshot details for PVC '%s/%s'. Retrieving from backup resources...", namespace, name)
+
+	pvc := retrieveUnstructuredObject(resource, namespace, name, log)
+	if pvc == nil {
+		log.Errorf("Failed to retrieve PVC '%s/%s' for additional CSI information", namespace, name)
+		return vsName, vsclsName
+	}
+
+	log.Infof("Successfully retrieved PVC '%s/%s' for CSI Snapshot info lookup", namespace, name)
+
+	// Extract VolumeSnapshot name from PVC annotations
+	if vsName == "" {
+		if annotations := pvc.GetAnnotations(); annotations != nil {
+			vsName = annotations["velero.io/volume-snapshot-name"]
+			log.Infof("Extracted VolumeSnapshot name from PVC annotations: '%s'", vsName)
+		}
+	}
+
+	// Extract VolumeSnapshotClass name from the VolumeSnapshot object
+	if vsclsName == "" && vsName != "" {
+		log.Infof("Retrieving VolumeSnapshot '%s' to determine VolumeSnapshotClass", vsName)
+		vs := retrieveUnstructuredObject("volumesnapshots.snapshot.storage.k8s.io", namespace, vsName, log)
+		if vs != nil {
+			log.Infof("Successfully retrieved VolumeSnapshot '%s' for class lookup", vsName)
+			if value, found, err := unstructured.NestedString(vs.Object, "spec", "volumesnapshotclass"); err == nil && found {
+				vsclsName = value
+				log.Infof("Extracted VolumeSnapshotClass: '%s'", vsclsName)
+			}
+		}
+	}
+
+	return vsName, vsclsName
+}
+
+// checkVolumeSnapshotClassExists checks if a VolumeSnapshotClass exists in the Kubernetes cluster.
+func checkVolumeSnapshotClassExists(ctx *restoreContext, vsclsName string) bool {
+	// Define the API group and version for VolumeSnapshotClass.
+	vsClassGV := schema.GroupVersion{
+		Group:   "snapshot.storage.k8s.io", // API Group for CSI snapshots
+		Version: "v1",                      // API Version
+	}
+
+	// Define the API resource metadata for VolumeSnapshotClass.
+	vsClassAPIResource := metav1.APIResource{
+		Name:         "volumesnapshotclasses",     // Plural name of the resource
+		SingularName: "volumesnapshotclass",       // Singular name
+		Namespaced:   false,                       // Cluster-scoped resource (not namespaced)
+		Kind:         "VolumeSnapshotClass",       // Kubernetes Kind
+		Verbs:        metav1.Verbs{"get", "list"}, // Allowed API verbs
+	}
+
+	// Retrieve a dynamic client to interact with the VolumeSnapshotClass resource.
+	dynamicClient, err := ctx.dynamicFactory.ClientForGroupVersionResource(vsClassGV, vsClassAPIResource, "")
+	if err != nil {
+		// Log the error if the client cannot be initialized and return false.
+		ctx.log.Errorf("Failed to get dynamic client for VolumeSnapshotClass: %v", err)
+		return false
+	}
+
+	// Attempt to get the specified VolumeSnapshotClass by name.
+	_, err = dynamicClient.Get(vsclsName, metav1.GetOptions{})
+
+	// If the error indicates the resource was not found, return false.
+	if apierrors.IsNotFound(err) {
+		return false
+	} else if err != nil {
+		// Log any unexpected error and return false.
+		ctx.log.Errorf("Error checking for VolumeSnapshotClass '%s': %v", vsclsName, err)
+		return false
+	}
+
+	// If no error occurred, the VolumeSnapshotClass exists.
+	return true
+}
+
+// addItemToFilteredResources adds a specified resource to the filteredResources map.
+func addItemToFilteredResources(resourceType, namespace, name string, filteredResources map[string]*archive.ResourceItems, log logrus.FieldLogger) {
+	log.Infof("Adding resourceType='%s', namespace='%s', name='%s' to filtered resources", resourceType, namespace, name)
+
+	// Check if this resource type already exists in the filtered resources.
+	if _, exists := filteredResources[resourceType]; !exists {
+		// If not, initialize an entry for this resource type.
+		log.Infof("Initializing resourceType='%s' in filteredResources", resourceType)
+		filteredResources[resourceType] = &archive.ResourceItems{ItemsByNamespace: make(map[string][]string)}
+	}
+
+	// Append the resource name to the appropriate namespace in filtered resources.
+	filteredResources[resourceType].ItemsByNamespace[namespace] = append(filteredResources[resourceType].ItemsByNamespace[namespace], name)
+}
+
+// retrieveUnstructuredObject retrieves an unstructured Kubernetes resource from a backup archive.
+func retrieveUnstructuredObject(resourceType, namespace, name string, log logrus.FieldLogger) *unstructured.Unstructured {
+	log.Infof("Retrieving unstructured object: resourceType='%s', namespace='%s', name='%s'", resourceType, namespace, name)
+
+	// Compute the file path where the resource data is stored in the backup.
+	filePath := archive.GetItemFilePath("/backup", resourceType, namespace, name)
+	log.Debugf("Computed file path for object: %s", filePath)
+
+	// Attempt to read the file contents.
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		// Log an error if the file could not be read and return nil.
+		log.Errorf("Failed to read file at path '%s': %v", filePath, err)
+		return nil
+	}
+	log.Debugf("Successfully read file for resourceType='%s', namespace='%s', name='%s'", resourceType, namespace, name)
+
+	// Create an empty unstructured object to store the parsed JSON data.
+	obj := &unstructured.Unstructured{}
+
+	// Attempt to unmarshal the JSON data into the unstructured object.
+	if err := json.Unmarshal(data, obj); err != nil {
+		// Log an error if JSON parsing fails and return nil.
+		log.Errorf("Failed to unmarshal JSON data for resourceType='%s', namespace='%s', name='%s': %v", resourceType, namespace, name, err)
+		return nil
+	}
+
+	// Log success and return the retrieved object.
+	log.Infof("Successfully retrieved and unmarshaled object: resourceType='%s', namespace='%s', name='%s'", resourceType, namespace, name)
+	return obj
 }
