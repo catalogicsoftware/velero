@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Velero binary build section
-FROM --platform=$BUILDPLATFORM golang:1.22.2-bookworm as velero-builder
+FROM --platform=$BUILDPLATFORM golang:1.22.7-bookworm as velero-builder
 
 ARG GOPROXY
 ARG BIN
