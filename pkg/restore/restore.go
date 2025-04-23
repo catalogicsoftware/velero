@@ -2759,6 +2759,11 @@ func handlePersistentVolumeClaims(
 	volumeInfo := findBackupVolumeInfo(ctx, namespace, name) // Retrieve backup volume info
 	if volumeInfo == nil {
 		log.Infof("No BackupVolumeInfo found for PVC '%s/%s', skipping CSI snapshot processing", namespace, name)
+
+		// Add the original PVC to filtered resources
+		log.Infof("Adding PersistentVolumeClaim '%s/%s' to filtered resources", namespace, name)
+		addItemToFilteredResources(resource, namespace, name, filteredResources, log)
+
 		return
 	}
 
