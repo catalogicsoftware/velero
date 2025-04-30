@@ -670,13 +670,9 @@ func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolume
 		}
 
 		if strings.HasPrefix(setBackupMethod, "LIVE") {
-			if *pvc.Spec.VolumeMode != corev1api.PersistentVolumeBlock {
-				p.log.Infof("Skipping snapshot of PVC %s/%s with storage class %s and backup method %s", pvc.Namespace, pvc.Name,
-					*pvc.Spec.StorageClassName, setBackupMethod)
-				return true, nil
-			} else {
-				p.log.Infof("Ignoring PVC %s/%s backup method %s because it is a block volume", pvc.Namespace, pvc.Name, setBackupMethod)
-			}
+			p.log.Infof("Skipping snapshot of PVC %s/%s with storage class %s and backup method %s", pvc.Namespace, pvc.Name,
+				*pvc.Spec.StorageClassName, setBackupMethod)
+			return true, nil
 		}
 	}
 
