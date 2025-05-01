@@ -323,6 +323,7 @@ func (kr *kubernetesRestorer) RestoreWithResolvers(
 		backupVolumeInfoMap:            req.BackupVolumeInfoMap,
 		restoreVolumeInfoTracker:       req.RestoreVolumeInfoTracker,
 		hooksWaitExecutor:              hooksWaitExecutor,
+		includeNamedResourcesSpecified: len(req.Restore.Spec.IncludeNamedResources) > 0,
 	}
 
 	return restoreCtx.execute()
@@ -373,6 +374,7 @@ type restoreContext struct {
 	hooksWaitExecutor              *hooksWaitExecutor
 	vmRelatedAdditionalItems       map[kubevirtutil.ItemKey]kubevirtutil.ItemKey // Map to track VM's additional items
 	includeNamedResourcesSpecified bool
+	restoreResourceManifestsOnly   bool
 }
 
 type resourceClientKey struct {
@@ -487,7 +489,10 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 		// Filter the backupResources using our helper that logs detailed info.
 		backupResources = filterBackupResourcesByNamedResources(ctx, backupResources, ctx.restore.Spec.IncludeNamedResources)
 
-		ctx.includeNamedResourcesSpecified = true
+		if _, ok := ctx.restore.Annotations["restore-resource-manifests-only"]; ok {
+			ctx.restoreResourceManifestsOnly = true
+			ctx.log.Infof("Restore is configured to restore only resource manifests, no additional or dependent resources will be restored.")
+		}
 
 		// Log the keys (resource types) remaining in the filtered map.
 		var keys []string
@@ -1478,6 +1483,11 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 
 		obj = unstructuredObj
 
+		if ctx.restoreResourceManifestsOnly {
+			ctx.log.Infof("Skipping restore of dependent resources for %s/%s due to restore-resource-manifests-only setting.", obj.GetNamespace(), obj.GetName())
+			return warnings, errs, itemExists
+		}
+
 		var filteredAdditionalItems []velero.ResourceIdentifier
 		for _, additionalItem := range executeOutput.AdditionalItems {
 			itemPath := archive.GetItemFilePath(ctx.restoreDir, additionalItem.GroupResource.String(), additionalItem.Namespace, additionalItem.Name)
@@ -1490,6 +1500,12 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 				}).Warn("unable to restore additional item")
 				warnings.Add(additionalItem.Namespace, err)
 
+				continue
+			}
+
+			// Add a check to prevent restoring additional resources
+			if ctx.restoreResourceManifestsOnly {
+				ctx.log.Infof("Skipping restore of additional item %s/%s due to restore-resource-manifests-only setting.", additionalItem.Namespace, additionalItem.Name)
 				continue
 			}
 
@@ -2710,22 +2726,13 @@ func filterBackupResourcesByNamedResources(
 				switch resourceType {
 				case "persistentvolumeclaims": // Special handling for PersistentVolumeClaims
 					log.Infof("Handling persistent volume claims for namespace='%s', name='%s'", ns, name)
-					handlePersistentVolumeClaims(ctx, resourceType, items, ns, name, filteredResources)
-
-				default: // General case for other resource types
-					if itemList, nsExists := items.ItemsByNamespace[ns]; nsExists {
-						log.Infof("Namespace '%s' exists in resource type '%s'. Checking item list...", ns, resourceType)
-
-						// Check if the resource name exists in the namespace
-						for _, itemName := range itemList {
-							if itemName == name {
-								log.Infof("Match found for resourceType='%s', namespace='%s', name='%s'", resourceType, ns, name)
-								addItemToFilteredResources(resourceType, ns, name, filteredResources, log)
-							}
-						}
+					if !ctx.restoreResourceManifestsOnly {
+						handlePersistentVolumeClaims(ctx, resourceType, items, ns, name, filteredResources)
 					} else {
-						log.Infof("Namespace '%s' not found in resource type '%s'", ns, resourceType)
+						handleOtherResourceTypes(resourceType, items, ns, name, filteredResources, log)
 					}
+				default: // General case for other resource types
+					handleOtherResourceTypes(resourceType, items, ns, name, filteredResources, log)
 				}
 			} else {
 				log.Infof("Resource type '%s' not found in backupResources", resourceType)
@@ -2734,6 +2741,23 @@ func filterBackupResourcesByNamedResources(
 	}
 	log.Infof("Filtering complete. Filtered resources count: %d", len(filteredResources))
 	return filteredResources
+}
+
+// The function containing the rest of your code
+func handleOtherResourceTypes(resourceType string, items *archive.ResourceItems, ns string, name string, filteredResources map[string]*archive.ResourceItems, log logrus.FieldLogger) {
+	if itemList, nsExists := items.ItemsByNamespace[ns]; nsExists {
+		log.Infof("Namespace '%s' exists in resource type '%s'. Checking item list...", ns, resourceType)
+
+		// Check if the resource name exists in the namespace
+		for _, itemName := range itemList {
+			if itemName == name {
+				log.Infof("Match found for resourceType='%s', namespace='%s', name='%s'", resourceType, ns, name)
+				addItemToFilteredResources(resourceType, ns, name, filteredResources, log)
+			}
+		}
+	} else {
+		log.Infof("Namespace '%s' not found in resource type '%s'", ns, resourceType)
+	}
 }
 
 // handlePersistentVolumeClaims processes PersistentVolumeClaims (PVCs) and adds related snapshot resources to filteredResources.
