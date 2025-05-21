@@ -726,7 +726,24 @@ func (r *restoreReconciler) deleteExternalResources(restore *api.Restore) error 
 		return errors.Wrap(err, fmt.Sprintf("can't get backupStore, backup: %s", restore.Spec.BackupName))
 	}
 
-	if err = backupStore.DeleteRestore(restore.Name); err != nil {
+	// Actual call to delete restore files
+	err = backupStore.DeleteRestore(restore.Name)
+	if err != nil {
+		errStr := err.Error()
+
+		// Azure: Blob is immutable
+		if strings.Contains(errStr, "BlobImmutableDueToPolicy") {
+			r.logger.WithError(err).Warn("Azure Blob is immutable due to Object Lock. Skipping delete and not retrying.")
+			return nil
+		}
+
+		// S3: Access denied due to Object Lock
+		if strings.Contains(errStr, "AccessDenied") && strings.Contains(errStr, "Object Lock") {
+			r.logger.WithError(err).Warn("S3 object is protected by Object Lock. Skipping delete and not retrying.")
+			return nil
+		}
+
+		// Retry all other errors
 		return errors.Wrap(err, fmt.Sprintf("can't delete restore files in object storage, backup: %s", restore.Spec.BackupName))
 	}
 
