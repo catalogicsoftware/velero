@@ -197,6 +197,10 @@ func (r *itemCollector) getItemsFromResourceIdentifiers(
 func (r *itemCollector) getAllItems() []*kubernetesResource {
 	resources := r.getItems(nil)
 
+	if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+		r.log.Warnf("Backup cancelled before filtering namespaces: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+		return []*kubernetesResource{}
+	}
 	return r.nsTracker.filterNamespaces(resources)
 }
 
@@ -217,6 +221,10 @@ func (r *itemCollector) getItems(
 ) []*kubernetesResource {
 	var resources []*kubernetesResource
 	for _, group := range r.discoveryHelper.Resources() {
+		if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+			r.log.Warnf("Backup cancelled during resource listing: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+			return resources
+		}
 		groupItems, err := r.getGroupItems(r.log, group, resourceIDsMap)
 		if err != nil {
 			r.log.WithError(err).WithField("apiGroup", group.String()).
@@ -256,6 +264,10 @@ func (r *itemCollector) getGroupItems(
 
 	var items []*kubernetesResource
 	for _, resource := range group.APIResources {
+		if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+			r.log.Warnf("Backup cancelled while getting froup items: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+			return items, errors.New("backup cancelled by user")
+		}
 		resourceItems, err := r.getResourceItems(log, gv, resource, resourceIDsMap)
 		if err != nil {
 			log.WithError(err).WithField("resource", resource.String()).
@@ -372,6 +384,10 @@ func (r *itemCollector) getResourceItems(
 		}
 		var items []*kubernetesResource
 		for _, resourceID := range resourceIDs {
+			if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+				r.log.Warnf("Backup cancelled while getting resource items: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+				return items, errors.New("backup cancelled by user")
+			}
 			log.WithFields(
 				logrus.Fields{
 					"namespace": resourceID.Namespace,
@@ -456,6 +472,10 @@ func (r *itemCollector) getResourceItems(
 	var items []*kubernetesResource
 
 	for _, namespace := range namespacesToList {
+		if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+			r.log.Warnf("Backup cancelled while getting namespaces: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+			return items, errors.New("backup cancelled by user")
+		}
 		unstructuredItems, err := r.listResourceByLabelsPerNamespace(
 			namespace, gr, gv, resource, log)
 		if err != nil {
@@ -464,6 +484,10 @@ func (r *itemCollector) getResourceItems(
 
 		// Collect items in included Namespaces
 		for i := range unstructuredItems {
+			if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+				r.log.Warnf("Backup cancelled while getting unstructured items: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+				return items, errors.New("backup cancelled by user")
+			}
 			item := &unstructuredItems[i]
 
 			path, err := r.writeToFile(item)
@@ -525,6 +549,10 @@ func (r *itemCollector) listResourceByLabelsPerNamespace(
 	// Listing items for orLabelSelectors
 	errListingForNS := false
 	for _, label := range orLabelSelectors {
+		if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+			r.log.Warnf("Backup cancelled while getting namespaces: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+			return unstructuredItems, errors.New("backup cancelled by user")
+		}
 		unstructuredItems, err = r.listItemsForLabel(unstructuredItems, gr, label, resourceClient)
 		if err != nil {
 			errListingForNS = true
@@ -560,6 +588,10 @@ func (r *itemCollector) listResourceByLabelsPerNamespace(
 }
 
 func (r *itemCollector) writeToFile(item *unstructured.Unstructured) (string, error) {
+	if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+		r.log.Warnf("Backup cancelled during file write: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+		return "", errors.New("backup cancelled before writing file")
+	}
 	f, err := os.CreateTemp(r.dir, "")
 	if err != nil {
 		return "", errors.Wrap(err, "error creating temp file")
@@ -669,6 +701,10 @@ func (r *itemCollector) processPagerClientCalls(
 	// TODO allow configuration of page buffer size
 	listPager.PageSize = int64(r.pageSize)
 	// Add each item to temporary slice
+	if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+		r.log.Warnf("Backup cancelled during resource listing: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+		return nil, errors.New("backup cancelled during listing labels")
+	}
 	list, paginated, err := listPager.List(context.Background(), metav1.ListOptions{LabelSelector: label})
 
 	if err != nil {
@@ -689,6 +725,10 @@ func (r *itemCollector) listItemsForLabel(
 	label string,
 	resourceClient client.Dynamic,
 ) ([]unstructured.Unstructured, error) {
+	if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+		r.log.Warnf("Backup cancelled during resource listing: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+		return unstructuredItems, errors.New("backup cancelled by user")
+	}
 	if r.pageSize > 0 {
 		// process pager client calls
 		list, err := r.processPagerClientCalls(gr, label, resourceClient)
@@ -697,6 +737,10 @@ func (r *itemCollector) listItemsForLabel(
 		}
 
 		err = meta.EachListItem(list, func(object runtime.Object) error {
+			if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+				r.log.Warnf("Backup cancelled while processing paginated list: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+				return errors.New("backup cancelled during pagination")
+			}
 			u, ok := object.(*unstructured.Unstructured)
 			if !ok {
 				r.log.WithError(errors.WithStack(fmt.Errorf("expected *unstructured.Unstructured but got %T", u))).
@@ -711,6 +755,10 @@ func (r *itemCollector) listItemsForLabel(
 			return unstructuredItems, err
 		}
 	} else {
+		if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+			r.log.Warnf("Backup cancelled during resource listing: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+			return unstructuredItems, errors.New("backup cancelled during listing labels")
+		}
 		unstructuredList, err := resourceClient.List(metav1.ListOptions{LabelSelector: label})
 		if err != nil {
 			r.log.WithError(errors.WithStack(err)).Error("Error listing items")
@@ -735,6 +783,10 @@ func (r *itemCollector) collectNamespaces(
 		return nil, errors.WithStack(err)
 	}
 
+	if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+		r.log.Warnf("Backup cancelled during resource listing: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+		return nil, errors.New("backup cancelled before collecting namespaces")
+	}
 	unstructuredList, err := resourceClient.List(metav1.ListOptions{})
 	if err != nil {
 		log.WithError(errors.WithStack(err)).Error("error list namespaces")
@@ -775,6 +827,10 @@ func (r *itemCollector) collectNamespaces(
 	var items []*kubernetesResource
 
 	for index := range unstructuredList.Items {
+		if r.backupRequest.Context != nil && r.backupRequest.Context.Err() != nil {
+			r.log.Warnf("Backup cancelled during resource listing: %s/%s", r.backupRequest.Namespace, r.backupRequest.Name)
+			return items, errors.New("backup cancelled by user")
+		}
 		path, err := r.writeToFile(&unstructuredList.Items[index])
 		if err != nil {
 			log.WithError(err).Errorf("Error writing item %s to file",

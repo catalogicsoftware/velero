@@ -100,6 +100,32 @@ func (r *backupFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, errors.WithStack(err)
 	}
 
+	if val, ok := backup.Annotations["velero.io/backup-cancelled"]; ok && val == "true" {
+		log.Infof("Detected cancelled backup %s. Running cleanup tasks...", backup.Name)
+
+		original := backup.DeepCopy() // Save original before making changes
+
+		err := r.backupper.CleanupBackup(ctx, &pkgbackup.Request{
+			Backup: backup,
+		})
+		if err != nil {
+			log.Warnf("Failed to cleanup CSI snapshots for backup %s. Error is %s", backup.Name, err.Error())
+		}
+
+		if backup.Status.Phase != velerov1api.BackupPhaseFailed {
+			backup.Status.Phase = velerov1api.BackupPhaseFailed
+			backup.Status.FailureReason = "Backup was cancelled by the user"
+		}
+		backup.Status.CompletionTimestamp = &metav1.Time{Time: r.clock.Now()}
+
+		// Patch the changes using the original
+		if err := r.client.Patch(ctx, backup, kbclient.MergeFrom(original)); err != nil {
+			log.WithError(err).Error("Failed to patch backup status after cancellation")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil // Don't fall through to finalization
+	}
+
 	switch backup.Status.Phase {
 	case velerov1api.BackupPhaseFinalizing, velerov1api.BackupPhaseFinalizingPartiallyFailed:
 		// only process backups finalizing after  plugin operations are complete

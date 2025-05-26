@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
@@ -30,9 +31,19 @@ import (
 	corev1api "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -219,27 +230,35 @@ func (b *backupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 
-	// Double-check we have the correct phase. In the unlikely event that multiple controller
-	// instances are running, it's possible for controller A to succeed in changing the phase to
-	// InProgress, while controller B's attempt to patch the phase fails. When controller B
-	// reprocesses the same backup, it will either show up as New (informer hasn't seen the update
-	// yet) or as InProgress. In the former case, the patch attempt will fail again, until the
-	// informer sees the update. In the latter case, after the informer has seen the update to
-	// InProgress, we still need this check so we can return nil to indicate we've finished processing
-	// this key (even though it was a no-op).
-	switch original.Status.Phase {
-	case "", velerov1api.BackupPhaseNew:
-		// only process new backups
-	default:
-		b.logger.WithFields(logrus.Fields{
-			"backup": kubeutil.NamespaceAndName(original),
-			"phase":  original.Status.Phase,
-		}).Debug("Backup is not handled")
+	if original.Annotations["velero.io/backup-cancelled"] == "true" {
+		log.Infof("Detected mid-backup cancellation for %s/%s. Cancelling context via tracker", req.Namespace, req.Name)
+		b.backupTracker.Cancel(req.Namespace, req.Name)
+		log.Infof("Backup marked as cancelled")
 		return ctrl.Result{}, nil
-	}
+	} else {
 
+		// Double-check we have the correct phase. In the unlikely event that multiple controller
+		// instances are running, it's possible for controller A to succeed in changing the phase to
+		// InProgress, while controller B's attempt to patch the phase fails. When controller B
+		// reprocesses the same backup, it will either show up as New (informer hasn't seen the update
+		// yet) or as InProgress. In the former case, the patch attempt will fail again, until the
+		// informer sees the update. In the latter case, after the informer has seen the update to
+		// InProgress, we still need this check so we can return nil to indicate we've finished processing
+		// this key (even though it was a no-op).
+		switch original.Status.Phase {
+		case "", velerov1api.BackupPhaseNew:
+			// only process new backups
+		default:
+			b.logger.WithFields(logrus.Fields{
+				"backup": kubeutil.NamespaceAndName(original),
+				"phase":  original.Status.Phase,
+			}).Debug("Backup is not handled")
+			return ctrl.Result{}, nil
+		}
+	}
 	log.Debug("Preparing backup request")
 	request := b.prepareBackupRequest(original, log)
+
 	if len(request.Status.ValidationErrors) > 0 {
 		request.Status.Phase = velerov1api.BackupPhaseFailedValidation
 	} else {
@@ -266,6 +285,7 @@ func (b *backupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	original = request.Backup.DeepCopy()
 
 	b.backupTracker.Add(request.Namespace, request.Name)
+	request.Context = b.backupTracker.GetContext(request.Namespace, request.Name)
 	defer func() {
 		switch request.Status.Phase {
 		case velerov1api.BackupPhaseCompleted, velerov1api.BackupPhasePartiallyFailed, velerov1api.BackupPhaseFailed, velerov1api.BackupPhaseFailedValidation:
@@ -276,6 +296,8 @@ func (b *backupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	log.Debug("Running backup")
 
 	b.metrics.RegisterBackupAttempt(backupScheduleName)
+
+	go startBackupCancelWatcher(ctx, request.Namespace, request.Name, log, b)
 
 	// execution & upload of backup
 	if err := b.runBackup(request); err != nil {
@@ -817,53 +839,103 @@ func persistBackup(backup *pkgbackup.Request,
 	persistErrs := []error{}
 	backupJSON := new(bytes.Buffer)
 
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	if err := encode.To(backup.Backup, "json", backupJSON); err != nil {
 		persistErrs = append(persistErrs, errors.Wrap(err, "error encoding backup"))
 	}
 
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	// Velero-native volume snapshots (as opposed to CSI ones)
 	nativeVolumeSnapshots, errs := encode.ToJSONGzip(backup.VolumeSnapshots, "native volumesnapshots list")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
 
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	var backupItemOperations *bytes.Buffer
 	backupItemOperations, errs = encode.ToJSONGzip(backup.GetItemOperationsList(), "backup item operations list")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
 
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	podVolumeBackups, errs := encode.ToJSONGzip(backup.PodVolumeBackups, "pod volume backups list")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
 
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	csiSnapshotJSON, errs := encode.ToJSONGzip(csiVolumeSnapshots, "csi volume snapshots list")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
 
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	csiSnapshotContentsJSON, errs := encode.ToJSONGzip(csiVolumeSnapshotContents, "csi volume snapshot contents list")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
+	}
+
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
 	}
 	csiSnapshotClassesJSON, errs := encode.ToJSONGzip(csiVolumeSnapshotClasses, "csi volume snapshot classes list")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
 
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	backupResourceList, errs := encode.ToJSONGzip(backup.BackupResourceList(), "backup resources list")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
 
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	backupResult, errs := encode.ToJSONGzip(results, "backup results")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
 
 	backup.FillVolumesInformation()
-
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	volumeInfoJSON, errs := encode.ToJSONGzip(backup.VolumesInformation.Result(
 		csiVolumeSnapshots,
 		csiVolumeSnapshotContents,
@@ -904,6 +976,11 @@ func persistBackup(backup *pkgbackup.Request,
 		CSIVolumeSnapshotClasses:  csiSnapshotClassesJSON,
 		BackupVolumeInfo:          volumeInfoJSON,
 	}
+	if backup.Context != nil && backup.Context.Err() != nil {
+		logger.Warn("Backup cancelled before uploading to object store")
+		persistErrs = append(persistErrs, errors.New("backup cancelled before upload"))
+		return persistErrs
+	}
 	if err := backupStore.PutBackup(backupInfo); err != nil {
 		persistErrs = append(persistErrs, err)
 	}
@@ -934,4 +1011,117 @@ func oldAndNewFilterParametersUsedTogether(backupSpec velerov1api.BackupSpec) bo
 		(len(backupSpec.ExcludedNamespaceScopedResources) > 0)
 
 	return haveOldResourceFilterParameters && haveNewResourceFilterParameters
+}
+
+func startBackupCancelWatcher(ctx context.Context, namespace, name string, log logrus.FieldLogger, b *backupReconciler) error {
+
+	// 1. Create a dynamic client
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.WithError(err).Error("failed to build in-cluster config")
+		return err // fall back to original context
+	}
+	dynClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		log.WithError(err).Error("failed to create dynamic client")
+		return err
+	}
+
+	// 2. Setup GVR for Velero Backup
+	gvr := schema.GroupVersionResource{
+		Group:    "cloudcasa.io",
+		Version:  "v1",
+		Resource: "backups",
+	}
+
+	fieldSelector := fields.OneTermEqualSelector("metadata.name", name).String()
+
+	listWatch := &cache.ListWatch{
+		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+			opts.FieldSelector = fieldSelector
+			return dynClient.Resource(gvr).Namespace(namespace).List(context.TODO(), opts)
+		},
+		WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
+			opts.FieldSelector = fieldSelector
+			return dynClient.Resource(gvr).Namespace(namespace).Watch(context.TODO(), opts)
+		},
+	}
+
+	stopCh := make(chan struct{})
+	var once sync.Once
+	safeStop := func() {
+		once.Do(func() {
+			close(stopCh)
+		})
+	}
+
+	informer := cache.NewSharedInformer(
+		listWatch,
+		&unstructured.Unstructured{},
+		0, // No resync
+	)
+
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			oldBackup := oldObj.(*unstructured.Unstructured)
+			newBackup := newObj.(*unstructured.Unstructured)
+
+			oldAnnotations := oldBackup.GetAnnotations()
+			newAnnotations := newBackup.GetAnnotations()
+
+			_, oldHadCancel := oldAnnotations["velero.io/backup-cancelled"]
+			newCancelVal, newHasCancel := newAnnotations["velero.io/backup-cancelled"]
+
+			if !oldHadCancel && newHasCancel && newCancelVal == "true" {
+				log.Infof("Detected backup cancellation via shared informer: %s/%s", namespace, name)
+				b.backupTracker.Cancel(namespace, name)
+				safeStop()
+
+				// Use built-in retry to update the backup status
+				go func() {
+					ctx := context.Background()
+					key := types.NamespacedName{Namespace: namespace, Name: name}
+
+					updateErr := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+						var backup velerov1api.Backup
+						if err := b.kbClient.Get(ctx, key, &backup); err != nil {
+							log.WithError(err).Errorf("Failed to get Backup %s/%s for status update", namespace, name)
+							return err
+						}
+
+						// Only update if not already marked failed
+						if backup.Status.Phase != velerov1api.BackupPhaseFailed {
+							now := metav1.NewTime(time.Now())
+							backup.Status.Phase = velerov1api.BackupPhaseFailed
+							backup.Status.FailureReason = "Backup cancelled by user"
+							backup.Status.CompletionTimestamp = &now
+						}
+						return b.kbClient.Status().Update(ctx, &backup)
+					})
+
+					if updateErr != nil {
+						log.WithError(updateErr).Errorf("Failed to update status of Backup %s/%s", namespace, name)
+					} else {
+						log.Infof("Successfully updated Backup %s/%s status to Failed", namespace, name)
+					}
+				}()
+			}
+		},
+
+		DeleteFunc: func(obj interface{}) {
+			log.Infof("Backup CR %s/%s deleted. Stopping watcher", namespace, name)
+			b.backupTracker.Cancel(namespace, name)
+			safeStop()
+		},
+	})
+
+	go informer.Run(stopCh)
+
+	go func() {
+		<-ctx.Done()
+		log.Infof("Parent context for %s/%s was cancelled. Stopping watcher", namespace, name)
+		safeStop()
+	}()
+
+	return nil
 }
