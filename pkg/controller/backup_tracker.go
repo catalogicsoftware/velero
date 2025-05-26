@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -31,32 +32,44 @@ type BackupTracker interface {
 	Delete(ns, name string)
 	// Contains returns true if the tracker is tracking the backup.
 	Contains(ns, name string) bool
+	Cancel(ns, name string)
+	GetContext(ns, name string) context.Context
+}
+
+type backupContext struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 type backupTracker struct {
-	lock    sync.RWMutex
-	backups sets.Set[string]
+	lock     sync.RWMutex
+	backups  sets.Set[string]
+	contexts map[string]*backupContext
 }
 
 // NewBackupTracker returns a new BackupTracker.
 func NewBackupTracker() BackupTracker {
 	return &backupTracker{
-		backups: sets.New[string](),
+		backups:  sets.New[string](),
+		contexts: make(map[string]*backupContext),
 	}
 }
 
 func (bt *backupTracker) Add(ns, name string) {
 	bt.lock.Lock()
 	defer bt.lock.Unlock()
+	key := backupTrackerKey(ns, name)
 
-	bt.backups.Insert(backupTrackerKey(ns, name))
-}
+	if bt.contexts == nil {
+		bt.contexts = make(map[string]*backupContext)
+	}
+	bt.backups.Insert(key)
 
-func (bt *backupTracker) Delete(ns, name string) {
-	bt.lock.Lock()
-	defer bt.lock.Unlock()
-
-	bt.backups.Delete(backupTrackerKey(ns, name))
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	bt.contexts[key] = &backupContext{
+		ctx:    ctx,
+		cancel: cancelFunc,
+	}
 }
 
 func (bt *backupTracker) Contains(ns, name string) bool {
@@ -66,6 +79,41 @@ func (bt *backupTracker) Contains(ns, name string) bool {
 	return bt.backups.Has(backupTrackerKey(ns, name))
 }
 
+func (bt *backupTracker) Delete(ns, name string) {
+	bt.lock.Lock()
+	defer bt.lock.Unlock()
+	key := backupTrackerKey(ns, name)
+
+	bt.backups.Delete(key)
+
+	// Safely cancel and delete from contexts map
+	if ctx, ok := bt.contexts[key]; ok && ctx.cancel != nil {
+		ctx.cancel()
+	}
+	delete(bt.contexts, key)
+}
+
+func (bt *backupTracker) Cancel(ns, name string) {
+	bt.lock.Lock()
+	defer bt.lock.Unlock()
+	key := backupTrackerKey(ns, name)
+
+	if ctx, ok := bt.contexts[key]; ok && ctx.cancel != nil {
+		ctx.cancel()
+	}
+}
+
 func backupTrackerKey(ns, name string) string {
 	return fmt.Sprintf("%s/%s", ns, name)
+}
+
+func (bt *backupTracker) GetContext(ns, name string) context.Context {
+	bt.lock.Lock()
+	defer bt.lock.Unlock()
+
+	key := backupTrackerKey(ns, name)
+	if ctx, ok := bt.contexts[key]; ok {
+		return ctx.ctx
+	}
+	return nil
 }

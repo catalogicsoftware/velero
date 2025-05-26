@@ -29,11 +29,13 @@ import (
 	"strings"
 	"time"
 
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
@@ -71,6 +73,8 @@ const BackupVersion = 1
 // BackupFormatVersion is the current backup version for Velero, including major, minor, and patch.
 const BackupFormatVersion = "1.1.0"
 
+var ErrBackupCancelled = errors.New("backup cancelled by user")
+
 // Backupper performs backups.
 type Backupper interface {
 	// Backup takes a backup using the specification in the velerov1api.Backup and writes backup and log data
@@ -98,6 +102,11 @@ type Backupper interface {
 		outBackupFile io.Writer,
 		backupItemActionResolver framework.BackupItemActionResolverV2,
 		asyncBIAOperations []*itemoperation.BackupOperation,
+	) error
+
+	CleanupBackup(
+		ctx context.Context,
+		req *Request,
 	) error
 }
 
@@ -358,6 +367,12 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 
 	log.WithField("progress", "").Infof("Collected %d items matching the backup spec from the Kubernetes API (actual number of items backed up may be more or less depending on velero.io/exclude-from-backup annotation, plugins returning additional related items to back up, etc.)", len(items))
 
+	// CANCEL CHECK HERE
+	if backupRequest.Context != nil && backupRequest.Context.Err() != nil {
+		log.Warnf("Backup cancelled mid-execution, stopping")
+		return ErrBackupCancelled
+	}
+
 	updated := backupRequest.Backup.DeepCopy()
 	if updated.Status.Progress == nil {
 		updated.Status.Progress = &velerov1api.BackupProgress{}
@@ -454,6 +469,11 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 
 	backedUpGroupResources := map[schema.GroupResource]bool{}
 
+	if backupRequest.Context != nil && backupRequest.Context.Err() != nil {
+		log.Warnf("Backup cancelled mid-execution, stopping")
+		return ErrBackupCancelled
+	}
+
 	for i, item := range items {
 		log.WithFields(map[string]interface{}{
 			"progress":  "",
@@ -461,6 +481,11 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 			"namespace": item.namespace,
 			"name":      item.name,
 		}).Infof("Processing item")
+
+		if backupRequest.Context != nil && backupRequest.Context.Err() != nil {
+			log.Warnf("Backup cancelled during item processing: %s/%s", item.namespace, item.name)
+			return ErrBackupCancelled
+		}
 
 		// use an anonymous func so we can defer-close/remove the file
 		// as soon as we're done with it
@@ -506,6 +531,10 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 	// no more progress updates will be sent on the 'update' channel
 	quit <- struct{}{}
 
+	if backupRequest.Context != nil && backupRequest.Context.Err() != nil {
+		log.Warnf("Backup cancelled during item processing: %s/%s", backupRequest.Namespace, backupRequest.Name)
+		return ErrBackupCancelled
+	}
 	// back up CRD(this is a CRD definition of the resource, it's a CRD instance) for resource if found.
 	// We should only need to do this if we've backed up at least one item for the resource
 	// and the CRD type(this is the CRD type itself) is neither included or excluded.
@@ -735,6 +764,11 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 			"name":      item.name,
 		}).Infof("Processing item")
 
+		if backupRequest.Context != nil && backupRequest.Context.Err() != nil {
+			log.Warnf("Backup cancelled before processing item: %s/%s", item.namespace, item.name)
+			errors.New("backup cancelled before final upload")
+		}
+
 		// use an anonymous func so we can defer-close/remove the file
 		// as soon as we're done with it
 		func() {
@@ -789,15 +823,29 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 		return err
 	}
 
+	if backupRequest.Context != nil && backupRequest.Context.Err() != nil {
+		log.Warnf("Backup cancelled before uploading backup volume info")
+		return errors.New("backup cancelled before uploading Volume Info")
+	}
+
 	if err := putVolumeInfos(backupRequest.Name, volumeInfos, backupStore); err != nil {
 		log.WithError(err).Errorf("fail to put the VolumeInfos for backup %s", backupRequest.Name)
 		return err
 	}
 
+	if backupRequest.Context != nil && backupRequest.Context.Err() != nil {
+		log.Warnf("Backup cancelled before final tarball creation")
+		return errors.New("backup cancelled before upload")
+	}
+
 	// write new tar archive replacing files in original with content updateFiles for matches
-	if err := buildFinalTarball(tr, tw, updateFiles); err != nil {
+	if err := buildFinalTarball(tr, tw, updateFiles, backupRequest); err != nil {
 		log.Errorf("Error building final tarball: %s", err.Error())
 		return err
+	}
+	if backupRequest.Context != nil && backupRequest.Context.Err() != nil {
+		log.Warnf("Backup cancelled after tarball build but before upload")
+		return errors.New("backup cancelled before final upload")
 	}
 
 	log.WithField("progress", "").Infof("Updated a total of %d items", len(backupRequest.BackedUpItems))
@@ -805,7 +853,72 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 	return nil
 }
 
-func buildFinalTarball(tr *tar.Reader, tw *tar.Writer, updateFiles map[string]FileForArchive) error {
+func (kb *kubernetesBackupper) CleanupBackup(ctx context.Context, req *Request) error {
+	log := logrus.WithField("backup", req.Backup.Name)
+	log.Info("Starting cleanup of cancelled backup")
+
+	// FIRST: Clean up VolumeSnapshotContents
+	var vscList snapshotv1api.VolumeSnapshotContentList
+	if err := kb.kbClient.List(ctx, &vscList, &kbclient.ListOptions{
+		LabelSelector: labels.SelectorFromSet(map[string]string{
+			"velero.io/backup-name": req.Backup.Name,
+		}),
+	}); err != nil {
+		return errors.Wrap(err, "listing VolumeSnapshotContents")
+	}
+
+	for _, vsc := range vscList.Items {
+		if vsc.Status == nil || vsc.Status.ReadyToUse == nil {
+			continue
+		}
+		if !*vsc.Status.ReadyToUse && vsc.Status.Error == nil {
+			continue
+		}
+
+		// Update deletionPolicy if needed
+		if vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentRetain {
+			vscCopy := vsc.DeepCopy()
+			vscCopy.Spec.DeletionPolicy = snapshotv1api.VolumeSnapshotContentDelete
+			if err := kb.kbClient.Update(ctx, vscCopy); err != nil {
+				log.WithError(err).Warnf("Failed to update deletionPolicy for VolumeSnapshotContent %s", vsc.Name)
+			}
+		}
+
+		log.Infof("Deleting VolumeSnapshotContent %s", vsc.Name)
+		if err := kb.kbClient.Delete(ctx, &vsc); err != nil && !apierrors.IsNotFound(err) {
+			log.WithError(err).Warnf("Failed to delete VolumeSnapshotContent %s", vsc.Name)
+		}
+	}
+
+	// THEN: Clean up VolumeSnapshots
+	var vsList snapshotv1api.VolumeSnapshotList
+	if err := kb.kbClient.List(ctx, &vsList, &kbclient.ListOptions{
+		LabelSelector: labels.SelectorFromSet(map[string]string{
+			"velero.io/backup-name": req.Backup.Name,
+		}),
+	}); err != nil {
+		return errors.Wrap(err, "listing VolumeSnapshots")
+	}
+
+	for _, vs := range vsList.Items {
+		if vs.Status == nil || vs.Status.ReadyToUse == nil {
+			continue // ongoing snapshot
+		}
+		if !*vs.Status.ReadyToUse && vs.Status.Error == nil {
+			continue // not done and no error
+		}
+
+		log.Infof("Deleting VolumeSnapshot %s/%s", vs.Namespace, vs.Name)
+		if err := kb.kbClient.Delete(ctx, &vs); err != nil && !apierrors.IsNotFound(err) {
+			log.WithError(err).Warnf("Failed to delete VolumeSnapshot %s/%s", vs.Namespace, vs.Name)
+		}
+	}
+
+	log.Info("Completed cleanup of cancelled backup")
+	return nil
+}
+
+func buildFinalTarball(tr *tar.Reader, tw *tar.Writer, updateFiles map[string]FileForArchive, backupRequest *Request) error {
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -814,6 +927,11 @@ func buildFinalTarball(tr *tar.Reader, tw *tar.Writer, updateFiles map[string]Fi
 		if err != nil {
 			return errors.WithStack(err)
 		}
+
+		if backupRequest.Context != nil && backupRequest.Context.Err() != nil {
+			return errors.New("backup cancelled: aborting tarball build")
+		}
+
 		newFile, ok := updateFiles[header.Name]
 		if ok {
 			// add updated file to archive, skip over tr file content

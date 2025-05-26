@@ -93,6 +93,11 @@ type FileForArchive struct {
 // In addition to the error return, backupItem also returns a bool indicating whether the item
 // was actually backed up.
 func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstructured, groupResource schema.GroupResource, preferredGVR schema.GroupVersionResource, mustInclude, finalize bool) (bool, []FileForArchive, error) {
+
+	if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+		return false, []FileForArchive{}, errors.New("backup cancelled during archive writing")
+	}
+
 	metadata, err := meta.Accessor(obj)
 	if err != nil {
 		return false, nil, err
@@ -120,6 +125,11 @@ func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstr
 		return selectedForBackup, files, err
 	}
 	for _, file := range files {
+		if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+			//log.Warn("Backup cancelled while writing tar archive.")
+			return false, []FileForArchive{}, errors.New("backup cancelled during archive writing")
+		}
+
 		if err := ib.tarWriter.WriteHeader(file.Header); err != nil {
 			return false, []FileForArchive{}, errors.WithStack(err)
 		}
@@ -146,6 +156,11 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 		"resource":  groupResource.String(),
 		"namespace": namespace,
 	})
+
+	if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+		log.Warnf("Backup cancelled, skipping item %s/%s", namespace, name)
+		return false, nil, errors.New("backup cancelled")
+	}
 
 	if mustInclude {
 		log.Infof("Skipping the exclusion checks for this resource")
@@ -240,6 +255,11 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 		pvbVolumes []string
 	)
 
+	if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+		log.Warnf("Cancelled before executing pre hooks for %s/%s", namespace, name)
+		backupErrs = append(backupErrs, err)
+		return false, itemFiles, kubeerrs.NewAggregate(backupErrs)
+	}
 	log.Debug("Executing pre hooks")
 	if err := ib.itemHookHandler.HandleHooks(log, groupResource, obj, ib.backupRequest.ResourceHooks, hook.PhasePre, ib.hookTracker); err != nil {
 		return false, itemFiles, err
@@ -291,9 +311,20 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 	// the group version of the object.
 	versionPath := resourceVersion(obj)
 
+	if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+		log.Warnf("Cancelled before executing plugin actions for %s/%s", namespace, name)
+		backupErrs = append(backupErrs, err)
+		return false, itemFiles, kubeerrs.NewAggregate(backupErrs)
+	}
+
 	updatedObj, additionalItemFiles, err := ib.executeActions(log, obj, groupResource, name, namespace, metadata, finalize)
 	if err != nil {
 		backupErrs = append(backupErrs, err)
+		if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+			log.Warnf("Cancelled before executing post hooks for %s/%s", namespace, name)
+			backupErrs = append(backupErrs, err)
+			return false, itemFiles, kubeerrs.NewAggregate(backupErrs)
+		}
 
 		// if there was an error running actions, execute post hooks and return
 		log.Debug("Executing post hooks")
@@ -317,6 +348,10 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 			backupErrs = append(backupErrs, err)
 		}
 
+		if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+			log.Warnf("Cancelled before executing PV snapshot for %s/%s", namespace, name)
+			return false, itemFiles, errors.New("backup cancelled")
+		}
 		if err := ib.takePVSnapshot(obj, log); err != nil {
 			backupErrs = append(backupErrs, err)
 		}
@@ -325,6 +360,12 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 	if groupResource == kuberesource.Pods && pod != nil {
 		// this function will return partial results, so process podVolumeBackups
 		// even if there are errors.
+		if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+			log.Warnf("Cancelled before executing Pod volume backup for %s/%s", namespace, name)
+			backupErrs = append(backupErrs, err)
+			return false, itemFiles, kubeerrs.NewAggregate(backupErrs)
+		}
+
 		podVolumeBackups, podVolumePVCBackupSummary, errs := ib.backupPodVolumes(log, pod, pvbVolumes)
 
 		backupErrs = append(backupErrs, errs...)
@@ -354,6 +395,11 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 		}
 	}
 
+	if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+		log.Warnf("Cancelled before executing post hooks for %s/%s", namespace, name)
+		backupErrs = append(backupErrs, err)
+		return false, itemFiles, kubeerrs.NewAggregate(backupErrs)
+	}
 	log.Debug("Executing post hooks")
 	if err := ib.itemHookHandler.HandleHooks(log, groupResource, obj, ib.backupRequest.ResourceHooks, hook.PhasePost, ib.hookTracker); err != nil {
 		backupErrs = append(backupErrs, err)
@@ -460,6 +506,10 @@ func (ib *itemBackupper) executeActions(
 			}
 		}
 
+		if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+			log.Warnf("Backup cancelled before executing custom action %s on %s/%s", actionName, namespace, name)
+			return nil, itemFiles, errors.New("backup cancelled")
+		}
 		updatedItem, additionalItemIdentifiers, operationID, postOperationItems, err := action.Execute(obj, ib.backupRequest.Backup)
 		if err != nil {
 			return nil, itemFiles, errors.Wrapf(err, "error executing custom action (groupResource=%s, namespace=%s, name=%s)", groupResource.String(), namespace, name)
@@ -516,6 +566,11 @@ func (ib *itemBackupper) executeActions(
 		}
 
 		for _, additionalItem := range additionalItemIdentifiers {
+			if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+				log.Warnf("Backup cancelled before processing additional item from action %s on %s/%s", actionName, namespace, name)
+				return nil, itemFiles, errors.New("backup cancelled")
+			}
+
 			gvr, resource, err := ib.discoveryHelper.ResourceFor(additionalItem.GroupResource.WithVersion(""))
 			if err != nil {
 				return nil, itemFiles, err
@@ -742,6 +797,11 @@ func (ib *itemBackupper) takePVSnapshot(obj runtime.Unstructured, log logrus.Fie
 	var errs []error
 	log.Info("Untrack the PV %s from the skipped volumes, because it's backed by Velero native snapshot.", pv.Name)
 	ib.backupRequest.SkippedPVTracker.Untrack(pv.Name)
+	if ib.backupRequest.Context != nil && ib.backupRequest.Context.Err() != nil {
+		log.Warnf("Backup cancelled before taking snapshot of volume for %s/%s", ib.backupRequest.Namespace, ib.backupRequest.Name)
+		return errors.New("backup cancelled")
+	}
+
 	snapshotID, err := volumeSnapshotter.CreateSnapshot(snapshot.Spec.ProviderVolumeID, snapshot.Spec.VolumeAZ, tags)
 	if err != nil {
 		errs = append(errs, errors.Wrap(err, "error taking snapshot of volume"))

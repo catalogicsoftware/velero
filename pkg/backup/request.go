@@ -17,6 +17,7 @@ limitations under the License.
 package backup
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -54,6 +55,7 @@ type Request struct {
 	SkippedPVTracker          *skipPVTracker
 	VolumesInformation        volume.BackupVolumesInformation
 	IncludeNamedResources     map[string]string
+	Context                   context.Context `json:"-"`
 }
 
 // BackupVolumesInformation contains the information needs by generating
