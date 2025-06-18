@@ -123,6 +123,8 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 		backup.Spec.CSISnapshotTimeout.Duration,
 	)
 	if err != nil {
+		p.log.Errorf("failed to wait until VSC Handle Is Ready %s/%s: %v",
+			vs.Namespace, vs.Name, err)
 		csi.CleanupVolumeSnapshot(vs, p.crClient, p.log)
 		return nil, nil, "", nil, errors.WithStack(err)
 	}
