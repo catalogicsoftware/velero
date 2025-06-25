@@ -184,7 +184,27 @@ func (p *pvcRestoreItemAction) Execute(
 
 	if boolptr.IsSetToFalse(input.Restore.Spec.RestorePVs) {
 		logger.Info("Restore did not request for PVs to be restored from snapshot")
-		pvc.Spec.VolumeName = ""
+
+		// If DR volumes are used, then do not reset the volume name.
+		var useDrVolumes bool
+		restoreObjectAnnotations := input.Restore.Annotations
+		if restoreObjectAnnotations != nil {
+			useDrVolumesStr, ok := restoreObjectAnnotations["cloudcasa-use-dr-volumes"]
+			if !ok {
+				useDrVolumes = false
+			} else {
+				var err error
+				useDrVolumes, err = strconv.ParseBool(useDrVolumesStr)
+				if err != nil {
+					p.log.Errorf("Failed to convert \"cloudcasa-use-dr-volumes\" annotation to boolean: %v", err)
+					return nil, errors.WithStack(err)
+				}
+			}
+		}
+
+		if !useDrVolumes {
+			pvc.Spec.VolumeName = ""
+		}
 		pvc.Spec.DataSource = nil
 		pvc.Spec.DataSourceRef = nil
 	} else {
