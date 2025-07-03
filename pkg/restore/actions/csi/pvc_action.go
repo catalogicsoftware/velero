@@ -48,6 +48,8 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	csiutil "github.com/vmware-tanzu/velero/test/util/csi"
+
+	"github.com/vmware-tanzu/velero/internal/catalogic"
 )
 
 const (
@@ -258,11 +260,43 @@ func (p *pvcRestoreItemAction) Execute(
 					UpdatedItem: input.Item,
 				}, nil
 			}
+
+			defer func() {
+				time.Sleep(200 * time.Millisecond) // give some time for the update to be processed
+				catalogic.DeleteSnapshotProgressConfigMap(input.Restore.Name, logger)
+			}()
+
 			if err := restoreFromVolumeSnapshot(
 				&pvc, newNamespace, p.crClient, volumeSnapshotName, logger, input,
 			); err != nil {
 				logger.Errorf("Failed to restore PVC from VolumeSnapshot.")
+				uErr := catalogic.UpdateSnapshotProgress(
+					&pvc,
+					nil,
+					nil,
+					"error",
+					fmt.Sprintf("failed to restore PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
+					input.Restore.Name,
+					logger,
+				)
+				if uErr != nil {
+					logger.Error(uErr, "<SNAPSHOT PROGRESS UPDATE> Failed to update progress for restoring PVC from CSI snapshot. Continuing...")
+				}
 				return nil, errors.WithStack(err)
+			}
+			uErr := catalogic.UpdateSnapshotProgress(
+				&pvc,
+				nil,
+				nil,
+				"completed",
+				fmt.Sprintf("Successfully restord PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
+				input.Restore.Name,
+				logger,
+			)
+			if uErr != nil {
+				logger.Error(uErr, "<SNAPSHOT PROGRESS UPDATE> Failed to update progress for restoring PVC from CSI snapshot. Continuing...")
+			} else {
+				logger.Info("< CSI SNAPSHOT PROGRESS UPDATE> Successfully updated progress for restoring PVC from CSI snapshot.")
 			}
 		}
 	}

@@ -707,6 +707,7 @@ func WaitUntilVSCHandleIsReady(
 		if uErr != nil {
 			log.WithError(uErr).Error("Failed to update snapshot progress")
 		}
+		time.Sleep(200 * time.Millisecond) // give some time for the update to be processed
 		catalogic.DeleteSnapshotProgressConfigMap(jobID, log)
 	}()
 
