@@ -275,7 +275,7 @@ func (p *pvcRestoreItemAction) Execute(
 					nil,
 					nil,
 					"error",
-					fmt.Sprintf("failed to restore PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
+					fmt.Sprintf("failed to restore from CSI snapshot %s", volumeSnapshotName),
 					input.Restore.Name,
 					logger,
 				)
@@ -289,7 +289,7 @@ func (p *pvcRestoreItemAction) Execute(
 				nil,
 				nil,
 				"completed",
-				fmt.Sprintf("Successfully restord PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
+				fmt.Sprintf("Restore successful from VolumeSnapshot %s in namespace %s", volumeSnapshotName, newNamespace),
 				input.Restore.Name,
 				logger,
 			)
