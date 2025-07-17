@@ -638,6 +638,21 @@ func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolume
 		return false, nil
 	}
 
+	// Skip snapshot for Azure Files NFS volumes
+	if provisioner == "file.csi.azure.com" && pvc.Spec.StorageClassName != nil {
+		// Get the StorageClass to find the "protocol" parameter
+		storageClass := &storagev1api.StorageClass{}
+		if err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Name: *pvc.Spec.StorageClassName}, storageClass); err != nil {
+			return false, errors.Wrapf(err, "error getting StorageClass %s for PVC %s/%s", *pvc.Spec.StorageClassName, pvc.Namespace, pvc.Name)
+		}
+		if storageClass.Parameters != nil {
+			if protocol, exists := storageClass.Parameters["protocol"]; exists && protocol == "nfs" {
+				p.log.Infof("Skipping snapshot of PVC %s/%s with NFS protocol as it will be backed up LIVE", pvc.Namespace, pvc.Name)
+				return true, nil
+			}
+		}
+	}
+
 	for _, driver := range liveCopyDrivers {
 		if provisioner == driver {
 			p.log.Infof("PVC %s/%s, associated PV %s with provisioner %s is not supported for snapshotting", pvc.Namespace, pvc.Name,
