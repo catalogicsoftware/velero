@@ -18,12 +18,12 @@ limitations under the License.
 package keys
 
 import (
-	"context"
+	//"context"
 
-	"github.com/pkg/errors"
+	//"github.com/pkg/errors"
 	corev1api "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	//apierrors "k8s.io/apimachinery/pkg/api/errors"
+	//metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/vmware-tanzu/velero/pkg/builder"
@@ -37,32 +37,36 @@ const (
 )
 
 func EnsureCommonRepositoryKey(secretClient corev1client.SecretsGetter, namespace string) error {
-	_, err := secretClient.Secrets(namespace).Get(context.TODO(), credentialsSecretName, metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return errors.WithStack(err)
-	}
-	if err == nil {
-		return nil
-	}
-
-	// if we got here, we got an IsNotFound error, so we need to create the key
-
-	secret := &corev1api.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      credentialsSecretName,
-		},
-		Type: corev1api.SecretTypeOpaque,
-		Data: map[string][]byte{
-			credentialsKey: []byte(encryptionKey),
-		},
-	}
-
-	if _, err = secretClient.Secrets(namespace).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil {
-		return errors.Wrapf(err, "error creating %s secret", credentialsSecretName)
-	}
-
+	// Commented out, because repo is not used by CloudCasa.
 	return nil
+	/*
+		_, err := secretClient.Secrets(namespace).Get(context.TODO(), credentialsSecretName, metav1.GetOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return errors.WithStack(err)
+		}
+		if err == nil {
+			return nil
+		}
+
+		// if we got here, we got an IsNotFound error, so we need to create the key
+
+		secret := &corev1api.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: namespace,
+				Name:      credentialsSecretName,
+			},
+			Type: corev1api.SecretTypeOpaque,
+			Data: map[string][]byte{
+				credentialsKey: []byte(encryptionKey),
+			},
+		}
+
+		if _, err = secretClient.Secrets(namespace).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil {
+			return errors.Wrapf(err, "error creating %s secret", credentialsSecretName)
+		}
+
+		return nil
+	*/
 }
 
 // RepoKeySelector returns the SecretKeySelector which can be used to fetch
