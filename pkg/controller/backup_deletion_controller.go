@@ -192,22 +192,57 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		return ctrl.Result{}, errors.Wrap(err, "error getting backup")
 	}
-	r.logger.Infof("Backup %q found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)
+	r.logger.Infof("Backup %q found in the %q namespace.", backup.GetName(), backup.GetNamespace())
 
 	// Don't allow deleting backups in read-only storage locations
 	location := &velerov1api.BackupStorageLocation{}
-	if err := r.Get(context.Background(), client.ObjectKey{
-		Namespace: backup.Namespace,
-		Name:      backup.Spec.StorageLocation,
-	}, location); err != nil {
-		if apierrors.IsNotFound(err) {
+	var getErr error
+	retryIntervalForGet := 500 * time.Millisecond
+	r.logger.Infof("Getting BackupStorageLocation %q in the %q namespace", backup.Spec.StorageLocation, backup.Namespace)
+
+	for i := 1; i <= maxRetries; i++ {
+		getErr = r.Get(context.Background(), client.ObjectKey{
+			Namespace: backup.Namespace,
+			Name:      backup.Spec.StorageLocation,
+		}, location)
+
+		if getErr == nil {
+			// Success
+			break
+		}
+
+		if apierrors.IsNotFound(getErr) {
+			r.logger.WithFields(logrus.Fields{
+				"attempt": i,
+				"max":     maxRetries,
+				"bsl":     backup.Spec.StorageLocation,
+			}).Info("BackupStorageLocation not found, retrying...")
+			time.Sleep(retryIntervalForGet)
+			continue
+		}
+
+		// Non-IsNotFound errors: break out and handle after loop
+		break
+	}
+
+	if getErr != nil {
+		if apierrors.IsNotFound(getErr) {
+			// Final failure after retries
 			_, err := r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
 				r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
-				r.Status.Errors = append(r.Status.Errors, fmt.Sprintf("backup storage location %s not found", backup.Spec.StorageLocation))
+				r.Status.Errors = append(r.Status.Errors, fmt.Sprintf("backup storage location %s not found after %d retries", backup.Spec.StorageLocation, maxRetries))
 			})
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, errors.Wrap(err, "error getting backup storage location")
+		// Other errors
+		return ctrl.Result{}, errors.Wrap(getErr, "error getting backup storage location")
+	}
+	if location.Spec.ObjectStorage != nil {
+		r.logger.Infof("Found BackupStorageLocation %q in the %q namespace. ObjectStorage: %#v",
+			location.Name, location.Namespace, location.Spec.ObjectStorage)
+	} else {
+		r.logger.Infof("Found BackupStorageLocation %q in the %q namespace. ObjectStorage: <nil>",
+			location.Name, location.Namespace)
 	}
 
 	if location.Spec.AccessMode == velerov1api.BackupStorageLocationAccessModeReadOnly {
