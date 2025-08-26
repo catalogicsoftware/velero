@@ -123,10 +123,9 @@ const (
 	VolumeSnapshotRestoreSize                       = "velero.io/csi-volumesnapshot-restore-size"
 	DriverNameAnnotation                            = "velero.io/csi-driver-name"
 	VSCDeletionPolicyAnnotation                     = "velero.io/csi-vsc-deletion-policy"
-	VolumeSnapshotClassSelectorLabel                = "velero.io/csi-volumesnapshot-class"
-	VolumeSnapshotClassDriverBackupAnnotationPrefix = "velero.io/csi-volumesnapshot-class"
-	VolumeSnapshotClassDriverPVCAnnotation          = "velero.io/csi-volumesnapshot-class"
-	CloudcasaVolumeSnapshotClassSelectorLabel       = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassSelectorLabel                = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassDriverBackupAnnotationPrefix = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassDriverPVCAnnotation          = "cloudcasa.io/csi-volumesnapshot-class"
 
 	// There is no release w/ these constants exported. Using the strings for now.
 	// CSI Annotation volumesnapshotclass

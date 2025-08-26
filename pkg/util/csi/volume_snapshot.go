@@ -412,12 +412,6 @@ func GetVolumeSnapshotClassForStorageClass(
 	// multiple VolumeSnapshotClasses for the same driver with different
 	// values for the other fields in the spec.
 	for _, sc := range snapshotClasses.Items {
-		_, hasCloudcasaLabelSelector := sc.Labels[velerov1api.CloudcasaVolumeSnapshotClassSelectorLabel]
-		if sc.Driver == provisioner && hasCloudcasaLabelSelector {
-			return &sc, nil
-		}
-	}
-	for _, sc := range snapshotClasses.Items {
 		_, hasLabelSelector := sc.Labels[velerov1api.VolumeSnapshotClassSelectorLabel]
 		if sc.Driver == provisioner {
 			n += 1
