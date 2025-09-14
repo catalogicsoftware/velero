@@ -96,7 +96,6 @@ func (h *AmdsGrpcHook) Fire(entry *logrus.Entry) error {
 		// The log was successfully queued.
 	default:
 		// The buffer is full. We drop the log.
-		fmt.Printf("==> gRPC HOOK [CLIENT]: Log buffer is full. Dropping log message: %s\n", logEntry.Message)
 		h.resetLogEntry(logEntry)
 		h.entryPool.Put(logEntry)
 	}
@@ -122,7 +121,6 @@ func (h *AmdsGrpcHook) processLogQueue() {
 
 			err := h.stream.Send(logEntry)
 			if err != nil {
-				fmt.Printf("==> gRPC HOOK [CLIENT]: Failed to send log, connection likely lost. Closing stream. Error: %v\n", err)
 				h.closeStream()
 			}
 			h.mu.Unlock()
@@ -156,13 +154,11 @@ func (h *AmdsGrpcHook) connect() error {
 	}
 	h.lastConnectionAttempt = time.Now()
 
-	fmt.Printf("==> gRPC HOOK [CLIENT]: Attempting to connect to gRPC server at %s\n", grpcServerAddress)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, grpcServerAddress, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
-		fmt.Printf("==> gRPC HOOK [CLIENT]: Connection attempt failed: %v\n", err)
 		return fmt.Errorf("did not connect: %w", err)
 	}
 
@@ -170,11 +166,9 @@ func (h *AmdsGrpcHook) connect() error {
 	stream, err := client.StreamLogs(context.Background())
 	if err != nil {
 		conn.Close()
-		fmt.Printf("==> gRPC HOOK [CLIENT]: Failed to create log stream after connecting: %v\n", err)
 		return fmt.Errorf("failed to create log stream: %w", err)
 	}
 
-	fmt.Println("==> gRPC HOOK [CLIENT]: Successfully connected and established stream.")
 	h.conn = conn
 	h.stream = stream
 	return nil
@@ -190,5 +184,4 @@ func (h *AmdsGrpcHook) closeStream() {
 		h.conn.Close()
 		h.conn = nil
 	}
-	fmt.Println("==> gRPC HOOK [CLIENT]: Stream and connection closed.")
 }
