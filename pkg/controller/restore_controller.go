@@ -53,6 +53,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	"github.com/vmware-tanzu/velero/pkg/plugin/framework"
 	pkgrestore "github.com/vmware-tanzu/velero/pkg/restore"
+	"github.com/vmware-tanzu/velero/pkg/util/backup_store"
 	"github.com/vmware-tanzu/velero/pkg/util/collections"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
@@ -475,13 +476,22 @@ func fetchBackupInfoInternal(kbClient client.Client, namespace, backupName strin
 	}, nil
 }
 
+// isBackupStorageLocationReadOnly checks if a BackupStorageLocation has ReadOnly AccessMode
+func isBackupStorageLocationReadOnly(location *api.BackupStorageLocation) bool {
+	if location == nil {
+		return false
+	}
+	return location.Spec.AccessMode == api.BackupStorageLocationAccessModeReadOnly
+}
+
 // runValidatedRestore takes a validated restore API object and executes the restore process.
-// The log and results files are uploaded to backup storage. Any error returned from this function
-// means that the restore failed. This function updates the restore API object with warning and error
-// counts, but *does not* update its phase or patch it via the API.
+// The log and results files are uploaded to backup storage or written to local filesystem based on
+// BackupStorageLocation AccessMode. Any error returned from this function means that the restore failed.
+// This function updates the restore API object with warning and error counts, but *does not* update
+// its phase or patch it via the API.
 func (r *restoreReconciler) runValidatedRestore(restore *api.Restore, info backupInfo, resourceModifiers *resourcemodifiers.ResourceModifiers) error {
 	// instantiate the per-restore logger that will output both to a temp file
-	// (for upload to object storage) and to stdout.
+	// (for upload to object storage or local filesystem) and to stdout.
 	restoreLog, err := logging.NewTempFileLogger(r.restoreLogLevel, r.logFormat, nil, logrus.Fields{"restore": kubeutil.NamespaceAndName(restore)})
 	if err != nil {
 		return err
@@ -494,6 +504,25 @@ func (r *restoreReconciler) runValidatedRestore(restore *api.Restore, info backu
 	backupStore, err := r.backupStoreGetter.Get(info.location, pluginManager, r.logger)
 	if err != nil {
 		return err
+	}
+
+	// Determine artifact writer based on BackupStorageLocation AccessMode
+	isReadOnly := isBackupStorageLocationReadOnly(info.location)
+	var artifactWriter backup_store.ArtifactWriter
+
+	if isReadOnly {
+		restoreLog.WithFields(logrus.Fields{
+			"AccessMode":       "ReadOnly",
+			"RestoreName":      restore.Name,
+			"ScratchDirectory": "/scratch/restore-result",
+		}).Info("BackupStorageLocation is ReadOnly. Artifacts will be written to local filesystem instead of object storage")
+		artifactWriter = backup_store.NewLocalArtifactWriter(restoreLog)
+	} else {
+		restoreLog.WithFields(logrus.Fields{
+			"AccessMode":  "ReadWrite",
+			"RestoreName": restore.Name,
+		}).Debug("BackupStorageLocation is ReadWrite. Artifacts will be written to BackupStore")
+		artifactWriter = backup_store.NewBackupStoreArtifactWriter(backupStore, restore.Spec.BackupName, restoreLog)
 	}
 
 	actions, err := pluginManager.GetRestoreItemActionsV2()
@@ -607,24 +636,22 @@ func (r *restoreReconciler) runValidatedRestore(restore *api.Restore, info backu
 
 	restoreLog.DoneForPersist(r.logger)
 
-	// re-instantiate the backup store because credentials could have changed since the original
-	// instantiation, if this was a long-running restore
-	backupStore, err = r.backupStoreGetter.Get(info.location, pluginManager, r.logger)
-	if err != nil {
-		return errors.Wrap(err, "error setting up backup store to persist log and results files")
-	}
-
 	if logReader, err := restoreLog.GetPersistFile(); err != nil {
 		restoreErrors.Velero = append(restoreErrors.Velero, fmt.Sprintf("error getting restore log reader: %v", err))
 	} else {
-		if err := backupStore.PutRestoreLog(restore.Spec.BackupName, restore.Name, logReader); err != nil {
-			restoreErrors.Velero = append(restoreErrors.Velero, fmt.Sprintf("error uploading log file to backup storage: %v", err))
+		if err := artifactWriter.WriteLog(restore.Name, logReader); err != nil {
+			restoreLog.WithError(err).WithFields(logrus.Fields{
+				"RestoreName":  restore.Name,
+				"ArtifactType": "RestoreLog",
+			}).Error("Error writing restore log")
+			restoreErrors.Velero = append(restoreErrors.Velero, fmt.Sprintf("error writing log file: %v", err))
 		}
 	}
 
-	// At this point, no further logs should be written to restoreLog since it's been uploaded
-	// to object storage.
+	// At this point, no further logs should be written to restoreLog since it's been persisted
+	// to artifact writer (either BackupStore or local filesystem).
 
+	// Compute warning and error counts
 	restore.Status.Warnings = len(restoreWarnings.Velero) + len(restoreWarnings.Cluster)
 	for _, w := range restoreWarnings.Namespaces {
 		restore.Status.Warnings += len(w)
@@ -640,21 +667,30 @@ func (r *restoreReconciler) runValidatedRestore(restore *api.Restore, info backu
 		"errors":   restoreErrors,
 	}
 
-	if err := putResults(restore, m, backupStore); err != nil {
-		r.logger.WithError(err).Error("Error uploading restore results to backup storage")
+	if err := putResultsWithWriter(restore, m, artifactWriter); err != nil {
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"RestoreName": restore.Name,
+			"AccessMode":  string(info.location.Spec.AccessMode),
+		}).Error("Error writing restore results to artifact writer")
 	}
 
-	if err := putRestoredResourceList(restore, restoreReq.RestoredResourceList(), backupStore); err != nil {
-		r.logger.WithError(err).Error("Error uploading restored resource list to backup storage")
+	if err := putRestoredResourceListWithWriter(restore, restoreReq.RestoredResourceList(), artifactWriter); err != nil {
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"RestoreName": restore.Name,
+		}).Error("Error writing restored resource list to artifact writer")
 	}
 
-	if err := putOperationsForRestore(restore, *restoreReq.GetItemOperationsList(), backupStore); err != nil {
-		r.logger.WithError(err).Error("Error uploading restore item action operation resource list to backup storage")
+	if err := putOperationsWithWriter(restore, *restoreReq.GetItemOperationsList(), artifactWriter); err != nil {
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"RestoreName": restore.Name,
+		}).Error("Error writing restore item operations to artifact writer")
 	}
 
 	restoreReq.RestoreVolumeInfoTracker.Populate(context.TODO(), restoreReq.RestoredResourceList())
-	if err := putRestoreVolumeInfoList(restore, restoreReq.RestoreVolumeInfoTracker.Result(), backupStore); err != nil {
-		r.logger.WithError(err).Error("Error uploading restored volume info to backup storage")
+	if err := putRestoreVolumeInfoWithWriter(restore, restoreReq.RestoreVolumeInfoTracker.Result(), artifactWriter); err != nil {
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"RestoreName": restore.Name,
+		}).Error("Error writing restore volume info to artifact writer")
 	}
 
 	if restore.Status.Errors > 0 {
@@ -750,82 +786,6 @@ func (r *restoreReconciler) deleteExternalResources(restore *api.Restore) error 
 	return nil
 }
 
-func putResults(restore *api.Restore, results map[string]results.Result, backupStore persistence.BackupStore) error {
-	buf := new(bytes.Buffer)
-	gzw := gzip.NewWriter(buf)
-	defer gzw.Close()
-
-	if err := json.NewEncoder(gzw).Encode(results); err != nil {
-		return errors.Wrap(err, "error encoding restore results to JSON")
-	}
-
-	if err := gzw.Close(); err != nil {
-		return errors.Wrap(err, "error closing gzip writer")
-	}
-
-	if err := backupStore.PutRestoreResults(restore.Spec.BackupName, restore.Name, buf); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func putRestoredResourceList(restore *api.Restore, list map[string][]string, backupStore persistence.BackupStore) error {
-	buf := new(bytes.Buffer)
-	gzw := gzip.NewWriter(buf)
-	defer gzw.Close()
-
-	if err := json.NewEncoder(gzw).Encode(list); err != nil {
-		return errors.Wrap(err, "error encoding restored resource list to JSON")
-	}
-
-	if err := gzw.Close(); err != nil {
-		return errors.Wrap(err, "error closing gzip writer")
-	}
-
-	if err := backupStore.PutRestoredResourceList(restore.Name, buf); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func putOperationsForRestore(restore *api.Restore, operations []*itemoperation.RestoreOperation, backupStore persistence.BackupStore) error {
-	buf := new(bytes.Buffer)
-	gzw := gzip.NewWriter(buf)
-	defer gzw.Close()
-
-	if err := json.NewEncoder(gzw).Encode(operations); err != nil {
-		return errors.Wrap(err, "error encoding restore item operations list to JSON")
-	}
-
-	if err := gzw.Close(); err != nil {
-		return errors.Wrap(err, "error closing gzip writer")
-	}
-
-	if err := backupStore.PutRestoreItemOperations(restore.Name, buf); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func putRestoreVolumeInfoList(restore *api.Restore, volInfoList []*volume.RestoreVolumeInfo, store persistence.BackupStore) error {
-	buf := new(bytes.Buffer)
-	gzw := gzip.NewWriter(buf)
-	defer gzw.Close()
-
-	if err := json.NewEncoder(gzw).Encode(volInfoList); err != nil {
-		return errors.Wrap(err, "error encoding restore volume info list to JSON")
-	}
-
-	if err := gzw.Close(); err != nil {
-		return errors.Wrap(err, "error closing gzip writer")
-	}
-
-	return store.PutRestoreVolumeInfo(restore.Name, buf)
-}
-
 func downloadToTempFile(backupName string, backupStore persistence.BackupStore, logger logrus.FieldLogger) (*os.File, error) {
 	readCloser, err := backupStore.GetBackupContents(backupName)
 	if err != nil {
@@ -859,4 +819,72 @@ func downloadToTempFile(backupName string, backupStore persistence.BackupStore, 
 	}
 
 	return file, nil
+}
+
+// putResultsWithWriter writes restore results to artifact writer
+func putResultsWithWriter(restore *api.Restore, results map[string]results.Result, writer backup_store.ArtifactWriter) error {
+	buf := new(bytes.Buffer)
+	gzw := gzip.NewWriter(buf)
+	defer gzw.Close()
+
+	if err := json.NewEncoder(gzw).Encode(results); err != nil {
+		return errors.Wrap(err, "error encoding restore results to JSON")
+	}
+
+	if err := gzw.Close(); err != nil {
+		return errors.Wrap(err, "error closing gzip writer")
+	}
+
+	return writer.WriteResults(restore.Name, buf)
+}
+
+// putRestoredResourceListWithWriter writes restored resource list to artifact writer
+func putRestoredResourceListWithWriter(restore *api.Restore, list map[string][]string, writer backup_store.ArtifactWriter) error {
+	buf := new(bytes.Buffer)
+	gzw := gzip.NewWriter(buf)
+	defer gzw.Close()
+
+	if err := json.NewEncoder(gzw).Encode(list); err != nil {
+		return errors.Wrap(err, "error encoding restored resource list to JSON")
+	}
+
+	if err := gzw.Close(); err != nil {
+		return errors.Wrap(err, "error closing gzip writer")
+	}
+
+	return writer.WriteRestoredResourceList(restore.Name, buf)
+}
+
+// putOperationsWithWriter writes restore item operations to artifact writer
+func putOperationsWithWriter(restore *api.Restore, operations []*itemoperation.RestoreOperation, writer backup_store.ArtifactWriter) error {
+	buf := new(bytes.Buffer)
+	gzw := gzip.NewWriter(buf)
+	defer gzw.Close()
+
+	if err := json.NewEncoder(gzw).Encode(operations); err != nil {
+		return errors.Wrap(err, "error encoding restore item operations list to JSON")
+	}
+
+	if err := gzw.Close(); err != nil {
+		return errors.Wrap(err, "error closing gzip writer")
+	}
+
+	return writer.WriteItemOperations(restore.Name, buf)
+}
+
+// putRestoreVolumeInfoWithWriter writes restore volume info to artifact writer
+func putRestoreVolumeInfoWithWriter(restore *api.Restore, volInfoList []*volume.RestoreVolumeInfo, writer backup_store.ArtifactWriter) error {
+	buf := new(bytes.Buffer)
+	gzw := gzip.NewWriter(buf)
+	defer gzw.Close()
+
+	if err := json.NewEncoder(gzw).Encode(volInfoList); err != nil {
+		return errors.Wrap(err, "error encoding restore volume info list to JSON")
+	}
+
+	if err := gzw.Close(); err != nil {
+		return errors.Wrap(err, "error closing gzip writer")
+	}
+
+	return writer.WriteVolumeInfo(restore.Name, buf)
 }
