@@ -17,7 +17,10 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -98,28 +101,28 @@ func (r *restoreFinalizerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // +kubebuilder:rbac:groups=cloudcasa.io,resources=restores,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=cloudcasa.io,resources=restores/status,verbs=get
 func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := r.logger.WithField("restore finalizer", req.String())
-	log.Debug("restoreFinalizerReconciler getting restore")
+	log := r.logger.WithField("RestoreName", req.String())
+	log.Debug("Restore finalizer controller getting restore")
 
 	original := &velerov1api.Restore{}
 	if err := r.Get(ctx, req.NamespacedName, original); err != nil {
 		if apierrors.IsNotFound(err) {
-			log.WithError(err).Error("restore not found")
+			log.WithError(err).Error("Restore not found")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting restore %s", req.String())
 	}
 	restore := original.DeepCopy()
-	log.Debugf("restore: %s", restore.Name)
 
-	log = r.logger.WithFields(
-		logrus.Fields{
-			"restore": req.String(),
-		},
-	)
+	log = r.logger.WithFields(logrus.Fields{
+		"RestoreName":      restore.Name,
+		"RestoreNamespace": restore.Namespace,
+		"RestorePhase":     restore.Status.Phase,
+	})
 
 	switch restore.Status.Phase {
 	case velerov1api.RestorePhaseFinalizing, velerov1api.RestorePhaseFinalizingPartiallyFailed:
+		// Continue processing
 	default:
 		log.Debug("Restore is not awaiting finalization, skipping")
 		return ctrl.Result{}, nil
@@ -128,43 +131,53 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	info, err := fetchBackupInfoInternal(r.Client, r.namespace, restore.Spec.BackupName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			log.WithError(err).Error("not found backup, skip")
+			log.WithError(err).Error("Backup not found, skipping")
 			if err2 := r.finishProcessing(velerov1api.RestorePhasePartiallyFailed, restore, original); err2 != nil {
-				log.WithError(err2).Error("error updating restore's final status")
+				log.WithError(err2).Error("Error updating restore's final status")
 				return ctrl.Result{}, errors.Wrap(err2, "error updating restore's final status")
 			}
 			return ctrl.Result{}, nil
 		}
-		log.WithError(err).Error("error getting backup info")
+		log.WithError(err).Error("Error getting backup info")
 		return ctrl.Result{}, errors.Wrap(err, "error getting backup info")
+	}
+
+	// Check if BackupStorageLocation is ReadOnly
+	isReadOnly := isBackupStorageLocationReadOnly(info.location)
+
+	if isReadOnly {
+		log.WithFields(logrus.Fields{
+			"AccessMode":                "ReadOnly",
+			"BackupStorageLocationName": info.location.Name,
+		}).Info("BackupStorageLocation is ReadOnly")
 	}
 
 	pluginManager := r.newPluginManager(r.logger)
 	defer pluginManager.CleanupClients()
 	backupStore, err := r.backupStoreGetter.Get(info.location, pluginManager, r.logger)
 	if err != nil {
-		log.WithError(err).Error("error getting backup store")
+		log.WithError(err).Error("Error getting backup store")
 		return ctrl.Result{}, errors.Wrap(err, "error getting backup store")
 	}
 
 	volumeInfo, err := backupStore.GetBackupVolumeInfos(restore.Spec.BackupName)
 	if err != nil {
-		log.WithError(err).Errorf("error getting volumeInfo for backup %s", restore.Spec.BackupName)
-		return ctrl.Result{}, errors.Wrap(err, "error getting volumeInfo")
+		log.WithError(err).Errorf("Error getting volume info for backup %s", restore.Spec.BackupName)
+		return ctrl.Result{}, errors.Wrap(err, "error getting volume info")
 	}
 
 	restoredResourceList, err := backupStore.GetRestoredResourceList(restore.Name)
 	if err != nil {
-		log.WithError(err).Error("error getting restoredResourceList")
-		return ctrl.Result{}, errors.Wrap(err, "error getting restoredResourceList")
+		log.WithError(err).Error("Error getting restored resource list")
+		return ctrl.Result{}, errors.Wrap(err, "error getting restored resource list")
 	}
 
 	restoredPVCList := volume.RestoredPVCFromRestoredResourceList(restoredResourceList)
 
 	restoreItemOperations, err := backupStore.GetRestoreItemOperations(restore.Name)
 	if err != nil {
-		log.WithError(err).Error("error getting itemOperationList")
-		return ctrl.Result{}, errors.Wrap(err, "error getting itemOperationList")
+		log.WithError(err).Error("Error getting item operation list")
+		return ctrl.Result{}, errors.Wrap(err, "error getting item operation list")
 	}
 
 	finalizerCtx := &finalizerContext{
@@ -196,11 +209,21 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		restore.Status.Phase = velerov1api.RestorePhaseFinalizingPartiallyFailed
 	}
 
+	// Handle result updates based on BackupStorageLocation AccessMode
 	if warningCnt > 0 || errCnt > 0 {
-		err := r.updateResults(backupStore, restore, &warnings, &errs)
-		if err != nil {
-			log.WithError(err).Error("error updating results")
-			return ctrl.Result{}, errors.Wrap(err, "error updating results")
+		if isReadOnly {
+			log.WithFields(logrus.Fields{
+				"AccessMode":   "ReadOnly",
+				"WarningCount": warningCnt,
+				"ErrorCount":   errCnt,
+			}).Info("Results are already written to local filesystem for ReadOnly BackupStorageLocation")
+			// No need to update BackupStore for ReadOnly mode
+		} else {
+			err := r.updateResults(backupStore, restore, &warnings, &errs)
+			if err != nil {
+				log.WithError(err).Error("Error updating results to BackupStore")
+				return ctrl.Result{}, errors.Wrap(err, "error updating results")
+			}
 		}
 	}
 
@@ -208,10 +231,14 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if restore.Status.Phase == velerov1api.RestorePhaseFinalizingPartiallyFailed {
 		finalPhase = velerov1api.RestorePhasePartiallyFailed
 	}
-	log.Infof("Marking restore %s", finalPhase)
+
+	log.WithFields(logrus.Fields{
+		"FinalPhase": finalPhase,
+		"ReadOnly":   isReadOnly,
+	}).Info("Marking restore as completed")
 
 	if err := r.finishProcessing(finalPhase, restore, original); err != nil {
-		log.WithError(err).Error("error updating restore's final status")
+		log.WithError(err).Error("Error updating restore's final status")
 		return ctrl.Result{}, errors.Wrap(err, "error updating restore's final status")
 	}
 
@@ -293,73 +320,89 @@ type finalizerContext struct {
 }
 
 func (ctx *finalizerContext) execute() (results.Result, results.Result) {
-	//nolint:unparam //temporarily ignore the lint report: result 0 is always nil (unparam)
-
-	// Initialize empty result objects to track warnings and errors.
 	warnings, errs := results.Result{}, results.Result{}
 
-	// Step 1: Attempt to patch dynamically provisioned PersistentVolumes (PVs) with backup metadata.
-	ctx.logger.Info("Starting patching process for dynamically provisioned PVs.")
+	ctx.logger.WithField("RestoreName", ctx.restore.Name).Info("Starting finalization process for restore")
+
+	// Step 1: Patch dynamically provisioned PVs
+	ctx.logger.Info("Starting patching process for dynamically provisioned PVs")
 
 	pdpErrs := ctx.patchDynamicPVWithVolumeInfo()
-	errs.Merge(&pdpErrs) // Merge PV patching errors into the main error result.
+	errs.Merge(&pdpErrs)
 
-	// Check if PV patching resulted in errors (corrected method)
 	if len(pdpErrs.Velero) > 0 || len(pdpErrs.Cluster) > 0 || len(pdpErrs.Namespaces) > 0 {
-		// Log warning if PV patching fails
-		ctx.logger.Warn("PV patching failed. Skipping restore exec hook wait.")
+		ctx.logger.WithFields(logrus.Fields{
+			"VeleroErrors":    len(pdpErrs.Velero),
+			"ClusterErrors":   len(pdpErrs.Cluster),
+			"NamespaceErrors": len(pdpErrs.Namespaces),
+		}).Warn("PV patching encountered errors")
 
-		// Log each error message from the Velero slice
 		for _, msg := range pdpErrs.Velero {
-			ctx.logger.Warnf("Velero error: %s", msg)
+			ctx.logger.WithFields(logrus.Fields{
+				"ErrorType": "VeleroError",
+				"Message":   msg,
+			}).Warn("PV patching error")
 		}
 
-		// Log each error message from the Cluster slice
 		for _, msg := range pdpErrs.Cluster {
-			ctx.logger.Warnf("Cluster error: %s", msg)
+			ctx.logger.WithFields(logrus.Fields{
+				"ErrorType": "ClusterError",
+				"Message":   msg,
+			}).Warn("PV patching error")
 		}
 
-		// Log each error message from the Namespaces map
 		for ns, msgs := range pdpErrs.Namespaces {
 			for _, msg := range msgs {
-				ctx.logger.Warnf("Namespace: %s, error: %s", ns, msg)
+				ctx.logger.WithFields(logrus.Fields{
+					"ErrorType": "NamespaceError",
+					"Namespace": ns,
+					"Message":   msg,
+				}).Warn("PV patching error")
 			}
 		}
-
 	} else {
-		// Step 2: If PV patching succeeded, proceed to execute post-restore hooks.
-		ctx.logger.Info("PV patching completed successfully. Proceeding to restore exec hooks.")
+		// Step 2: Execute post-restore hooks if PV patching succeeded
+		ctx.logger.Info("PV patching completed successfully. Proceeding to restore exec hooks")
 
 		rehErrs := ctx.WaitRestoreExecHook()
-		errs.Merge(&rehErrs) // Merge hook execution errors into the main error result.
+		errs.Merge(&rehErrs)
 
-		// Check if restore exec hooks encountered errors (corrected method)
 		if len(rehErrs.Velero) > 0 || len(rehErrs.Cluster) > 0 || len(rehErrs.Namespaces) > 0 {
-			ctx.logger.Warn("Restore exec hooks encountered errors.")
+			ctx.logger.WithFields(logrus.Fields{
+				"VeleroErrors":    len(rehErrs.Velero),
+				"ClusterErrors":   len(rehErrs.Cluster),
+				"NamespaceErrors": len(rehErrs.Namespaces),
+			}).Warn("Restore exec hooks encountered errors")
 
-			// Log each error message from the Velero slice
 			for _, msg := range rehErrs.Velero {
-				ctx.logger.Warnf("Velero error: %s", msg)
+				ctx.logger.WithFields(logrus.Fields{
+					"ErrorType": "VeleroError",
+					"Message":   msg,
+				}).Warn("Restore exec hook error")
 			}
 
-			// Log each error message from the Cluster slice
 			for _, msg := range rehErrs.Cluster {
-				ctx.logger.Warnf("Cluster error: %s", msg)
+				ctx.logger.WithFields(logrus.Fields{
+					"ErrorType": "ClusterError",
+					"Message":   msg,
+				}).Warn("Restore exec hook error")
 			}
 
-			// Log each error message from the Namespaces map
 			for ns, msgs := range rehErrs.Namespaces {
 				for _, msg := range msgs {
-					ctx.logger.Warnf("Namespace: %s, error: %s", ns, msg)
+					ctx.logger.WithFields(logrus.Fields{
+						"ErrorType": "NamespaceError",
+						"Namespace": ns,
+						"Message":   msg,
+					}).Warn("Restore exec hook error")
 				}
 			}
 		} else {
-			ctx.logger.Info("Restore exec hooks completed successfully.")
+			ctx.logger.Info("Restore exec hooks completed successfully")
 		}
 	}
 
-	// Step 3: Return final results containing any warnings or errors encountered.
-	ctx.logger.Info("Finalizer execution completed.")
+	ctx.logger.Info("Finalizer execution completed")
 	return warnings, errs
 }
 
@@ -587,4 +630,24 @@ func (ctx *finalizerContext) WaitRestoreExecHook() (errs results.Result) {
 
 	// Step 8: Return any collected errors.
 	return errs
+}
+
+func putResults(restore *velerov1api.Restore, results map[string]results.Result, backupStore persistence.BackupStore) error {
+	buf := new(bytes.Buffer)
+	gzw := gzip.NewWriter(buf)
+	defer gzw.Close()
+
+	if err := json.NewEncoder(gzw).Encode(results); err != nil {
+		return errors.Wrap(err, "error encoding restore results to JSON")
+	}
+
+	if err := gzw.Close(); err != nil {
+		return errors.Wrap(err, "error closing gzip writer")
+	}
+
+	if err := backupStore.PutRestoreResults(restore.Spec.BackupName, restore.Name, buf); err != nil {
+		return err
+	}
+
+	return nil
 }
