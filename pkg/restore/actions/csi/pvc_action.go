@@ -289,7 +289,7 @@ func (p *pvcRestoreItemAction) Execute(
 				nil,
 				nil,
 				"completed",
-				fmt.Sprintf("Successfully restord PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
+				fmt.Sprintf("Successfully created PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
 				input.Restore.Name,
 				logger,
 			)
