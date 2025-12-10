@@ -1427,17 +1427,31 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 
 		// After restore actions, check if it's a KubeVirt VM and track additional items
 		if kubevirtutil.IsKubeVirtVMResource(groupResource) {
+
+			ctx.log.Infof("Handling VM Restore. Name='%s'. SourceNamespace='%s'. TargetNamespace='%s'",
+				obj.GetName(),
+				obj.GetNamespace(),
+				namespace)
+
 			// Log the start of the VM restore
-			kubevirtutil.KubeVirtVMStartOp(ctx.log, obj.GetName(), obj.GetNamespace(), ctx.restore, ctx.kbClient)
+			kubevirtutil.KubeVirtVMStartOp(ctx.log, obj.GetName(), namespace, ctx.restore, ctx.kbClient)
 
 			// Save the VM's name and namespace for tracking additional items
 			vmName := obj.GetName()
-			vmNamespace := obj.GetNamespace()
+			vmNamespace := namespace
 
 			// Store additional items in the context's tracking map
 			for _, additionalItem := range executeOutput.AdditionalItems {
-				vmKey := kubevirtutil.ItemKey{Resource: groupResource.String(), Namespace: vmNamespace, Name: vmName}
-				additionalKey := kubevirtutil.ItemKey{Resource: additionalItem.GroupResource.String(), Namespace: additionalItem.Namespace, Name: additionalItem.Name}
+				vmKey := kubevirtutil.ItemKey{
+					Resource:  groupResource.String(),
+					Namespace: vmNamespace,
+					Name:      vmName,
+				}
+				additionalKey := kubevirtutil.ItemKey{
+					Resource:  additionalItem.GroupResource.String(),
+					Namespace: additionalItem.Namespace,
+					Name:      additionalItem.Name,
+				}
 				ctx.vmRelatedAdditionalItems[additionalKey] = vmKey
 			}
 		}
@@ -1883,7 +1897,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			ctx.log,
 			groupResource,
 			obj.GetName(),
-			obj.GetNamespace(),
+			namespace,
 			ctx.restore,
 			success,                    // Success status based on error presence
 			kubevirtutil.ToError(errs), // Convert errs to an error if applicable
