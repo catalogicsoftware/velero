@@ -307,8 +307,19 @@ func GetVolumeSnapshotClass(
 	if err != nil {
 		return nil, errors.Wrap(err, "error listing VolumeSnapshotClass")
 	}
-	// If a snapshot class is set for provider in PVC annotations, use that
-	snapshotClass, err := GetVolumeSnapshotClassFromPVCAnnotationsForDriver(
+
+	// 1. Check if there is a mapping for the PVC's StorageClass in the Backup annotations
+	snapshotClass, err := GetVolumeSnapshotClassFromBackupMapping(backup, pvc, provisioner, snapshotClasses)
+	if err != nil {
+		log.Debugf("Didn't find VolumeSnapshotClass from Backup StorageClass mapping: %v", err)
+	}
+	if snapshotClass != nil {
+		log.Infof("Found VolumeSnapshotClass %s from Backup StorageClass mapping for PVC %s", snapshotClass.Name, pvc.Name)
+		return snapshotClass, nil
+	}
+
+	// 2. If a snapshot class is set for provider in PVC annotations, use that
+	snapshotClass, err = GetVolumeSnapshotClassFromPVCAnnotationsForDriver(
 		pvc, provisioner, snapshotClasses,
 	)
 	if err != nil {
@@ -318,7 +329,7 @@ func GetVolumeSnapshotClass(
 		return snapshotClass, nil
 	}
 
-	// If there is no annotation in PVC, attempt to fetch it from backup annotations
+	// 3. If there is no annotation in PVC, attempt to fetch it from backup annotations (Driver based)
 	snapshotClass, err = GetVolumeSnapshotClassFromBackupAnnotationsForDriver(
 		backup, provisioner, snapshotClasses)
 	if err != nil {
@@ -328,14 +339,79 @@ func GetVolumeSnapshotClass(
 		return snapshotClass, nil
 	}
 
-	// fallback to default behavior of fetching snapshot class based on label
+	// 4. Fallback to default behavior of fetching snapshot class based on label
 	snapshotClass, err = GetVolumeSnapshotClassForStorageClass(
 		provisioner, snapshotClasses)
-	if err != nil || snapshotClass == nil {
-		return nil, errors.Wrap(err, "error getting VolumeSnapshotClass")
+	if err == nil && snapshotClass != nil {
+		return snapshotClass, nil
 	}
 
-	return snapshotClass, nil
+	log.Debugf("No VolumeSnapshotClass found via standard methods: %v", err)
+
+	// 5. Absolute last resort fallback
+	return GetFallbackVolumeSnapshotClass(provisioner, log, crClient)
+}
+
+// Checks for StorageClass -> VolumeSnapshotClass mapping
+func GetVolumeSnapshotClassFromBackupMapping(
+	backup *velerov1api.Backup,
+	pvc *corev1api.PersistentVolumeClaim,
+	provisioner string,
+	snapshotClasses *snapshotv1api.VolumeSnapshotClassList,
+) (*snapshotv1api.VolumeSnapshotClass, error) {
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
+		// If no StorageClass is specified, we cannot use the SC-based mapping.
+		// Log this and return nil to fall through to other methods.
+		// (An empty string check is also good practice, though nil is the primary concern).
+		return nil, nil
+	}
+	targetStorageClass := *pvc.Spec.StorageClassName
+
+	// Iterate over ALL backup annotations to find our specific prefix
+	var targetVSCName string
+	found := false
+
+	for k, v := range backup.Annotations {
+		if strings.HasPrefix(k, velerov1api.VolumeSnapshotClassStorageClassBackupAnnotationPrefix) {
+			// Value format is "StorageClass:VolumeSnapshotClass"
+			parts := strings.SplitN(v, ":", 2)
+			if len(parts) != 2 {
+				continue // Malformed value, skip
+			}
+
+			scName := parts[0]
+			vscName := parts[1]
+
+			// Check if this mapping matches the PVC's StorageClass
+			if scName == targetStorageClass {
+				targetVSCName = vscName
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		return nil, nil // No mapping found for this storage class
+	}
+
+	// Verify the mapped VolumeSnapshotClass exists and matches the driver
+	for _, sc := range snapshotClasses.Items {
+		if strings.EqualFold(targetVSCName, sc.ObjectMeta.Name) {
+			if !strings.EqualFold(sc.Driver, provisioner) {
+				return nil, errors.Errorf(
+					"Mapped VolumeSnapshotClass %s (from SC %s) is not for driver %s",
+					sc.ObjectMeta.Name, targetStorageClass, provisioner,
+				)
+			}
+			return &sc, nil
+		}
+	}
+
+	return nil, errors.Errorf(
+		"Mapped VolumeSnapshotClass %s not found in cluster for StorageClass %s",
+		targetVSCName, targetStorageClass,
+	)
 }
 
 func GetVolumeSnapshotClassFromPVCAnnotationsForDriver(
@@ -408,7 +484,7 @@ func GetVolumeSnapshotClassForStorageClass(
 	n := 0
 	var vsClass snapshotv1api.VolumeSnapshotClass
 	// We pick the VolumeSnapshotClass that matches the CSI driver name
-	// and has a 'velero.io/csi-volumesnapshot-class' label. This allows
+	// and has a 'cloudcasa.io/csi-volumesnapshot-class' label. This allows
 	// multiple VolumeSnapshotClasses for the same driver with different
 	// values for the other fields in the spec.
 	for _, sc := range snapshotClasses.Items {
@@ -429,6 +505,115 @@ func GetVolumeSnapshotClassForStorageClass(
 		`failed to get VolumeSnapshotClass for provisioner %s, 
 		ensure that the desired VolumeSnapshot class has the %s label`,
 		provisioner, velerov1api.VolumeSnapshotClassSelectorLabel)
+}
+
+// GetFallbackVolumeSnapshotClass attempts to find a usable class or creates a new one
+// if strict matching failed.
+func GetFallbackVolumeSnapshotClass(
+	provisioner string,
+	log logrus.FieldLogger,
+	client crclient.Client,
+) (*snapshotv1api.VolumeSnapshotClass, error) {
+	log.Infof("Attempting to find or create a fallback VolumeSnapshotClass for driver: %s", provisioner)
+
+	// 1. List all VSCs
+	vscList := new(snapshotv1api.VolumeSnapshotClassList)
+	if err := client.List(context.TODO(), vscList); err != nil {
+		return nil, errors.Wrap(err, "failed to list VolumeSnapshotClasses for fallback selection")
+	}
+
+	// 2. Filter by Driver/Provisioner
+	var matches []snapshotv1api.VolumeSnapshotClass
+	for _, vsc := range vscList.Items {
+		if vsc.Driver == provisioner {
+			matches = append(matches, vsc)
+		}
+	}
+
+	// 3. Logic: If exactly one exists, use it (Relaxed requirements)
+	if len(matches) == 1 {
+		log.Infof("Found exactly one existing VolumeSnapshotClass for driver %s: %s. Using it.", provisioner, matches[0].Name)
+		return &matches[0], nil
+	}
+
+	// 4. Logic: If 0 or >1, we create a Cloudcasa specific fallback class.
+	// If >1, we create a new one to ensure we don't pick a class with unknown/undesirable parameters (e.g. Gold vs Bronze).
+	return CreateFallbackVolumeSnapshotClass(provisioner, log, client)
+}
+
+func CreateFallbackVolumeSnapshotClass(
+	provisioner string,
+	log logrus.FieldLogger,
+	client crclient.Client,
+) (*snapshotv1api.VolumeSnapshotClass, error) {
+
+	// Sanitize provisioner name
+	safeName := strings.ReplaceAll(provisioner, ".", "-")
+	vscName := fmt.Sprintf("cloudcasa-%s", safeName)
+
+	log.Infof("Creating new fallback VolumeSnapshotClass: %s", vscName)
+
+	// Define Parameters
+	parameters := make(map[string]string)
+	switch provisioner {
+	case "driver.longhorn.io":
+		parameters["type"] = "snap"
+	case "cinder.csi.openstack.org":
+		parameters["force-create"] = "true"
+	}
+
+	// Define Object
+	newVSC := &snapshotv1api.VolumeSnapshotClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: vscName,
+			Labels: map[string]string{
+				velerov1api.VolumeSnapshotClassSelectorLabel: "true",
+				"created-by": "cloudcasa",
+			},
+		},
+		Driver:         provisioner,
+		DeletionPolicy: snapshotv1api.VolumeSnapshotContentRetain,
+		Parameters:     parameters,
+	}
+
+	// Attempt Create
+	err := client.Create(context.TODO(), newVSC)
+	if err == nil {
+		log.Infof("Successfully created fallback VolumeSnapshotClass: %s", vscName)
+		return newVSC, nil
+	}
+
+	if !apierrors.IsAlreadyExists(err) {
+		return nil, errors.Wrapf(err, "failed to create fallback VolumeSnapshotClass %s", vscName)
+	}
+
+	// --- Handling Race Condition / Cache Lag ---
+	log.Infof("Fallback VolumeSnapshotClass %s already exists, waiting for cache sync...", vscName)
+
+	existingVSC := new(snapshotv1api.VolumeSnapshotClass)
+	key := crclient.ObjectKey{Name: vscName}
+
+	// Retry loop: Poll every 500ms, up to 5 seconds.
+	// This handles the case where API says "Created" but client cache says "NotFound".
+	pollErr := wait.PollUntilContextTimeout(context.Background(), 500*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+		// Use the context passed into the closure
+		if err := client.Get(ctx, key, existingVSC); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Object exists on server but not in cache yet. Retry.
+				return false, nil
+			}
+			// If we get a permission error or connection refused, stop retrying.
+			return false, err
+		}
+		// Success: Found the object
+		return true, nil
+	})
+
+	if pollErr != nil {
+		return nil, errors.Wrapf(pollErr, "failed to retrieve existing fallback VolumeSnapshotClass %s after creation conflict", vscName)
+	}
+
+	return existingVSC, nil
 }
 
 // IsVolumeSnapshotClassHasListerSecret returns whether a volumesnapshotclass has a snapshotlister secret

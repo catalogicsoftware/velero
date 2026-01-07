@@ -118,14 +118,15 @@ const (
 
 // CSI related plugin actions' constant variable
 const (
-	VolumeSnapshotLabel                             = "velero.io/volume-snapshot-name"
-	VolumeSnapshotHandleAnnotation                  = "velero.io/csi-volumesnapshot-handle"
-	VolumeSnapshotRestoreSize                       = "velero.io/csi-volumesnapshot-restore-size"
-	DriverNameAnnotation                            = "velero.io/csi-driver-name"
-	VSCDeletionPolicyAnnotation                     = "velero.io/csi-vsc-deletion-policy"
-	VolumeSnapshotClassSelectorLabel                = "cloudcasa.io/csi-volumesnapshot-class"
-	VolumeSnapshotClassDriverBackupAnnotationPrefix = "cloudcasa.io/csi-volumesnapshot-class"
-	VolumeSnapshotClassDriverPVCAnnotation          = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotLabel                                   = "velero.io/volume-snapshot-name"
+	VolumeSnapshotHandleAnnotation                        = "velero.io/csi-volumesnapshot-handle"
+	VolumeSnapshotRestoreSize                             = "velero.io/csi-volumesnapshot-restore-size"
+	DriverNameAnnotation                                  = "velero.io/csi-driver-name"
+	VSCDeletionPolicyAnnotation                           = "velero.io/csi-vsc-deletion-policy"
+	VolumeSnapshotClassSelectorLabel                      = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassDriverBackupAnnotationPrefix       = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassDriverPVCAnnotation                = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassStorageClassBackupAnnotationPrefix = "cloudcasa.io/csi-sc-vsc-mapping-"
 
 	// There is no release w/ these constants exported. Using the strings for now.
 	// CSI Annotation volumesnapshotclass
