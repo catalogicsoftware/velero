@@ -25,6 +25,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -662,9 +663,9 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 	cloudcasaRestorePodName := "cloudcasa-pvc-restore"
 	for pvcNamespace, pvcNames := range pvcTree {
 		volumes := []v1.Volume{}
-		for _, pvcName := range pvcNames {
+		for pvcNum, pvcName := range pvcNames {
 			volumes = append(volumes, v1.Volume{
-				Name: pvcName,
+				Name: "volume" + strconv.Itoa(pvcNum),
 				VolumeSource: v1.VolumeSource{
 					PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
 						ClaimName: pvcName,
