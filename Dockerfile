@@ -47,7 +47,13 @@ RUN mkdir -p /output/usr/bin && \
     go clean -modcache -cache
 
 # Velero image packing section
-FROM registry.access.redhat.com/ubi9/ubi-minimal
+FROM registry.access.redhat.com/ubi9/ubi
+
+RUN yum -y update \
+ && yum upgrade \
+ && yum -y install ca-certificates \
+ && yum -y update ca-certificates \
+ && yum clean all
 
 LABEL maintainer="CloudCasa <support@cloudcasa.io>"
 
