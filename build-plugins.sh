@@ -339,7 +339,7 @@ LABEL name="CloudCasa Velero" \
     version="\${VERSION}" \
     release="\${VERSION}" \
     summary="CloudCasa Velero" \
-    description="Velero container built on Red Hat UBI. Intended for use with the CloudCasa Operator on OpenShift clusters."
+    description="CloudCasa Velero container built on Red Hat UBI."
 
 # Now, copy the fully prepared and permissioned /plugins directory
 # from our intermediate stage. This single COPY command doesn't require a shell.

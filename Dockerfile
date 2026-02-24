@@ -47,11 +47,10 @@ RUN mkdir -p /output/usr/bin && \
     go clean -modcache -cache
 
 # Velero image packing section
-FROM paketobuildpacks/run-jammy-tiny:0.2.38
+FROM registry.access.redhat.com/ubi9/ubi-minimal
 
 LABEL maintainer="CloudCasa <support@cloudcasa.io>"
 
-COPY --from=velero-builder /output /
+COPY --from=velero-builder --chown=1001:0 /output /
 
-USER cnb:cnb
-
+USER 1001
