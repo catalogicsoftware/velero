@@ -210,6 +210,7 @@ main() {
     
     local config_file=""
     local output_image=""
+    local image_version=""
 
     # Gracefully handle the case of no arguments.
     if [[ $# -eq 0 ]]; then
@@ -254,6 +255,7 @@ main() {
     if [[ -z "$output_image" ]]; then log_error "An output image name and tag are required."; usage; exit 1; fi
     if ! [[ "$output_image" =~ .*:.* ]]; then log_error "The output image name must include a tag (e.g., 'my-image:latest')."; exit 1; fi
     if [[ ! -f "$config_file" ]]; then log_error "Configuration file not found: '$config_file'"; exit 1; fi
+    image_version="${output_image##*:}"
 
     # --- Prerequisite Checks ---
 
@@ -329,9 +331,22 @@ EOF
 # Use the specified (distroless) Velero image as the base.
 FROM ${VELERO_BASE_IMAGE}
 
+ARG VERSION
+
+LABEL name="CloudCasa Velero" \
+    maintainer="support@cloudcasa.io" \
+    vendor="Catalogic Software" \
+    version="\${VERSION}" \
+    release="\${VERSION}" \
+    summary="CloudCasa Velero" \
+    description="CloudCasa Velero container built on Red Hat UBI."
+
 # Now, copy the fully prepared and permissioned /plugins directory
 # from our intermediate stage. This single COPY command doesn't require a shell.
 COPY --from=plugins-prep /plugins /plugins
+
+# Include project license file in the image.
+COPY LICENSE /licenses/LICENSE
 EOF
 
     # Display the generated Dockerfile for transparency and debugging.
@@ -343,7 +358,7 @@ EOF
 
     log_info "Building the combined image as '$output_image' for platforms: $PLATFORMS ..."
     if [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
-        BUILD_CMD=(docker buildx build --platform "$PLATFORMS" -f "$DOCKERFILE" -t "$output_image" .)
+        BUILD_CMD=(docker buildx build --platform "$PLATFORMS" --build-arg "VERSION=$image_version" -f "$DOCKERFILE" -t "$output_image" .)
         if $PUSH_IMAGE; then
             BUILD_CMD+=(--push)
         else
@@ -353,7 +368,7 @@ EOF
         "${BUILD_CMD[@]}"
     else
         log_warn "multiarch build is not fully supported for container runtime: $CONTAINER_RUNTIME. Building for default architecture only."
-        "$CONTAINER_RUNTIME" build -f "$DOCKERFILE" -t "$output_image" .
+        "$CONTAINER_RUNTIME" build --build-arg "VERSION=$image_version" -f "$DOCKERFILE" -t "$output_image" .
     fi
 
     # --- Success Message ---
