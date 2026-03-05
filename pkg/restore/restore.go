@@ -374,6 +374,7 @@ type restoreContext struct {
 	hooksWaitExecutor              *hooksWaitExecutor
 	vmRelatedAdditionalItems       map[kubevirtutil.ItemKey]kubevirtutil.ItemKey // Map to track VM's additional items
 	includeNamedResourcesSpecified bool
+	pvListCache                    *v1.PersistentVolumeList
 }
 
 type resourceClientKey struct {
@@ -1701,6 +1702,13 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		fromCluster, err = ctx.getResource(groupResource, obj, namespace, name)
 	}
 	if err != nil || fromCluster == nil {
+		if groupResource == kuberesource.PersistentVolumeClaims {
+			// PVC does not exist, clear PV binding to stale PVC with the same name
+			if err := ctx.patchStaleVolumeBinding(namespace, name); err != nil {
+				ctx.log.Warnf("Failed to clear stale PV binding for PVC %s/%s: %v", namespace, name, err)
+			}
+		}
+
 		// couldn't find the resource, attempt to create
 		ctx.log.Debugf("Creating %s: %v", obj.GroupVersionKind().Kind, name)
 		createdObj, restoreErr = resourceClient.Create(obj)
@@ -1957,6 +1965,89 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		)
 	}
 	return warnings, errs, itemExists
+}
+
+// patchStaleVolumeBinding checks if there is any PV that points to the given PVC and removes its binding info.
+// Function assumes that PVC does not yet exist and will be created, so if there is a PVC reference it is invalid.
+// If PV did not exist before the restore it will be created before this function is called but claimRef will not be set and
+// this function will exit with "No binding fields to remove for PV"
+func (ctx *restoreContext) patchStaleVolumeBinding(namespace string, pvcName string) error {
+
+	if ctx.restore.Spec.ExistingResourcePolicy != velerov1api.PolicyTypeUpdate {
+		ctx.log.Info("Skipping stale PV claimRef check because existing resource policy is not \"update\"")
+		return nil
+	}
+
+	ctx.log.Infof("Checking if there is any PV that is bound to PVC %s/%s with stale claimRef", namespace, pvcName)
+
+	if ctx.pvListCache == nil {
+		ctx.pvListCache = new(v1.PersistentVolumeList)
+		if err := ctx.kbClient.List(go_context.TODO(), ctx.pvListCache); err != nil {
+			ctx.log.Errorf("Failed to list PVs: %v", err)
+			ctx.pvListCache = nil
+			return err
+		}
+	}
+
+	var boundPvInCache *v1.PersistentVolume
+	for i := range ctx.pvListCache.Items {
+		pv := &ctx.pvListCache.Items[i]
+		if pv.Spec.ClaimRef != nil && pv.Spec.ClaimRef.Namespace == namespace && pv.Spec.ClaimRef.Name == pvcName {
+			boundPvInCache = pv // directly points to the cached entry so it can be updated
+			break
+		}
+	}
+
+	if boundPvInCache == nil {
+		ctx.log.Infof("No PV found with claimRef to PVC %s/%s", namespace, pvcName)
+		return nil
+	}
+
+	pvName := boundPvInCache.Name
+
+	pvObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(boundPvInCache)
+	if err != nil {
+		ctx.log.Errorf("Failed to convert PV %s to unstructured: %v", pvName, err)
+		return err
+	}
+	pv := &unstructured.Unstructured{Object: pvObject}
+
+	originalPv := pv.DeepCopy()
+	pv = resetVolumeBindingInfo(pv)
+
+	patchBytes, err := generatePatch(originalPv, pv)
+	if err != nil {
+		ctx.log.Errorf("Failed to generate patch to remove binding fields for PV %s: %v", pvName, err)
+		return err
+	}
+
+	if patchBytes == nil {
+		ctx.log.Infof("No binding fields to remove for PV %s", pvName)
+		return nil
+	}
+
+	pvClient, err := ctx.getResourceClient(kuberesource.PersistentVolumes, pv, "")
+	if err != nil {
+		ctx.log.Errorf("Failed to get PV resource client: %v", err)
+		return err
+	}
+
+	patchedPv, err := pvClient.Patch(pvName, patchBytes)
+	if err != nil {
+		ctx.log.Errorf("Failed to patch PV %s to remove binding fields: %v", pvName, err)
+		return err
+	}
+
+	// Update cache
+	var updatedPV v1.PersistentVolume
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(patchedPv.Object, &updatedPV); err == nil {
+		*boundPvInCache = updatedPV
+	} else {
+		ctx.log.Warnf("Failed to convert patched PV %s back to structured for cache update: %v", pvName, err)
+	}
+
+	ctx.log.Infof("Successfully removed binding fields for existing PV %s", pvName)
+	return nil
 }
 
 func isAlreadyExistsError(ctx *restoreContext, obj *unstructured.Unstructured, err error, client client.Dynamic) (bool, error) {
