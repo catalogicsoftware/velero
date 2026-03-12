@@ -20,6 +20,7 @@ package process
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
@@ -66,6 +67,18 @@ func newLogrusAdapter(pluginLogger logrus.FieldLogger, logLevel logrus.Level) *l
 	return &logrusAdapter{impl: pluginLogger, level: logLevel}
 }
 
+func pluginStartTimeout() time.Duration {
+	timeoutMinutes := 5
+
+	if value, found := os.LookupEnv("PLUGIN_START_TIMEOUT"); found {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			timeoutMinutes = parsed
+		}
+	}
+
+	return time.Duration(timeoutMinutes) * time.Minute
+}
+
 func (b *clientBuilder) clientConfig() *hcplugin.ClientConfig {
 	return &hcplugin.ClientConfig{
 		HandshakeConfig:  framework.Handshake(),
@@ -82,7 +95,7 @@ func (b *clientBuilder) clientConfig() *hcplugin.ClientConfig {
 		},
 		Logger: b.pluginLogger,
 		Cmd:    exec.Command(b.commandName, b.commandArgs...), //nolint:gosec // Internal call. No need to check the command line.
-		StartTimeout: 5 * time.Minute,
+		StartTimeout: pluginStartTimeout(),
 	}
 }
 
