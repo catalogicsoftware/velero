@@ -20,6 +20,7 @@ package process
 import (
 	"os"
 	"os/exec"
+	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
 	hcplugin "github.com/hashicorp/go-plugin"
@@ -81,6 +82,7 @@ func (b *clientBuilder) clientConfig() *hcplugin.ClientConfig {
 		},
 		Logger: b.pluginLogger,
 		Cmd:    exec.Command(b.commandName, b.commandArgs...), //nolint:gosec // Internal call. No need to check the command line.
+		StartTimeout: 5 * time.Minute,
 	}
 }
 
