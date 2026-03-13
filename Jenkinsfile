@@ -15,17 +15,17 @@ node("cloudcasa-build") {
     }
 
     def imageTag = "${veleroBranch}-${env.BUILD_NUMBER}"
-    def nexusRegistry = "cc-nexus.ad.catalogic.us:8083"
+    def dockerRegistry = env.DOCKER_REGISTRY_INTERNAL
 
     stage("Build and Push Docker Image") {
-        docker.withRegistry("https://${nexusRegistry}", "cc-nexus.ad.catalogic.us-docker-registry") {
+        docker.withRegistry("http://${dockerRegistry}", env.DOCKER_REGISTRY_CREDENTIALS_INTERNAL) {
             sh """
                 make container \
-                    REGISTRY=${nexusRegistry}/catalogicsoftware \
+                    REGISTRY=${dockerRegistry}/catalogicsoftware \
                     VERSION=${imageTag} \
                     BUILDX_PLATFORMS=linux/amd64,linux/arm64 \
                     BUILDX_OUTPUT_TYPE=registry \
-                    IMAGE_TAGS='${nexusRegistry}/catalogicsoftware/velero:${veleroBranch} ${nexusRegistry}/catalogicsoftware/velero:${imageTag}'
+                    IMAGE_TAGS='${dockerRegistry}/catalogicsoftware/velero:${veleroBranch} ${dockerRegistry}/catalogicsoftware/velero:${imageTag}'
             """
         }
     }
