@@ -18,7 +18,8 @@ node("cloudcasa-build") {
     def dockerRegistry = env.DOCKER_REGISTRY_INTERNAL
 
     stage("Build and Push Docker Image") {
-        docker.withRegistry("http://${dockerRegistry}", env.DOCKER_REGISTRY_CREDENTIALS_INTERNAL) {
+        env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
+        docker.withRegistry("https://${dockerRegistry}", env.DOCKER_REGISTRY_CREDENTIALS_INTERNAL) {
             sh """
                 make container \
                     REGISTRY=${dockerRegistry}/catalogicsoftware \
