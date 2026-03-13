@@ -85,7 +85,9 @@ func (r *backupStorageLocationReconciler) Reconcile(ctx context.Context, req ctr
 
 	locationList, err := storage.ListBackupStorageLocations(r.ctx, r.client, req.Namespace)
 	if err != nil {
-		log.WithError(err).Error("No BackupStorageLocations found, at least one is required")
+		// log.WithError(err).Error("No BackupStorageLocations found, at least one is required")
+        // Not sure if we should even log this.
+		log.Infof("No BackupStorageLocations found")
 		return ctrl.Result{}, nil
 	}
 
@@ -178,15 +180,17 @@ func (r *backupStorageLocationReconciler) logReconciledPhase(defaultFound bool, 
 		if len(errs) > 0 {
 			log.Errorf("Current BackupStorageLocations available/unavailable/unknown: %v/%v/%v, %s)", numAvailable, numUnavailable, numUnknown, strings.Join(errs, "; "))
 		} else {
-			log.Errorf("Current BackupStorageLocations available/unavailable/unknown: %v/%v/%v)", numAvailable, numUnavailable, numUnknown)
+			// log.Errorf("Current BackupStorageLocations available/unavailable/unknown: %v/%v/%v)", numAvailable, numUnavailable, numUnknown)
 		}
 	} else if numUnavailable > 0 { // some but not all BSL unavailable
 		log.Warnf("Unavailable BackupStorageLocations detected: available/unavailable/unknown: %v/%v/%v, %s)", numAvailable, numUnavailable, numUnknown, strings.Join(errs, "; "))
 	}
 
+    /*
 	if !defaultFound {
 		log.Warn("There is no existing BackupStorageLocation set as default. Please see `velero backup-location -h` for options.")
 	}
+    */
 }
 
 func (r *backupStorageLocationReconciler) SetupWithManager(mgr ctrl.Manager) error {

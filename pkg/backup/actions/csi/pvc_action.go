@@ -203,10 +203,12 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 	// If deletetionPolicy is not Retain, then in the event of a disaster, the namespace is lost with the volumesnapshot object in it,
 	// the underlying volumesnapshotcontent and the volume snapshot in the storage provider is also deleted.
 	// In such a scenario, the backup objects will be useless as the snapshot handle itself will not be valid.
+    /* This message is not true any more.
 	if vsClass.DeletionPolicy != snapshotv1api.VolumeSnapshotContentRetain {
 		p.log.Warnf("DeletionPolicy on VolumeSnapshotClass %s is not %s; Deletion of VolumeSnapshot objects will lead to deletion of snapshot in the storage provider.",
 			vsClass.Name, snapshotv1api.VolumeSnapshotContentRetain)
 	}
+    */
 
 	// Craft the vs object to be created
 	vs = &snapshotv1api.VolumeSnapshot{
