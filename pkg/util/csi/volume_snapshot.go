@@ -42,6 +42,12 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/stringptr"
 	"github.com/vmware-tanzu/velero/pkg/util/stringslice"
+
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8swatch "k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
+	watchtools "k8s.io/client-go/tools/watch"
 )
 
 const (
@@ -840,40 +846,41 @@ func recreateVolumeSnapshotContent(
 	return nil
 }
 
-// WaitUntilVSCHandleIsReady returns the VolumeSnapshotContent
-// object associated with the volumesnapshot
+// WaitUntilVSCHandleIsReady returns the VolumeSnapshotContent object associated
+// with the VolumeSnapshot. Instead of polling on a fixed interval, it uses
+// watchtools.UntilWithSync for both the VS-binding phase and the VSC
+// SnapshotHandle-ready phase, so it reacts immediately to reconciliation events.
+// The full csiSnapshotTimeout budget is shared across both phases via a single
+// context deadline.
 func WaitUntilVSCHandleIsReady(
 	volSnap *snapshotv1api.VolumeSnapshot,
+	snapshotClient snapshotter.SnapshotV1Interface, // NEW parameter — see call-site instructions
 	crClient crclient.Client,
 	log logrus.FieldLogger,
 	shouldWait bool,
 	csiSnapshotTimeout time.Duration,
 ) (*snapshotv1api.VolumeSnapshotContent, error) {
-	log.Infof("Start WaitUntilVSCHandleIsReady: VolSnap=%s/%s, shouldWait=%v, timeout=%v",
+	log.Infof("Start WaitUntilVSCHandleIsReady: VolSnap=%s/%s, ShouldWait=%v, Timeout=%v",
 		volSnap.Namespace, volSnap.Name, shouldWait, csiSnapshotTimeout)
 
+	// Fast-path: caller does not want to wait; return whatever is already bound.
 	if !shouldWait {
-		log.Info("shouldWait=false; attempting direct fetch of VSC if bound")
+		log.Info("ShouldWait=false; attempting direct fetch of VSC if bound")
 		if volSnap.Status == nil || volSnap.Status.BoundVolumeSnapshotContentName == nil {
-			// volumesnapshot hasn't been reconciled and we're not waiting for it.
 			return nil, nil
 		}
 		vsc := new(snapshotv1api.VolumeSnapshotContent)
-		err := crClient.Get(context.TODO(),
-			crclient.ObjectKey{Name: *volSnap.Status.BoundVolumeSnapshotContentName}, vsc)
-		if err != nil {
-			log.Error(err, fmt.Sprintf("Direct fetch failed for VSC %s", *volSnap.Status.BoundVolumeSnapshotContentName))
+		if err := crClient.Get(context.TODO(),
+			crclient.ObjectKey{Name: *volSnap.Status.BoundVolumeSnapshotContentName}, vsc); err != nil {
+			log.WithError(err).Errorf("Direct fetch failed for VSC %s",
+				*volSnap.Status.BoundVolumeSnapshotContentName)
 			return nil, errors.Wrap(err, "error getting VSC")
 		}
 		log.Infof("Fetched VSC %s successfully", vsc.Name)
 		return vsc, nil
 	}
 
-	// We'll wait 10m for the VSC to be reconciled polling
-	// every 5s unless backup's csiSnapshotTimeout is set
-	interval := 5 * time.Second
-	vsc := new(snapshotv1api.VolumeSnapshotContent)
-	var snapshotState, snapshotStateMessage string
+	// Validate the backup label that is required by the progress-reporting defer below.
 	jobID, ok := volSnap.Labels["velero.io/backup-name"]
 	if !ok {
 		err := errors.New("missing required label 'velero.io/backup-name' on VolumeSnapshot")
@@ -881,125 +888,212 @@ func WaitUntilVSCHandleIsReady(
 		return nil, err
 	}
 
+	// snapshotState / snapshotStateMessage are written throughout the two watch
+	// phases and consumed by the deferred progress-reporter.
+	var snapshotState, snapshotStateMessage string
 	defer func() {
 		uErr := catalogic.UpdateSnapshotProgress(nil, volSnap, nil, snapshotState, snapshotStateMessage, jobID, log)
 		if uErr != nil {
 			log.WithError(uErr).Error("Failed to update snapshot progress")
 		}
-		time.Sleep(200 * time.Millisecond) // give some time for the update to be processed
+		time.Sleep(200 * time.Millisecond)
 		catalogic.DeleteSnapshotProgressConfigMap(jobID, log)
 	}()
 
-	config, pollErr := catalogic.GetPluginConfig(jobID, log)
-	if pollErr != nil {
-		log.WithError(pollErr).Error("Failed to get plugin config")
-		return nil, errors.Wrap(pollErr, "error getting plugin config")
+	// Allow the plugin config to override the timeout.
+	config, err := catalogic.GetPluginConfig(jobID, log)
+	if err != nil {
+		log.WithError(err).Error("Failed to get plugin config")
+		return nil, errors.Wrap(err, "error getting plugin config")
 	}
 	log.Infof("Plugin config: %+v", config)
 	if config.CsiSnapshotTimeout > 0 {
 		csiSnapshotTimeout = time.Duration(config.CsiSnapshotTimeout) * time.Minute
-		log.Infof("Using configured timeout %v", csiSnapshotTimeout)
+		log.Infof("Using configured CSI snapshot Timeout=%v", csiSnapshotTimeout)
 	}
 
-	log.Infof("Polling up to %v for CSI reconciliation of %s/%s", csiSnapshotTimeout, volSnap.Namespace, volSnap.Name)
-	pollErr = wait.PollUntilContextTimeout(context.Background(), interval, csiSnapshotTimeout, true,
-		func(ctx context.Context) (bool, error) {
-			var vs snapshotv1api.VolumeSnapshot
-			var getVsErr error
-			for attempt := 1; attempt <= 3; attempt++ {
-				getVsErr = crClient.Get(ctx, crclient.ObjectKeyFromObject(volSnap), &vs)
-				if getVsErr == nil || !apierrors.IsNotFound(getVsErr) {
-					break
+	// A single deadline context spans both phases. If Phase 1 consumes 3 minutes,
+	// Phase 2 has only the remaining 7 minutes — which is the correct behaviour.
+	ctx, cancel := context.WithTimeout(context.Background(), csiSnapshotTimeout)
+	defer cancel()
+
+	// -------------------------------------------------------------------------
+	// Phase 1 — Watch the VolumeSnapshot until BoundVolumeSnapshotContentName
+	// is populated.
+	//
+	// watchtools.UntilWithSync does an initial List before starting the Watch,
+	// so if the VS is already bound the condition fires with zero wait time.
+	// Auto-reconnects on dropped watch connections are handled internally by
+	// the Reflector that backs UntilWithSync.
+	// -------------------------------------------------------------------------
+	log.Infof("Phase1: Watching VolumeSnapshot %s/%s for VSC binding, Timeout=%v",
+		volSnap.Namespace, volSnap.Name, csiSnapshotTimeout)
+
+	vsFieldSelector := fields.OneTermEqualSelector("metadata.name", volSnap.Name).String()
+	vsListWatch := &cache.ListWatch{
+		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+			opts.FieldSelector = vsFieldSelector
+			return snapshotClient.VolumeSnapshots(volSnap.Namespace).List(ctx, opts)
+		},
+		WatchFunc: func(opts metav1.ListOptions) (k8swatch.Interface, error) {
+			opts.FieldSelector = vsFieldSelector
+			return snapshotClient.VolumeSnapshots(volSnap.Namespace).Watch(ctx, opts)
+		},
+	}
+
+	var boundVSCName string
+	var latestVS *snapshotv1api.VolumeSnapshot
+
+	if _, watchErr := watchtools.UntilWithSync(
+		ctx,
+		vsListWatch,
+		&snapshotv1api.VolumeSnapshot{},
+		nil, // no precondition; the condition func below is sufficient
+		func(event k8swatch.Event) (bool, error) {
+			switch event.Type {
+			case k8swatch.Deleted:
+				return false, fmt.Errorf(
+					"VolumeSnapshot %s/%s was deleted while waiting for VSC binding",
+					volSnap.Namespace, volSnap.Name)
+			case k8swatch.Added, k8swatch.Modified:
+				vs, ok := event.Object.(*snapshotv1api.VolumeSnapshot)
+				if !ok {
+					return false, nil
 				}
-				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				if vs.Status == nil || vs.Status.BoundVolumeSnapshotContentName == nil {
+					snapshotState = "pending"
+					snapshotStateMessage = fmt.Sprintf(
+						"Awaiting VolumeSnapshot reconciliation: %s/%s",
+						volSnap.Namespace, volSnap.Name)
+					log.Info(snapshotStateMessage)
+					return false, nil
+				}
+				boundVSCName = *vs.Status.BoundVolumeSnapshotContentName
+				latestVS = vs
+				log.Infof("VolumeSnapshot %s/%s bound to VSC %s",
+					volSnap.Namespace, volSnap.Name, boundVSCName)
+				return true, nil
 			}
-			if getVsErr != nil {
-				log.WithError(getVsErr).Errorf("Failed to fetch VolumeSnapshot %s/%s", volSnap.Namespace, volSnap.Name)
-				return false, getVsErr
-			}
-			log.Infof("VolSnap %+v", vs)
+			return false, nil
+		},
+	); watchErr != nil {
+		log.WithError(watchErr).Errorf(
+			"Phase1 watch failed for VolumeSnapshot %s/%s", volSnap.Namespace, volSnap.Name)
+		return nil, errors.Wrapf(watchErr,
+			"timed out or failed watching VolumeSnapshot %s/%s for VSC binding",
+			volSnap.Namespace, volSnap.Name)
+	}
 
-			if vs.Status == nil || vs.Status.BoundVolumeSnapshotContentName == nil {
-				snapshotState, snapshotStateMessage = "pending", fmt.Sprintf("Awaiting VolumeSnapshot reconciliation: %s/%s", volSnap.Namespace, volSnap.Name)
-				log.Info(snapshotStateMessage)
-				return false, nil
-			}
-
-			vscName := *vs.Status.BoundVolumeSnapshotContentName
-
-			retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				var getErr error
-				for attempt := 1; attempt <= 3; attempt++ {
-					getErr = crClient.Get(ctx, crclient.ObjectKey{Name: vscName}, vsc)
-					if getErr == nil || !apierrors.IsNotFound(getErr) {
-						break
-					}
-					time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
-				}
-				if getErr != nil {
-					return getErr
-				}
-
-				if vsc.Annotations == nil {
-					vsc.Annotations = make(map[string]string)
-				}
-				updated := false
-				if _, ok := vsc.Annotations["cc-pvc-name"]; !ok && vs.Spec.Source.PersistentVolumeClaimName != nil {
-					vsc.Annotations["cc-pvc-name"] = *vs.Spec.Source.PersistentVolumeClaimName
-					updated = true
-				}
-				if _, ok := vsc.Annotations["cc-pvc-namespace"]; !ok {
-					vsc.Annotations["cc-pvc-namespace"] = vs.Namespace
-					updated = true
-				}
-				if updated {
-					if err := crClient.Update(ctx, vsc); err != nil {
-						log.WithError(err).Warnf("Failed VSC annotation update for %s; retrying", vscName)
-						return err // retry.RetryOnConflict will handle the retry
-					}
-					log.Infof("Updated annotations on VSC %s", vscName)
-				}
-				return nil
-			})
-
-			if retryErr != nil {
-				log.WithError(retryErr).Errorf("Failed to retry update on VSC %s", vscName)
-				return false, retryErr
-			}
-
-			// If its not present, then, update the volumesnapshotcontent object with this information
-
-			// we need to wait for the VolumeSnapshotContent
-			// to have a snapshot handle because during restore,
-			// we'll use that snapshot handle as the source for
-			// the VolumeSnapshotContent so it's statically
-			// bound to the existing snapshot.
-			if vsc.Status == nil || vsc.Status.SnapshotHandle == nil {
-				snapshotState, snapshotStateMessage = "pending", fmt.Sprintf("VSC %s lacks snapshot handle", vscName)
-				log.Info(snapshotStateMessage)
-				if vsc.Status != nil && vsc.Status.Error != nil {
-					log.Infof("VSC %s has error: %v", vscName, *vsc.Status.Error.Message)
-				}
-				return false, nil
-			}
-
-			log.Infof("VSC %s is ready with snapshot handle", vscName)
-			return true, nil
-		})
-
-	if pollErr != nil {
-		log.WithError(pollErr).Error("Reconciliation polling failed")
-		if wait.Interrupted(pollErr) && vsc.Status != nil && vsc.Status.Error != nil {
-			return nil, fmt.Errorf("CSI reconciliation timeout: %v", *vsc.Status.Error.Message)
+	// -------------------------------------------------------------------------
+	// Interlude — Apply cc-pvc-name / cc-pvc-namespace annotations to the VSC.
+	//
+	// In the old implementation this happened inside the poll loop and was
+	// therefore attempted on every tick.  Here we do it exactly once, after
+	// Phase 1 has confirmed the binding, and before Phase 2 starts watching.
+	// -------------------------------------------------------------------------
+	vsc := new(snapshotv1api.VolumeSnapshotContent)
+	if annotationErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := crClient.Get(ctx, crclient.ObjectKey{Name: boundVSCName}, vsc); err != nil {
+			return err
 		}
-		return nil, pollErr
+		if vsc.Annotations == nil {
+			vsc.Annotations = make(map[string]string)
+		}
+		updated := false
+		if _, exists := vsc.Annotations["cc-pvc-name"]; !exists &&
+			latestVS.Spec.Source.PersistentVolumeClaimName != nil {
+			vsc.Annotations["cc-pvc-name"] = *latestVS.Spec.Source.PersistentVolumeClaimName
+			updated = true
+		}
+		if _, exists := vsc.Annotations["cc-pvc-namespace"]; !exists {
+			vsc.Annotations["cc-pvc-namespace"] = latestVS.Namespace
+			updated = true
+		}
+		if updated {
+			if err := crClient.Update(ctx, vsc); err != nil {
+				log.WithError(err).Warnf(
+					"Failed VSC annotation update for %s; retrying", boundVSCName)
+				return err
+			}
+			log.Infof("Updated PVC annotations on VSC %s", boundVSCName)
+		}
+		return nil
+	}); annotationErr != nil {
+		log.WithError(annotationErr).Errorf(
+			"Failed to update annotations on VSC %s", boundVSCName)
+		return nil, errors.Wrapf(annotationErr, "failed to annotate VSC %s", boundVSCName)
+	}
+
+	// -------------------------------------------------------------------------
+	// Phase 2 — Watch the VolumeSnapshotContent until Status.SnapshotHandle is
+	// non-nil.  The same context (and therefore the same deadline) is reused,
+	// so the two phases share the total timeout budget.
+	// -------------------------------------------------------------------------
+	log.Infof("Phase2: Watching VSC %s for SnapshotHandle readiness", boundVSCName)
+
+	vscFieldSelector := fields.OneTermEqualSelector("metadata.name", boundVSCName).String()
+	vscListWatch := &cache.ListWatch{
+		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+			opts.FieldSelector = vscFieldSelector
+			return snapshotClient.VolumeSnapshotContents().List(ctx, opts)
+		},
+		WatchFunc: func(opts metav1.ListOptions) (k8swatch.Interface, error) {
+			opts.FieldSelector = vscFieldSelector
+			return snapshotClient.VolumeSnapshotContents().Watch(ctx, opts)
+		},
+	}
+
+	if _, watchErr := watchtools.UntilWithSync(
+		ctx,
+		vscListWatch,
+		&snapshotv1api.VolumeSnapshotContent{},
+		nil,
+		func(event k8swatch.Event) (bool, error) {
+			switch event.Type {
+			case k8swatch.Deleted:
+				return false, fmt.Errorf(
+					"VSC %s was deleted while waiting for SnapshotHandle", boundVSCName)
+			case k8swatch.Added, k8swatch.Modified:
+				updatedVSC, ok := event.Object.(*snapshotv1api.VolumeSnapshotContent)
+				if !ok {
+					return false, nil
+				}
+				if updatedVSC.Status == nil || updatedVSC.Status.SnapshotHandle == nil {
+					snapshotState = "pending"
+					snapshotStateMessage = fmt.Sprintf(
+						"VSC %s lacks SnapshotHandle", boundVSCName)
+					log.Info(snapshotStateMessage)
+					if updatedVSC.Status != nil && updatedVSC.Status.Error != nil {
+						log.Infof("VSC %s has error: %v",
+							boundVSCName, *updatedVSC.Status.Error.Message)
+					}
+					return false, nil
+				}
+				// Capture the final, fully-populated VSC for the caller.
+				vsc = updatedVSC
+				log.Infof("VSC %s is ready with SnapshotHandle", boundVSCName)
+				return true, nil
+			}
+			return false, nil
+		},
+	); watchErr != nil {
+		log.WithError(watchErr).Errorf("Phase2 watch failed for VSC %s", boundVSCName)
+		if vsc.Status != nil && vsc.Status.Error != nil {
+			return nil, fmt.Errorf("CSI reconciliation timeout for VSC %s: %v",
+				boundVSCName, *vsc.Status.Error.Message)
+		}
+		return nil, errors.Wrapf(watchErr,
+			"timed out or failed watching VSC %s for SnapshotHandle", boundVSCName)
 	}
 
 	if vsc.Status != nil && vsc.Status.ReadyToUse != nil && *vsc.Status.ReadyToUse {
 		snapshotState, snapshotStateMessage = "completed", "CSI snapshot complete"
 	} else {
-		snapshotState, snapshotStateMessage = "pending", fmt.Sprintf("VSC %s not ReadyToUse", vsc.Name)
+		snapshotState, snapshotStateMessage = "pending",
+			fmt.Sprintf("VSC %s not ReadyToUse", vsc.Name)
 	}
-	log.Infof("Completed WaitUntilVSCHandleIsReady for %s/%s", volSnap.Namespace, volSnap.Name)
+
+	log.Infof("Completed WaitUntilVSCHandleIsReady for %s/%s, VSC=%s",
+		volSnap.Namespace, volSnap.Name, vsc.Name)
 	return vsc, nil
 }

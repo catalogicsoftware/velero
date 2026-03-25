@@ -30,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	snapshotterclientset "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned"
+	snapshotter "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned/typed/volumesnapshot/v1"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
@@ -45,8 +47,9 @@ import (
 // volumeSnapshotBackupItemAction is a backup item action plugin to backup
 // CSI VolumeSnapshot objects using Velero
 type volumeSnapshotBackupItemAction struct {
-	log      logrus.FieldLogger
-	crClient crclient.Client
+	log            logrus.FieldLogger
+	crClient       crclient.Client
+	snapshotClient snapshotter.SnapshotV1Interface
 }
 
 // AppliesTo returns information indicating that the
@@ -117,6 +120,7 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 
 	vsc, err := csi.WaitUntilVSCHandleIsReady(
 		vs,
+		p.snapshotClient,
 		p.crClient,
 		p.log,
 		backupOngoing,
@@ -380,9 +384,20 @@ func NewVolumeSnapshotBackupItemAction(
 			return nil, errors.WithStack(err)
 		}
 
+		clientConfig, err := f.ClientConfig()
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+
+		snapshotClientset, err := snapshotterclientset.NewForConfig(clientConfig)
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+
 		return &volumeSnapshotBackupItemAction{
-			log:      logger,
-			crClient: crClient,
+			log:            logger,
+			crClient:       crClient,
+			snapshotClient: snapshotClientset.SnapshotV1(),
 		}, nil
 	}
 }

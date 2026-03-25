@@ -49,12 +49,17 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/csi"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
+
+	// Add this:
+	snapshotterclientset "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned"
+	snapshotter "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned/typed/volumesnapshot/v1"
 )
 
 // pvcBackupItemAction is a backup item action plugin for Velero.
 type pvcBackupItemAction struct {
-	log      logrus.FieldLogger
-	crClient crclient.Client
+	log            logrus.FieldLogger
+	crClient       crclient.Client
+	snapshotClient snapshotter.SnapshotV1Interface
 }
 
 // liveCopyDrivers is a list of drivers for which we will skip creating the snapshot and will copy data live
@@ -203,12 +208,12 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 	// If deletetionPolicy is not Retain, then in the event of a disaster, the namespace is lost with the volumesnapshot object in it,
 	// the underlying volumesnapshotcontent and the volume snapshot in the storage provider is also deleted.
 	// In such a scenario, the backup objects will be useless as the snapshot handle itself will not be valid.
-    /* This message is not true any more.
+	/* This message is not true any more.
 	if vsClass.DeletionPolicy != snapshotv1api.VolumeSnapshotContentRetain {
 		p.log.Warnf("DeletionPolicy on VolumeSnapshotClass %s is not %s; Deletion of VolumeSnapshot objects will lead to deletion of snapshot in the storage provider.",
 			vsClass.Name, snapshotv1api.VolumeSnapshotContentRetain)
 	}
-    */
+	*/
 
 	// Craft the vs object to be created
 	vs = &snapshotv1api.VolumeSnapshot{
@@ -340,6 +345,7 @@ func (p *pvcBackupItemAction) Execute(
 		// returning with the Async operation for data mover.
 		_, err := csi.WaitUntilVSCHandleIsReady(
 			vs,
+			p.snapshotClient,
 			p.crClient,
 			p.log,
 			true,
@@ -620,9 +626,20 @@ func NewPvcBackupItemAction(f client.Factory) plugincommon.HandlerInitializer {
 			return nil, errors.WithStack(err)
 		}
 
+		clientConfig, err := f.ClientConfig()
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+
+		snapshotClientset, err := snapshotterclientset.NewForConfig(clientConfig)
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+
 		return &pvcBackupItemAction{
-			log:      logger,
-			crClient: crClient,
+			log:            logger,
+			crClient:       crClient,
+			snapshotClient: snapshotClientset.SnapshotV1(),
 		}, nil
 	}
 }
