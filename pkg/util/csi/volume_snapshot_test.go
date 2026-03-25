@@ -35,6 +35,7 @@ import (
 	clientTesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	fakesnapshotter "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned/fake"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
@@ -1570,6 +1571,7 @@ func TestWaitUntilVSCHandleIsReady(t *testing.T) {
 		vsForNilStatusFieldVsc,
 	}
 	fakeClient := velerotest.NewFakeControllerRuntimeClient(t, objs...)
+	fakeSnapshotClient := fakesnapshotter.NewSimpleClientset(objs...).SnapshotV1()
 	testCases := []struct {
 		name        string
 		volSnap     *snapshotv1api.VolumeSnapshot
@@ -1578,21 +1580,24 @@ func TestWaitUntilVSCHandleIsReady(t *testing.T) {
 		expectError bool
 	}{
 		{
-			name:        "waitEnabled should find volumesnapshotcontent for volumesnapshot",
+			// wait=true with missing backup-name label: must error because label is required.
+			name:        "waitEnabled should error when backup-name label is missing on volumesnapshot",
 			volSnap:     validVS,
-			exepctedVSC: vscObj,
+			exepctedVSC: nil,
 			wait:        true,
-			expectError: false,
+			expectError: true,
 		},
 		{
-			name:        "waitEnabled should not find volumesnapshotcontent for volumesnapshot with non-existing snapshotcontent name in status.BoundVolumeSnapshotContentName",
+			// wait=true with missing label and non-existing VSC: same label error takes priority.
+			name:        "waitEnabled should error when backup-name label is missing (non-existing VSC)",
 			volSnap:     vsWithVSCNotFound,
 			exepctedVSC: nil,
 			wait:        true,
 			expectError: true,
 		},
 		{
-			name:        "waitEnabled should not find volumesnapshotcontent for a non-existent volumesnapshot",
+			// wait=true with missing label and non-existent VS: same label error takes priority.
+			name:        "waitEnabled should error when backup-name label is missing (non-existent VS)",
 			wait:        true,
 			exepctedVSC: nil,
 			expectError: true,
@@ -1645,7 +1650,7 @@ func TestWaitUntilVSCHandleIsReady(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actualVSC, actualError := WaitUntilVSCHandleIsReady(tc.volSnap, fakeClient, logrus.New().WithField("fake", "test"), tc.wait, 0)
+			actualVSC, actualError := WaitUntilVSCHandleIsReady(tc.volSnap, fakeSnapshotClient, fakeClient, logrus.New().WithField("fake", "test"), tc.wait, 0)
 			if tc.expectError && actualError == nil {
 				assert.NotNil(t, actualError)
 				assert.Nil(t, actualVSC)

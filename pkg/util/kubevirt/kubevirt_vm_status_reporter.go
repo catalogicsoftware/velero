@@ -128,7 +128,7 @@ func printConfigMapData(log logrus.FieldLogger, configMap *corev1.ConfigMap) {
 	}
 
 	// Log the Data section of the ConfigMap
-	log.Infof(" ==> ConfigMap %s/%s Data:\n%s", configMap.Namespace, configMap.Name, string(dataJSON))
+	log.Debugf(" ==> ConfigMap %s/%s Data:\n%s", configMap.Namespace, configMap.Name, string(dataJSON))
 }
 
 // extractJobDetails extracts the ID, type, and namespace of a job (either a Backup or Restore) for tracking VM progress.
