@@ -105,6 +105,179 @@ type objectBackupStore struct {
 	logger      logrus.FieldLogger
 }
 
+// loggingObjectStore is a decorator around velero.ObjectStore that logs every
+// plugin interaction — both the attempt and the outcome — so that no object-store
+// operation can fail silently and cause a backup to be marked failed without a
+// reason appearing in the logs.
+type loggingObjectStore struct {
+	delegate velero.ObjectStore
+	log      logrus.FieldLogger
+}
+
+func newLoggingObjectStore(delegate velero.ObjectStore, log logrus.FieldLogger) velero.ObjectStore {
+	return &loggingObjectStore{delegate: delegate, log: log}
+}
+
+func (l *loggingObjectStore) Init(config map[string]string) error {
+	l.log.Info("ObjectStore: calling Init")
+	err := l.delegate.Init(config)
+	if err != nil {
+		l.log.WithError(err).Error("ObjectStore: Init failed")
+	} else {
+		l.log.Info("ObjectStore: Init succeeded")
+	}
+	return err
+}
+
+func (l *loggingObjectStore) PutObject(bucket, key string, body io.Reader) error {
+	l.log.WithFields(logrus.Fields{
+		"Bucket": bucket,
+		"Key":    key,
+	}).Info("ObjectStore: calling PutObject")
+	err := l.delegate.PutObject(bucket, key, body)
+	if err != nil {
+		l.log.WithError(err).WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+		}).Error("ObjectStore: PutObject failed")
+	} else {
+		l.log.WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+		}).Info("ObjectStore: PutObject succeeded")
+	}
+	return err
+}
+
+func (l *loggingObjectStore) ObjectExists(bucket, key string) (bool, error) {
+	l.log.WithFields(logrus.Fields{
+		"Bucket": bucket,
+		"Key":    key,
+	}).Info("ObjectStore: calling ObjectExists")
+	exists, err := l.delegate.ObjectExists(bucket, key)
+	if err != nil {
+		l.log.WithError(err).WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+		}).Error("ObjectStore: ObjectExists failed")
+	} else {
+		l.log.WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+			"Exists": exists,
+		}).Info("ObjectStore: ObjectExists succeeded")
+	}
+	return exists, err
+}
+
+func (l *loggingObjectStore) GetObject(bucket, key string) (io.ReadCloser, error) {
+	l.log.WithFields(logrus.Fields{
+		"Bucket": bucket,
+		"Key":    key,
+	}).Info("ObjectStore: calling GetObject")
+	rc, err := l.delegate.GetObject(bucket, key)
+	if err != nil {
+		l.log.WithError(err).WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+		}).Error("ObjectStore: GetObject failed")
+	} else {
+		l.log.WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+		}).Info("ObjectStore: GetObject succeeded")
+	}
+	return rc, err
+}
+
+func (l *loggingObjectStore) ListCommonPrefixes(bucket, prefix, delimiter string) ([]string, error) {
+	l.log.WithFields(logrus.Fields{
+		"Bucket":    bucket,
+		"Prefix":    prefix,
+		"Delimiter": delimiter,
+	}).Info("ObjectStore: calling ListCommonPrefixes")
+	result, err := l.delegate.ListCommonPrefixes(bucket, prefix, delimiter)
+	if err != nil {
+		l.log.WithError(err).WithFields(logrus.Fields{
+			"Bucket":    bucket,
+			"Prefix":    prefix,
+			"Delimiter": delimiter,
+		}).Error("ObjectStore: ListCommonPrefixes failed")
+	} else {
+		l.log.WithFields(logrus.Fields{
+			"Bucket":      bucket,
+			"Prefix":      prefix,
+			"Delimiter":   delimiter,
+			"ResultCount": len(result),
+		}).Info("ObjectStore: ListCommonPrefixes succeeded")
+	}
+	return result, err
+}
+
+func (l *loggingObjectStore) ListObjects(bucket, prefix string) ([]string, error) {
+	l.log.WithFields(logrus.Fields{
+		"Bucket": bucket,
+		"Prefix": prefix,
+	}).Info("ObjectStore: calling ListObjects")
+	result, err := l.delegate.ListObjects(bucket, prefix)
+	if err != nil {
+		l.log.WithError(err).WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Prefix": prefix,
+		}).Error("ObjectStore: ListObjects failed")
+	} else {
+		l.log.WithFields(logrus.Fields{
+			"Bucket":      bucket,
+			"Prefix":      prefix,
+			"ResultCount": len(result),
+		}).Info("ObjectStore: ListObjects succeeded")
+	}
+	return result, err
+}
+
+func (l *loggingObjectStore) DeleteObject(bucket, key string) error {
+	l.log.WithFields(logrus.Fields{
+		"Bucket": bucket,
+		"Key":    key,
+	}).Info("ObjectStore: calling DeleteObject")
+	err := l.delegate.DeleteObject(bucket, key)
+	if err != nil {
+		l.log.WithError(err).WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+		}).Error("ObjectStore: DeleteObject failed")
+	} else {
+		l.log.WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+		}).Info("ObjectStore: DeleteObject succeeded")
+	}
+	return err
+}
+
+func (l *loggingObjectStore) CreateSignedURL(bucket, key string, ttl time.Duration) (string, error) {
+	l.log.WithFields(logrus.Fields{
+		"Bucket": bucket,
+		"Key":    key,
+		"TTL":    ttl,
+	}).Info("ObjectStore: calling CreateSignedURL")
+	url, err := l.delegate.CreateSignedURL(bucket, key, ttl)
+	if err != nil {
+		l.log.WithError(err).WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+			"TTL":    ttl,
+		}).Error("ObjectStore: CreateSignedURL failed")
+	} else {
+		l.log.WithFields(logrus.Fields{
+			"Bucket": bucket,
+			"Key":    key,
+			"TTL":    ttl,
+		}).Info("ObjectStore: CreateSignedURL succeeded")
+	}
+	return url, err
+}
+
 // ObjectStoreGetter is a type that can get a velero.ObjectStore
 // from a provider name.
 type ObjectStoreGetter interface {
@@ -178,14 +351,32 @@ func (b *objectBackupStoreGetter) Get(location *velerov1api.BackupStorageLocatio
 		objectStoreConfig["credentialsFile"] = credsFile
 	}
 
+	logger.WithField("Provider", location.Spec.Provider).Info("ObjectStore: calling GetObjectStore")
 	objectStore, err := objectStoreGetter.GetObjectStore(location.Spec.Provider)
 	if err != nil {
+		logger.WithError(err).WithField("Provider", location.Spec.Provider).Error("ObjectStore: GetObjectStore failed")
 		return nil, err
 	}
+	logger.WithField("Provider", location.Spec.Provider).Info("ObjectStore: GetObjectStore succeeded")
 
+	logger.WithFields(logrus.Fields{
+		"Provider": location.Spec.Provider,
+		"Bucket":   bucket,
+		"Prefix":   prefix,
+	}).Info("ObjectStore: calling Init")
 	if err := objectStore.Init(objectStoreConfig); err != nil {
+		logger.WithError(err).WithFields(logrus.Fields{
+			"Provider": location.Spec.Provider,
+			"Bucket":   bucket,
+			"Prefix":   prefix,
+		}).Error("ObjectStore: Init failed")
 		return nil, err
 	}
+	logger.WithFields(logrus.Fields{
+		"Provider": location.Spec.Provider,
+		"Bucket":   bucket,
+		"Prefix":   prefix,
+	}).Info("ObjectStore: Init succeeded")
 
 	log := logger.WithFields(logrus.Fields(map[string]interface{}{
 		"bucket": bucket,
@@ -193,7 +384,7 @@ func (b *objectBackupStoreGetter) Get(location *velerov1api.BackupStorageLocatio
 	}))
 
 	return &objectBackupStore{
-		objectStore: objectStore,
+		objectStore: newLoggingObjectStore(objectStore, log),
 		bucket:      bucket,
 		layout:      NewObjectStoreLayout(prefix),
 		logger:      log,
@@ -250,22 +441,30 @@ func (s *objectBackupStore) ListBackups() ([]string, error) {
 }
 
 func (s *objectBackupStore) PutBackup(info BackupInfo) error {
+	// Stage 1: backup log (best-effort — failure does not fail the backup).
+	s.logger.WithField("Backup", info.Name).Info("Uploading backup log file to object store (best-effort)")
 	if err := seekAndPutObject(s.objectStore, s.bucket, s.layout.getBackupLogKey(info.Name), info.Log); err != nil {
 		// Uploading the log file is best-effort; if it fails, we log the error but it doesn't impact the
 		// backup's status.
-		s.logger.WithError(err).WithField("backup", info.Name).Error("Error uploading log file")
+		s.logger.WithError(err).WithField("Backup", info.Name).Error("Error uploading log file; backup status is not affected")
 	}
 
+	// Stage 2: backup metadata JSON (hard-stop on failure).
+	s.logger.WithField("Backup", info.Name).Info("Uploading backup metadata to object store")
 	if err := seekAndPutObject(s.objectStore, s.bucket, s.layout.getBackupMetadataKey(info.Name), info.Metadata); err != nil {
-		// failure to upload metadata file is a hard-stop
+		s.logger.WithError(err).WithField("Backup", info.Name).Error("Failed to upload backup metadata; aborting backup persistence")
 		return err
 	}
 
+	// Stage 3: backup contents tarball (hard-stop on failure; rolls back metadata).
+	s.logger.WithField("Backup", info.Name).Info("Uploading backup contents tarball to object store")
 	if err := seekAndPutObject(s.objectStore, s.bucket, s.layout.getBackupContentsKey(info.Name), info.Contents); err != nil {
+		s.logger.WithError(err).WithField("Backup", info.Name).Error("Failed to upload backup contents; attempting to delete already-uploaded metadata")
 		deleteErr := s.objectStore.DeleteObject(s.bucket, s.layout.getBackupMetadataKey(info.Name))
 		return kerrors.NewAggregate([]error{err, deleteErr})
 	}
 
+	// Stage 4: extra backup artifacts (hard-stop on any failure; rolls back contents and metadata).
 	// Since the logic for all of these files is the exact same except for the name and the contents,
 	// use a map literal to iterate through them and write them to the bucket.
 	var backupObjs = map[string]io.Reader{
@@ -281,10 +480,18 @@ func (s *objectBackupStore) PutBackup(info BackupInfo) error {
 	}
 
 	for key, reader := range backupObjs {
+		s.logger.WithFields(logrus.Fields{
+			"Backup": info.Name,
+			"Key":    key,
+		}).Info("Uploading extra backup artifact to object store")
 		if err := seekAndPutObject(s.objectStore, s.bucket, key, reader); err != nil {
+			s.logger.WithError(err).WithFields(logrus.Fields{
+				"Backup": info.Name,
+				"Key":    key,
+			}).Error("Failed to upload extra backup artifact; initiating cleanup of contents and metadata")
 			errs := []error{err}
 
-			// attempt to clean up the backup contents and metadata if we fail to upload and of the extra files.
+			// attempt to clean up the backup contents and metadata if we fail to upload any of the extra files.
 			deleteErr := s.objectStore.DeleteObject(s.bucket, s.layout.getBackupContentsKey(info.Name))
 			errs = append(errs, deleteErr)
 
