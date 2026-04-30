@@ -470,6 +470,15 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 		errs.AddVeleroError(errors.Wrap(err, "error parsing backup contents"))
 		return warnings, errs
 	}
+	// --- diagnostic: dump the restore spec fields that control filtering. TODO: Change to "Debug" level log later ---
+	ctx.log.Infof("RestoreSpec: IncludedNamespaces=%v, ExcludedNamespaces=%v, IncludedResources=%v, ExcludedResources=%v, IncludeClusterResources=%v, IncludeNamedResources=%v",
+		ctx.restore.Spec.IncludedNamespaces,
+		ctx.restore.Spec.ExcludedNamespaces,
+		ctx.restore.Spec.IncludedResources,
+		ctx.restore.Spec.ExcludedResources,
+		ctx.restore.Spec.IncludeClusterResources,
+		ctx.restore.Spec.IncludeNamedResources,
+	)
 
 	/*
 		After the backup archive is parsed, this code now checks if the Restore spec includes IncludeNamedResources.
@@ -482,9 +491,37 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 		// Log that IncludeNamedResources is specified along with its value.
 		ctx.log.Infof("Restore spec includes IncludeNamedResources: %v", ctx.restore.Spec.IncludeNamedResources)
 
-		// enable cluster scoped resource restoration as the dependent resources may be cluster scoped.
-		enableClusterScopedResourcesInRestore := true
-		ctx.restore.Spec.IncludeClusterResources = &enableClusterScopedResourcesInRestore
+		// Only override IncludeClusterResources if the user did not explicitly
+		// set it in the Restore CR. When the user has set it (true or false),
+		// honour their intent.
+		if ctx.restore.Spec.IncludeClusterResources == nil {
+			// Scan the named resources to determine whether any are
+			// cluster-scoped. A name without a "/" separator means no
+			// namespace was specified, which indicates a cluster-scoped
+			// resource.
+			hasClusterScoped := false
+			for _, namesStr := range ctx.restore.Spec.IncludeNamedResources {
+				for _, n := range strings.Split(namesStr, ",") {
+					if !strings.Contains(strings.TrimSpace(n), "/") {
+						hasClusterScoped = true
+						break
+					}
+				}
+				if hasClusterScoped {
+					break
+				}
+			}
+
+			if hasClusterScoped {
+				enableClusterScopedResourcesInRestore := true
+				ctx.restore.Spec.IncludeClusterResources = &enableClusterScopedResourcesInRestore
+				ctx.log.Infof("IncludeClusterResources set to true because named resources include cluster-scoped items")
+			} else {
+				ctx.log.Infof("IncludeClusterResources left unset because all named resources are namespace-scoped; cluster-scoped dependencies will be restored via RestoreItemActions")
+			}
+		} else {
+			ctx.log.Infof("IncludeClusterResources already set to %v by user, not overriding", *ctx.restore.Spec.IncludeClusterResources)
+		}
 
 		// Filter the backupResources using our helper that logs detailed info.
 		backupResources = filterBackupResourcesByNamedResources(ctx, backupResources, ctx.restore.Spec.IncludeNamedResources)
@@ -792,6 +829,18 @@ func (ctx *restoreContext) processSelectedResource(
 					targetNS = n
 				} else {
 					targetNS = namespace
+				}
+
+				// Skip namespace objects that are not included in the restore's
+				// namespace filter. Without this check, all namespace objects
+				// present in the backup archive pass through the cluster-scoped
+				// resource exemption at getOrderedResourceCollection and reach
+				// this point, causing EnsureNamespaceExistsAndIsReady (below) to
+				// create every namespace from the backup on the target cluster,
+				// regardless of the restore spec's includedNamespaces.
+				if !ctx.namespaceIncludesExcludes.ShouldInclude(namespace) {
+					ctx.log.Infof("Skipping restore of namespace %s because it is not included in the restore's namespace filter", namespace)
+					continue
 				}
 			}
 			// If we don't know whether this namespace exists yet, attempt to create
