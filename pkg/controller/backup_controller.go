@@ -797,7 +797,7 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 		serverMetrics.SetBackupTarballSizeBytesGauge(backupScheduleName, backupSizeBytes)
 	}
 
-	if backup.Status.CompletionTimestamp != nil {
+	if backup.Status.CompletionTimestamp != nil && backup.Status.StartTimestamp != nil {
 		backupDuration := backup.Status.CompletionTimestamp.Time.Sub(backup.Status.StartTimestamp.Time)
 		backupDurationSeconds := float64(backupDuration / time.Second)
 		serverMetrics.RegisterBackupDuration(backupScheduleName, backupDurationSeconds)
