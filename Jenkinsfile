@@ -77,9 +77,9 @@ node("cloudcasa-build") {
                 set -eu
                 awk '
                     BEGIN { in_velero = 0 }
-                    /^[[]velero[]]$/ { in_velero = 1; print; next }
-                    /^[[]/ { in_velero = 0 }
-                    in_velero && /^image[[:space:]]*=/ {
+                    $0 == "[velero]" { in_velero = 1; print; next }
+                    substr($0, 1, 1) == "[" { in_velero = 0 }
+                    in_velero && $0 ~ /^image[[:space:]]*=/ {
                         print "image = ${dockerPrefixInternal}/velero:${veleroBaseTagForCloudcasa}"
                         next
                     }
@@ -93,9 +93,9 @@ node("cloudcasa-build") {
                     set -eu
                     awk '
                         BEGIN { in_amds = 0 }
-                        /^[[]plugin:amds[]]$/ { in_amds = 1; print; next }
-                        /^[[]/ { in_amds = 0 }
-                        in_amds && /^image[[:space:]]*=/ {
+                        $0 == "[plugin:amds]" { in_amds = 1; print; next }
+                        substr($0, 1, 1) == "[" { in_amds = 0 }
+                        in_amds && $0 ~ /^image[[:space:]]*=/ {
                             print "image = catalogicsoftware/${pluginImageName}:${pluginVersion}"
                             next
                         }
