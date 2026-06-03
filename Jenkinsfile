@@ -79,7 +79,7 @@ node("cloudcasa-build") {
             def veleroBaseTagForCloudcasa = veleroTag
             sh """
                 set -eu
-                sed -Ei 's|^(image[[:space:]]*=[[:space:]]*).*$|\\1${dockerPrefixInternal}/velero:${veleroBaseTagForCloudcasa}|' plugins.ini
+                sed -Ei 's|^(image[[:space:]]*=[[:space:]]*).*|\\1${dockerPrefixInternal}/velero:${veleroBaseTagForCloudcasa}|' plugins.ini
             """
 
             if (pluginVersion) {
