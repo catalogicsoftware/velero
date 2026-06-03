@@ -48,9 +48,7 @@ node("cloudcasa-build") {
     def buildCloudcasaVelero = (params["${buildParamPrefix}CLOUDCASA_VELERO"] ?: false) && isMasterFlow
 
     stage("Build velero image") {
-        if (!buildVelero) {
-            echo "Skipping velero image build (non-master flow or parameter disabled)."
-        } else {
+        if (buildVelero) {
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
             docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
                 sh """
@@ -67,9 +65,7 @@ node("cloudcasa-build") {
     }
 
     stage("Build cloudcasa-velero image") {
-        if (!buildCloudcasaVelero) {
-            echo "Skipping cloudcasa-velero build (non-master flow or parameter disabled)."
-        } else {
+        if (buildCloudcasaVelero) {
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
 
             def pluginImageName = (params.VELEROPLUGIN_IMAGE_NAME ?: "amds-veleroplugin").trim()
@@ -87,8 +83,6 @@ node("cloudcasa-build") {
                     set -eu
                     sed -Ei 's|catalogicsoftware/amds-veleroplugin(-selfhosted)?:[^[:space:]]+|catalogicsoftware/${pluginImageName}:${pluginVersion}|g' plugins.ini
                 """
-            } else {
-                echo "VELEROPLUGIN_VERSION not provided; using existing plugin tag from plugins.ini"
             }
 
             docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
