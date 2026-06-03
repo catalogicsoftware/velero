@@ -75,13 +75,33 @@ node("cloudcasa-build") {
             def veleroBaseTagForCloudcasa = veleroTag
             sh """
                 set -eu
-                sed -Ei 's|^(image[[:space:]]*=[[:space:]]*).*|\\1${dockerPrefixInternal}/velero:${veleroBaseTagForCloudcasa}|' plugins.ini
+                awk '
+                    BEGIN { in_velero = 0 }
+                    /^\[velero\]$/ { in_velero = 1; print; next }
+                    /^\[/ { in_velero = 0 }
+                    in_velero && /^image[[:space:]]*=/ {
+                        print "image = ${dockerPrefixInternal}/velero:${veleroBaseTagForCloudcasa}"
+                        next
+                    }
+                    { print }
+                ' plugins.ini > plugins.ini.tmp
+                mv plugins.ini.tmp plugins.ini
             """
 
             if (pluginVersion) {
                 sh """
                     set -eu
-                    sed -Ei 's|catalogicsoftware/amds-veleroplugin(-selfhosted)?:[^[:space:]]+|catalogicsoftware/${pluginImageName}:${pluginVersion}|g' plugins.ini
+                    awk '
+                        BEGIN { in_amds = 0 }
+                        /^\[plugin:amds\]$/ { in_amds = 1; print; next }
+                        /^\[/ { in_amds = 0 }
+                        in_amds && /^image[[:space:]]*=/ {
+                            print "image = catalogicsoftware/${pluginImageName}:${pluginVersion}"
+                            next
+                        }
+                        { print }
+                    ' plugins.ini > plugins.ini.tmp
+                    mv plugins.ini.tmp plugins.ini
                 """
             }
 
