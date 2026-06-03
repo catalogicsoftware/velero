@@ -43,6 +43,9 @@ node("cloudcasa-build") {
     def dockerRegistryInternal = env.DOCKER_REGISTRY_INTERNAL
     def dockerRegistryCredsInternal = env.DOCKER_REGISTRY_CREDENTIALS_INTERNAL
     def dockerPrefixInternal = "${dockerRegistryInternal}/catalogicsoftware"
+    def dockerRegistryExternal = env.DOCKER_REGISTRY_EXTERNAL ?: ""
+    def dockerRegistryCredsExternal = env.DOCKER_REGISTRY_CREDENTIALS_EXTERNAL ?: "docker.io-docker-registry"
+    def dockerPrefixExternal = env.DOCKER_PREFIX_EXTERNAL ?: "catalogicsoftware"
 
     def buildVelero = (params["${buildParamPrefix}VELERO"] ?: false) && isMasterFlow
     def buildCloudcasaVelero = (params["${buildParamPrefix}CLOUDCASA_VELERO"] ?: false) && isMasterFlow
@@ -60,6 +63,22 @@ node("cloudcasa-build") {
                         BUILDX_OUTPUT_TYPE=registry \
                         IMAGE_TAGS='${dockerPrefixInternal}/velero:${veleroTag}'
                 """
+            }
+        }
+    }
+
+    stage("Push velero image to external registry") {
+        if (buildVelero) {
+            env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
+            docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
+                docker.withRegistry(dockerRegistryExternal ? "https://${dockerRegistryExternal}" : "", dockerRegistryCredsExternal) {
+                    sh """
+                        set -eu
+                        docker buildx imagetools create \
+                            --tag ${dockerPrefixExternal}/velero:${veleroTag} \
+                            ${dockerPrefixInternal}/velero:${veleroTag}
+                    """
+                }
             }
         }
     }
@@ -125,6 +144,22 @@ node("cloudcasa-build") {
             }
 
             archiveArtifacts artifacts: "plugins.ini", onlyIfSuccessful: true
+        }
+    }
+
+    stage("Push cloudcasa-velero image to external registry") {
+        if (buildCloudcasaVelero) {
+            env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
+            docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
+                docker.withRegistry(dockerRegistryExternal ? "https://${dockerRegistryExternal}" : "", dockerRegistryCredsExternal) {
+                    sh """
+                        set -eu
+                        docker buildx imagetools create \
+                            --tag ${dockerPrefixExternal}/cloudcasa-velero:${cloudcasaVeleroTag} \
+                            ${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}
+                    """
+                }
+            }
         }
     }
 }
