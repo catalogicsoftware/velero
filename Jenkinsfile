@@ -73,36 +73,44 @@ node("cloudcasa-build") {
 
             // Keep the config deterministic: use this build's velero image tag.
             def veleroBaseTagForCloudcasa = veleroTag
-            sh """
-                set -eu
-                awk '
-                    BEGIN { in_velero = 0 }
-                    $0 == "[velero]" { in_velero = 1; print; next }
-                    substr($0, 1, 1) == "[" { in_velero = 0 }
-                    in_velero && $0 ~ /^image[[:space:]]*=/ {
-                        print "image = ${dockerPrefixInternal}/velero:${veleroBaseTagForCloudcasa}"
-                        next
-                    }
-                    { print }
-                ' plugins.ini > plugins.ini.tmp
-                mv plugins.ini.tmp plugins.ini
-            """
-
-            if (pluginVersion) {
-                sh """
+            withEnv([
+                "VELERO_BASE_IMAGE=${dockerPrefixInternal}/velero:${veleroBaseTagForCloudcasa}"
+            ]) {
+                sh '''
                     set -eu
                     awk '
-                        BEGIN { in_amds = 0 }
-                        $0 == "[plugin:amds]" { in_amds = 1; print; next }
-                        substr($0, 1, 1) == "[" { in_amds = 0 }
-                        in_amds && $0 ~ /^image[[:space:]]*=/ {
-                            print "image = catalogicsoftware/${pluginImageName}:${pluginVersion}"
+                        BEGIN { in_velero = 0 }
+                        $0 == "[velero]" { in_velero = 1; print; next }
+                        substr($0, 1, 1) == "[" { in_velero = 0 }
+                        in_velero && $0 ~ /^image[[:space:]]*=/ {
+                            print "image = " ENVIRON["VELERO_BASE_IMAGE"]
                             next
                         }
                         { print }
                     ' plugins.ini > plugins.ini.tmp
                     mv plugins.ini.tmp plugins.ini
-                """
+                '''
+            }
+
+            if (pluginVersion) {
+                withEnv([
+                    "AMDS_PLUGIN_IMAGE=catalogicsoftware/${pluginImageName}:${pluginVersion}"
+                ]) {
+                    sh '''
+                        set -eu
+                        awk '
+                            BEGIN { in_amds = 0 }
+                            $0 == "[plugin:amds]" { in_amds = 1; print; next }
+                            substr($0, 1, 1) == "[" { in_amds = 0 }
+                            in_amds && $0 ~ /^image[[:space:]]*=/ {
+                                print "image = " ENVIRON["AMDS_PLUGIN_IMAGE"]
+                                next
+                            }
+                            { print }
+                        ' plugins.ini > plugins.ini.tmp
+                        mv plugins.ini.tmp plugins.ini
+                    '''
+                }
             }
 
             docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
