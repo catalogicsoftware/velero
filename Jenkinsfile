@@ -20,6 +20,31 @@ properties([
             name: "VELEROPLUGIN_VERSION",
             defaultValue: "",
             description: "Optional explicit plugin version. If empty, use committed plugins.ini plugin version"
+        ),
+        string(
+            name: "AWS_PLUGIN_IMAGE_OVERRIDE",
+            defaultValue: "",
+            description: "Optional full image override for [plugin:aws] in plugins.ini (for example, registry/repo:tag)"
+        ),
+        string(
+            name: "GCP_PLUGIN_IMAGE_OVERRIDE",
+            defaultValue: "",
+            description: "Optional full image override for [plugin:gcp] in plugins.ini (for example, registry/repo:tag)"
+        ),
+        string(
+            name: "AZURE_PLUGIN_IMAGE_OVERRIDE",
+            defaultValue: "",
+            description: "Optional full image override for [plugin:azure] in plugins.ini (for example, registry/repo:tag)"
+        ),
+        string(
+            name: "KUBEVIRT_PLUGIN_IMAGE_OVERRIDE",
+            defaultValue: "",
+            description: "Optional full image override for [plugin:kubevirt] in plugins.ini (for example, registry/repo:tag)"
+        ),
+        string(
+            name: "AMDS_PLUGIN_IMAGE_OVERRIDE",
+            defaultValue: "",
+            description: "Optional full image override for [plugin:amds] in plugins.ini (for example, registry/repo:tag)"
         )
     ])
 ])
@@ -89,6 +114,38 @@ node("cloudcasa-build") {
 
             def pluginImageName = (params.VELEROPLUGIN_IMAGE_NAME ?: "amds-veleroplugin").trim()
             def pluginVersion = (params.VELEROPLUGIN_VERSION ?: "").trim()
+            def pluginImageOverrides = [
+                aws     : (params.AWS_PLUGIN_IMAGE_OVERRIDE ?: "").trim(),
+                gcp     : (params.GCP_PLUGIN_IMAGE_OVERRIDE ?: "").trim(),
+                azure   : (params.AZURE_PLUGIN_IMAGE_OVERRIDE ?: "").trim(),
+                kubevirt: (params.KUBEVIRT_PLUGIN_IMAGE_OVERRIDE ?: "").trim(),
+                amds    : (params.AMDS_PLUGIN_IMAGE_OVERRIDE ?: "").trim()
+            ]
+
+            def setPluginImageInConfig = { String pluginSection, String pluginImage ->
+                withEnv([
+                    "PLUGIN_SECTION=${pluginSection}",
+                    "PLUGIN_IMAGE=${pluginImage}"
+                ]) {
+                    sh '''
+                        set -eu
+                        awk '
+                            BEGIN {
+                                in_plugin = 0
+                                plugin_header = "[plugin:" ENVIRON["PLUGIN_SECTION"] "]"
+                            }
+                            $0 == plugin_header { in_plugin = 1; print; next }
+                            substr($0, 1, 1) == "[" { in_plugin = 0 }
+                            in_plugin && $0 ~ /^image[[:space:]]*=/ {
+                                print "image = " ENVIRON["PLUGIN_IMAGE"]
+                                next
+                            }
+                            { print }
+                        ' plugins.ini > plugins.ini.tmp
+                        mv plugins.ini.tmp plugins.ini
+                    '''
+                }
+            }
 
             // Keep the config deterministic: use this build's velero image tag.
             def veleroBaseTagForCloudcasa = veleroTag
@@ -111,7 +168,7 @@ node("cloudcasa-build") {
                 '''
             }
 
-            if (pluginVersion) {
+            if (pluginVersion && !pluginImageOverrides.amds) {
                 withEnv([
                     "AMDS_PLUGIN_IMAGE=catalogicsoftware/${pluginImageName}:${pluginVersion}"
                 ]) {
@@ -129,6 +186,12 @@ node("cloudcasa-build") {
                         ' plugins.ini > plugins.ini.tmp
                         mv plugins.ini.tmp plugins.ini
                     '''
+                }
+            }
+
+            pluginImageOverrides.each { pluginSection, pluginImage ->
+                if (pluginImage) {
+                    setPluginImageInConfig(pluginSection as String, pluginImage as String)
                 }
             }
 
