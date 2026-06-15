@@ -238,6 +238,29 @@ node("cloudcasa-build") {
         }
     }
 
+    stage("Push cloudcasa-velero to ACR") {
+        if (buildCloudcasaVelero) {
+            env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
+            def acrRegistry = env.CLOUDCASA_ACR_REGISTRY ?: "cloudcasaAgent.azurecr.io"
+            def acrCredentialsId = env.CLOUDCASA_ACR_CREDENTIALS_ID ?: "cloudcasaAgent-azurecr"
+            withCredentials([usernamePassword(
+                credentialsId: acrCredentialsId,
+                usernameVariable: 'ACR_USER',
+                passwordVariable: 'ACR_PASS'
+            )]) {
+                docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
+                    sh """
+                        set -eu
+                        docker login -u \$ACR_USER -p \$ACR_PASS ${acrRegistry}
+                        docker buildx imagetools create \
+                            --tag ${acrRegistry}/catalogicsoftware/cloudcasa-velero:${cloudcasaVeleroTag} \
+                            ${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}
+                    """
+                }
+            }
+        }
+    }
+
     stage("Prepare deployment repo (integration)") {
         if (buildCloudcasaVelero && runPrepareRepo) {
             withCredentials([
