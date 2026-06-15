@@ -11,6 +11,16 @@ properties([
             defaultValue: true,
             description: "Build and push assembled cloudcasa-velero image"
         ),
+        booleanParam(
+            name: "PREPARE_REPO_FORCE_MASTER_SCOPE",
+            defaultValue: false,
+            description: "Run integration prepare-repo stage even when BRANCH_NAME is not a master-equivalent branch"
+        ),
+        booleanParam(
+            name: "PREPARE_REPO_DRY_RUN",
+            defaultValue: false,
+            description: "Do not commit/push deployment repo changes; show and archive diff only"
+        ),
         string(
             name: "VELEROPLUGIN_IMAGE_NAME",
             defaultValue: "amds-veleroplugin",
@@ -74,6 +84,8 @@ node("cloudcasa-build") {
 
     def buildVelero = (params["${buildParamPrefix}VELERO"] ?: false) && isMasterFlow
     def buildCloudcasaVelero = (params["${buildParamPrefix}CLOUDCASA_VELERO"] ?: false) && isMasterFlow
+    def runPrepareRepo = isMasterFlow || (params.PREPARE_REPO_FORCE_MASTER_SCOPE ? params.PREPARE_REPO_FORCE_MASTER_SCOPE.toBoolean() : false)
+    def prepareRepoDryRun = params.PREPARE_REPO_DRY_RUN ? params.PREPARE_REPO_DRY_RUN.toBoolean() : false
 
     stage("Build velero image") {
         if (buildVelero) {
@@ -221,6 +233,72 @@ node("cloudcasa-build") {
                             --tag ${dockerPrefixExternal}/cloudcasa-velero:${cloudcasaVeleroTag} \
                             ${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}
                     """
+                }
+            }
+        }
+    }
+
+    stage("Prepare deployment repo (integration)") {
+        if (buildCloudcasaVelero && runPrepareRepo) {
+            withCredentials([
+                usernamePassword(
+                    credentialsId: 'github-access-token',
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_PASS'
+                )
+            ]) {
+                def deploymentRepoUrl = env.CLOUDCASA_DEPLOYMENT_REPO_URL
+                def deploymentRepoHost = deploymentRepoUrl.replaceFirst('https://', '')
+                dir('cloudcasa-deployment') {
+                    git url: deploymentRepoUrl,
+                        branch: 'master',
+                        credentialsId: 'github-access-token'
+
+                    sh """
+                        git config user.name 'cloudcasabot'
+                        git config user.email 'cloudcasabot@catalogicsoftware.com'
+                    """
+
+                    // Patch cloudcasa-velero image tag in all deployment files.
+                    // Mirrors Concourse k8s-prepare-repo.sh: updates base/, local/, and integration/ files.
+                    // Preserves the existing registry prefix (ACR or otherwise) by matching only on
+                    // the catalogicsoftware/cloudcasa-velero: portion and replacing just the tag.
+                    sh """
+                        set -eu
+                        TAG=${cloudcasaVeleroTag}
+
+                        patch_cloudcasa_velero_tag() {
+                            local file="\$1"
+                            [ -f "\$file" ] || return 0
+                            sed -Ei 's#(catalogicsoftware/cloudcasa-velero:)[^\"'"'"'[:space:]]+#\\1'"\${TAG}"'#g' "\$file"
+                        }
+
+                        patch_cloudcasa_velero_tag archimedes/base/kas/deployment.yaml
+                        patch_cloudcasa_velero_tag archimedes/local/global-cm.yaml
+                        patch_cloudcasa_velero_tag archimedes/integration/kas/deployment_kas_image_spec.yaml
+                        patch_cloudcasa_velero_tag archimedes/integration/global-cm.yaml
+                    """
+
+                    sh """
+                        set -eu
+                        if [ -n "\$(git status --porcelain)" ]; then
+                            if [ "${prepareRepoDryRun}" = "true" ]; then
+                                echo "DRY RUN: deployment repo changes detected; skipping commit/push"
+                                git status --short
+                                git diff --patch > deployment-repo-dry-run.patch
+                            else
+                                git add -A
+                                git commit -m "ci: update cloudcasa-velero to ${cloudcasaVeleroTag} from ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+                                git push https://${GIT_USER}:${GIT_PASS}@${deploymentRepoHost} master
+                            fi
+                        else
+                            echo "No deployment repo changes for cloudcasa-velero"
+                        fi
+                    """
+
+                    if (prepareRepoDryRun) {
+                        archiveArtifacts artifacts: 'deployment-repo-dry-run.patch', allowEmptyArchive: true, onlyIfSuccessful: true
+                    }
                 }
             }
         }
