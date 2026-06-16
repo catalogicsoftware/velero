@@ -1011,7 +1011,7 @@ func WaitUntilVSCHandleIsReady(
 	// so that Status (including BoundVolumeSnapshotContentName) is available to
 	// downstream callers such as DeleteVolumeSnapshot.
 	if latestVS != nil {
-		*volSnap = *latestVS
+		volSnap.Status = latestVS.Status
 	}
 	// -------------------------------------------------------------------------
 	// Interlude — Apply cc-pvc-name / cc-pvc-namespace annotations to the VSC.
