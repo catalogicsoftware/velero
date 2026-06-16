@@ -284,24 +284,25 @@ node("cloudcasa-build") {
                         git config user.email 'cloudcasabot@catalogicsoftware.com'
                     """
 
-                    // Patch cloudcasa-velero image tag in all deployment files.
-                    // Mirrors Concourse k8s-prepare-repo.sh: updates base/, local/, and integration/ files.
-                    // Preserves the existing registry prefix (ACR or otherwise) by matching only on
-                    // the catalogicsoftware/cloudcasa-velero: portion and replacing just the tag.
+                    // Patch cloudcasa-velero image tag in the specific files that Concourse
+                    // k8s-prepare-repo.sh targets. Match the full ACR-prefixed reference so
+                    // other registries (e.g. OpenShift) are not accidentally patched.
                     sh """
                         set -eu
                         TAG=${cloudcasaVeleroTag}
+                        ACR_IMAGE="cloudcasaAgent.azurecr.io/catalogicsoftware/cloudcasa-velero"
 
-                        patch_cloudcasa_velero_tag() {
+                        patch_acr_tag() {
                             local file="\$1"
+                            local pattern="\$2"
                             [ -f "\$file" ] || return 0
-                            sed -Ei 's#(catalogicsoftware/cloudcasa-velero:)[^\"'"'"'[:space:]]+#\\1'"\${TAG}"'#g' "\$file"
+                            sed -i "s|\${pattern}:.*|\${pattern}:\${TAG}|g" "\$file"
                         }
 
-                        patch_cloudcasa_velero_tag archimedes/base/kas/deployment.yaml
-                        patch_cloudcasa_velero_tag archimedes/local/global-cm.yaml
-                        patch_cloudcasa_velero_tag archimedes/integration/kas/deployment_kas_image_spec.yaml
-                        patch_cloudcasa_velero_tag archimedes/integration/global-cm.yaml
+                        patch_acr_tag archimedes/base/kas/deployment.yaml                    "\${ACR_IMAGE}"
+                        patch_acr_tag archimedes/local/global-cm.yaml                        "velero.imageRef=\${ACR_IMAGE}"
+                        patch_acr_tag archimedes/integration/kas/deployment_kas_image_spec.yaml "\${ACR_IMAGE}"
+                        patch_acr_tag archimedes/integration/global-cm.yaml                  "velero.imageRef=\${ACR_IMAGE}"
                     """
 
                     sh """
