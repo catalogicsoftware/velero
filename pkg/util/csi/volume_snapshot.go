@@ -717,15 +717,39 @@ func DeleteVolumeSnapshot(
 	client crclient.Client,
 	logger logrus.FieldLogger,
 ) {
-	modifyVSCFlag := false
-	if vs.Status != nil &&
+	vsReady := vs.Status != nil &&
 		vs.Status.BoundVolumeSnapshotContentName != nil &&
-		len(*vs.Status.BoundVolumeSnapshotContentName) > 0 &&
-		vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentDelete {
-		modifyVSCFlag = true
+		len(*vs.Status.BoundVolumeSnapshotContentName) > 0
+
+	// Guard: if VS is not ready and DeletionPolicy is Delete, we must not
+	// proceed — deleting the VS would cascade-delete the storage snapshot.
+	if !vsReady {
+		if vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentDelete {
+			vscInfo := ""
+			if vsc.Name != "" {
+				vscInfo = fmt.Sprintf(" and VolumeSnapshotContent %s (with DeletionPolicy=%s)", vsc.Name, vsc.Spec.DeletionPolicy)
+			}
+			logger.Warnf("VolumeSnapshot %s/%s is not ready; skipping deletion to prevent cascade-deleting the storage snapshot. "+
+				"The VolumeSnapshot%s will remain in the cluster "+
+				"until the retention period expires or the recovery point is explicitly deleted. "+
+				"Manual deletion of either resource before that will destroy the storage snapshot. "+
+				"To safely clean up manually, first patch the VolumeSnapshotContent DeletionPolicy to Retain, then delete the VolumeSnapshot.",
+				vs.Namespace, vs.Name, vscInfo)
+			return
+		}
+		logger.Infof("VolumeSnapshot %s/%s is not ready, but DeletionPolicy is %s. Proceeding with deletion.",
+			vs.Namespace, vs.Name, vsc.Spec.DeletionPolicy)
+	}
+
+	// Patch DeletionPolicy to Retain before deleting, so the storage snapshot survives.
+	modifyVSCFlag := vsReady && vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentDelete
+
+	if modifyVSCFlag {
+		logger.Infof("VolumeSnapshotContent %s requires DeletionPolicy patch from Delete to Retain before deleting VolumeSnapshot %s/%s",
+			vsc.Name, vs.Namespace, vs.Name)
 	} else {
-		logger.Errorf("VolumeSnapshot %s/%s is not ready. This is not expected.",
-			vs.Namespace, vs.Name)
+		logger.Infof("No DeletionPolicy patch needed for VolumeSnapshot %s/%s (VSCReady=%v, VSC=%q, DeletionPolicy=%s)",
+			vs.Namespace, vs.Name, vsReady, vsc.Name, vsc.Spec.DeletionPolicy)
 	}
 
 	// Change VolumeSnapshotContent's DeletionPolicy to Retain before deleting VolumeSnapshot,
@@ -983,7 +1007,12 @@ func WaitUntilVSCHandleIsReady(
 			"timed out or failed watching VolumeSnapshot %s/%s for VSC binding",
 			volSnap.Namespace, volSnap.Name)
 	}
-
+	// Update the caller's VolumeSnapshot with the live version from the cluster
+	// so that Status (including BoundVolumeSnapshotContentName) is available to
+	// downstream callers such as DeleteVolumeSnapshot.
+	if latestVS != nil {
+		*volSnap = *latestVS
+	}
 	// -------------------------------------------------------------------------
 	// Interlude — Apply cc-pvc-name / cc-pvc-namespace annotations to the VSC.
 	//
