@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 )
 
 // LocalArtifactWriter implements ArtifactWriter for local filesystem storage
@@ -55,9 +55,9 @@ func (w *LocalArtifactWriter) ensureRestoreDir(restoreName string) error {
 	restoreDir := w.GetRestoreArtifactDir(restoreName)
 
 	// Temporarily set the umask to 0 to allow creating the directory with 0777
-	oldMask := syscall.Umask(0)
+	oldMask := unix.Umask(0)
 	// Use defer to guarantee we restore the original umask
-	defer syscall.Umask(oldMask)
+	defer unix.Umask(oldMask)
 
 	if err := os.MkdirAll(restoreDir, 0777); err != nil {
 		w.logger.WithError(err).WithFields(logrus.Fields{

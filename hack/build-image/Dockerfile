@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=$TARGETPLATFORM golang:1.22.7-bookworm
+FROM --platform=$TARGETPLATFORM golang:1.26.0-bookworm
 
 ARG GOPROXY
 
@@ -30,7 +30,7 @@ RUN wget --quiet https://github.com/kubernetes-sigs/kubebuilder/releases/downloa
     chmod +x /usr/local/kubebuilder/bin/kubebuilder
 
 # get controller-tools
-RUN go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0
+RUN go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5
 
 # get goimports (the revision is pinned so we don't indiscriminately update, but the particular commit
 # is not important)
