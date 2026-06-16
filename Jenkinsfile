@@ -66,9 +66,11 @@ node("cloudcasa-build") {
     }
 
     def sourceBranch = env.BRANCH_NAME ?: "unknown"
-    def branchTag = sourceBranch.replaceAll('[^0-9A-Za-z-]', '-')
     def masterEquivalentBranches = ["master", "v1.14.0.x", "jg-KUBEDR-7845"]
     def isMasterFlow = masterEquivalentBranches.contains(sourceBranch)
+    // Use "master" as the tag segment for all master-equivalent branches so the
+    // tag stays clean (e.g. 1.14.0-master.12) regardless of the actual branch name.
+    def branchTag = isMasterFlow ? "master" : sourceBranch.replaceAll('[^0-9A-Za-z-]', '-')
 
     // Keep tags cloudcasa-like while preserving velero version context.
     def baseVersion = "1.14.0"
