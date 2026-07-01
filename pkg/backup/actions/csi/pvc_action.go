@@ -197,7 +197,10 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 			storageClass.Name,
 		)
 	}
-	p.log.Infof("VolumeSnapshotClass=%s", vsClass.Name)
+	p.log.Infof(
+		"Using VolumeSnapshotClass %s for PVC %s/%s (StorageClass %s, driver %s)",
+		vsClass.Name, pvc.Namespace, pvc.Name, storageClass.Name, storageClass.Provisioner,
+	)
 
 	vsLabels := map[string]string{}
 	for k, v := range pvc.ObjectMeta.Labels {

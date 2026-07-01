@@ -128,6 +128,14 @@ const (
 	VolumeSnapshotClassDriverPVCAnnotation                = "cloudcasa.io/csi-volumesnapshot-class"
 	VolumeSnapshotClassStorageClassBackupAnnotationPrefix = "cloudcasa.io/csi-sc-vsc-mapping-"
 
+	// SnapshotClassRequiredDriversAnnotation holds a comma-separated list of CSI
+	// driver names that require a manually-configured VolumeSnapshotClass. For a
+	// PVC whose driver is in this list, the plugin must NOT auto-create a
+	// VolumeSnapshotClass; if no user-configured VSC is available it fails that
+	// PVC's snapshot immediately with an actionable message. Set by the kubeagent
+	// on the Backup CR as runtime config.
+	SnapshotClassRequiredDriversAnnotation = "cloudcasa.io/snapshot-class-required-drivers"
+
 	// There is no release w/ these constants exported. Using the strings for now.
 	// CSI Annotation volumesnapshotclass
 	// https://github.com/kubernetes-csi/external-snapshotter/blob/master/pkg/utils/util.go#L59-L60
