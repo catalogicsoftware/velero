@@ -345,17 +345,88 @@ func GetVolumeSnapshotClass(
 		return snapshotClass, nil
 	}
 
-	// 4. Fallback to default behavior of fetching snapshot class based on label
+	// Drivers listed in the Backup's SnapshotClassRequiredDriversAnnotation must
+	// have a VolumeSnapshotClass configured explicitly (tiers 1-3 above, or a VSC
+	// the user labeled as the default in tier 4). For these drivers we do NOT
+	// allow the implicit selections that follow -- picking a lone unlabeled VSC
+	// (tier 4) or auto-creating one (tier 5) -- because the result would lack the
+	// driver-specific parameters the snapshot needs and would only time out.
+	isRequiredDriver := snapshotClassDriverRequired(backup, provisioner)
+
+	// 4. Fallback to default behavior of fetching snapshot class based on label.
+	// For required drivers the single-match fallback is disabled, so only a
+	// user-labeled VSC qualifies here.
 	snapshotClass, err = GetVolumeSnapshotClassForStorageClass(
-		provisioner, snapshotClasses)
+		provisioner, snapshotClasses, !isRequiredDriver)
 	if err == nil && snapshotClass != nil {
 		return snapshotClass, nil
 	}
 
+	// For a required driver, none of the explicit methods matched, so fail this
+	// PVC's snapshot immediately with an actionable message instead of falling
+	// through to the implicit auto-create.
+	if isRequiredDriver {
+		return nil, snapshotClassRequiredError(provisioner, pvc)
+	}
+
 	log.Debugf("No VolumeSnapshotClass found via standard methods: %v", err)
 
-	// 5. Absolute last resort fallback
+	// 5. Absolute last resort fallback.
 	return GetFallbackVolumeSnapshotClass(provisioner, log, crClient)
+}
+
+// snapshotClassRequiredError builds the actionable error returned when a CSI
+// driver requires a manually-configured VolumeSnapshotClass but none was found
+// through the explicit selection methods.
+func snapshotClassRequiredError(
+	provisioner string,
+	pvc *corev1api.PersistentVolumeClaim,
+) error {
+	pvcRef := "<unknown>"
+	storageClassName := "<unknown>"
+	if pvc != nil {
+		pvcRef = fmt.Sprintf("%s/%s", pvc.Namespace, pvc.Name)
+		if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != "" {
+			storageClassName = *pvc.Spec.StorageClassName
+		}
+	}
+	return errors.Errorf(
+		"no VolumeSnapshotClass configured for CSI driver %q (PVC %s, StorageClass %q). "+
+			"This driver requires custom parameters in its VolumeSnapshotClass, so CloudCasa "+
+			"will not create one automatically. Configure a VolumeSnapshotClass "+
+			"as described in the documentation, then retry the backup.",
+		provisioner, pvcRef, storageClassName,
+	)
+}
+
+// GetSnapshotClassRequiredDrivers parses the comma-separated list of CSI driver
+// names from the Backup's SnapshotClassRequiredDriversAnnotation. These drivers
+// require a manually-configured VolumeSnapshotClass, so the plugin must not
+// auto-create one for them. Returns an empty set when the annotation is absent
+// or empty, in which case the feature is a no-op.
+//
+// Names are lower-cased so membership checks are case-insensitive against a
+// StorageClass provisioner / VolumeSnapshotClass driver; callers must lower-case
+// the value they test with Has (see snapshotClassDriverRequired).
+func GetSnapshotClassRequiredDrivers(backup *velerov1api.Backup) sets.String {
+	drivers := sets.NewString()
+	if backup == nil {
+		return drivers
+	}
+	raw := backup.Annotations[velerov1api.SnapshotClassRequiredDriversAnnotation]
+	for _, d := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(d); trimmed != "" {
+			drivers.Insert(strings.ToLower(trimmed))
+		}
+	}
+	return drivers
+}
+
+// snapshotClassDriverRequired reports whether the given CSI driver/provisioner
+// is in the Backup's required-drivers list, matching case-insensitively to stay
+// consistent with the driver comparisons used by the other selection tiers.
+func snapshotClassDriverRequired(backup *velerov1api.Backup, provisioner string) bool {
+	return GetSnapshotClassRequiredDrivers(backup).Has(strings.ToLower(provisioner))
 }
 
 // Checks for StorageClass -> VolumeSnapshotClass mapping
@@ -483,9 +554,16 @@ func GetVolumeSnapshotClassFromBackupAnnotationsForDriver(
 
 // GetVolumeSnapshotClassForStorageClass returns a VolumeSnapshotClass
 // for the supplied volume provisioner/ driver name.
+//
+// A VSC carrying the selector label is always preferred. When
+// allowSingleMatchFallback is true and no labeled VSC exists, a lone VSC for the
+// driver is returned as an implicit default. Callers pass false to disable that
+// implicit fallback (e.g. drivers that require an explicitly-configured VSC), in
+// which case only a labeled VSC qualifies.
 func GetVolumeSnapshotClassForStorageClass(
 	provisioner string,
 	snapshotClasses *snapshotv1api.VolumeSnapshotClassList,
+	allowSingleMatchFallback bool,
 ) (*snapshotv1api.VolumeSnapshotClass, error) {
 	n := 0
 	var vsClass snapshotv1api.VolumeSnapshotClass
@@ -503,18 +581,24 @@ func GetVolumeSnapshotClassForStorageClass(
 			}
 		}
 	}
-	// If there's only one volumesnapshotclass for the driver, return it.
-	if n == 1 {
+	// If there's only one volumesnapshotclass for the driver, return it,
+	// unless the caller disabled this implicit fallback.
+	if allowSingleMatchFallback && n == 1 {
 		return &vsClass, nil
 	}
 	return nil, fmt.Errorf(
-		`failed to get VolumeSnapshotClass for provisioner %s, 
-		ensure that the desired VolumeSnapshot class has the %s label`,
-		provisioner, velerov1api.VolumeSnapshotClassSelectorLabel)
+		"failed to get VolumeSnapshotClass for provisioner %s, "+
+			"ensure that the desired VolumeSnapshot class is configured in Cloudcasa.",
+		provisioner)
 }
 
 // GetFallbackVolumeSnapshotClass attempts to find a usable class or creates a new one
 // if strict matching failed.
+//
+// Drivers that require a manually-configured VolumeSnapshotClass never reach this
+// function: GetVolumeSnapshotClass fails them fast at the explicit-methods
+// boundary (see snapshotClassRequiredError), so this fallback only runs for
+// drivers where auto-selection/creation is acceptable.
 func GetFallbackVolumeSnapshotClass(
 	provisioner string,
 	log logrus.FieldLogger,

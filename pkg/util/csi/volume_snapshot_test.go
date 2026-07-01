@@ -875,7 +875,16 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 		Driver: "bar.csi.k8s.io",
 	}
 
-	objs := []runtime.Object{hostpathClass, fooClass, barClass, fooClassWithoutLabel, barClass2}
+	// A single, unlabeled VSC for a driver. Selected implicitly via the
+	// single-match fallback only when that fallback is allowed.
+	hpeClassUnlabeled := &snapshotv1api.VolumeSnapshotClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "hpe-snapclass",
+		},
+		Driver: "csi.hpe.com",
+	}
+
+	objs := []runtime.Object{hostpathClass, fooClass, barClass, fooClassWithoutLabel, barClass2, hpeClassUnlabeled}
 	fakeClient := velerotest.NewFakeControllerRuntimeClient(t, objs...)
 
 	testCases := []struct {
@@ -950,6 +959,44 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 			expectedVSC: fooClass,
 			expectError: false,
 		},
+		{
+			name:       "required driver with no VSC at all fails fast instead of auto-creating",
+			driverName: "nutanix.csi.k8s.io",
+			pvc:        pvcNone,
+			backup: &velerov1api.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "requires-manual-vsc",
+					Annotations: map[string]string{
+						velerov1api.SnapshotClassRequiredDriversAnnotation: "csi.hpe.com, nutanix.csi.k8s.io",
+					},
+				},
+			},
+			expectedVSC: nil,
+			expectError: true,
+		},
+		{
+			name:       "required driver with a single UNLABELED VSC fails fast (implicit match disabled)",
+			driverName: "csi.hpe.com",
+			pvc:        pvcNone,
+			backup: &velerov1api.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "requires-manual-vsc",
+					Annotations: map[string]string{
+						velerov1api.SnapshotClassRequiredDriversAnnotation: "csi.hpe.com",
+					},
+				},
+			},
+			expectedVSC: nil,
+			expectError: true,
+		},
+		{
+			name:        "non-required driver with a single UNLABELED VSC is auto-selected via single-match",
+			driverName:  "csi.hpe.com",
+			pvc:         pvcNone,
+			backup:      backupNone,
+			expectedVSC: hpeClassUnlabeled,
+			expectError: false,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -963,6 +1010,85 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 			assert.Equal(t, tc.expectedVSC, actualSnapshotClass)
 		})
 	}
+}
+
+func TestGetSnapshotClassRequiredDrivers(t *testing.T) {
+	testCases := []struct {
+		name     string
+		backup   *velerov1api.Backup
+		expected []string
+	}{
+		{
+			name:     "nil backup returns empty set",
+			backup:   nil,
+			expected: []string{},
+		},
+		{
+			name:     "annotation absent returns empty set",
+			backup:   &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Name: "b"}},
+			expected: []string{},
+		},
+		{
+			name: "empty annotation returns empty set",
+			backup: &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				velerov1api.SnapshotClassRequiredDriversAnnotation: "",
+			}}},
+			expected: []string{},
+		},
+		{
+			name: "comma-separated values are split and trimmed",
+			backup: &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				velerov1api.SnapshotClassRequiredDriversAnnotation: " csi.hpe.com , nutanix.csi.hpe.com,cephfs.csi.ceph.com , ",
+			}}},
+			expected: []string{"cephfs.csi.ceph.com", "csi.hpe.com", "nutanix.csi.hpe.com"},
+		},
+		{
+			name: "values are lower-cased for case-insensitive matching",
+			backup: &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				velerov1api.SnapshotClassRequiredDriversAnnotation: "CSI.HPE.COM,Nutanix.CSI.HPE.com",
+			}}},
+			expected: []string{"csi.hpe.com", "nutanix.csi.hpe.com"},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := GetSnapshotClassRequiredDrivers(tc.backup)
+			assert.Equal(t, tc.expected, got.List())
+		})
+	}
+}
+
+func TestSnapshotClassDriverRequired(t *testing.T) {
+	backup := &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		velerov1api.SnapshotClassRequiredDriversAnnotation: "csi.hpe.com,cephfs.csi.ceph.com",
+	}}}
+
+	assert.True(t, snapshotClassDriverRequired(backup, "csi.hpe.com"))
+	// provisioner casing differs from the annotation but should still match.
+	assert.True(t, snapshotClassDriverRequired(backup, "CSI.HPE.COM"))
+	assert.False(t, snapshotClassDriverRequired(backup, "hostpath.csi.k8s.io"))
+	assert.False(t, snapshotClassDriverRequired(nil, "csi.hpe.com"))
+}
+
+func TestSnapshotClassRequiredError(t *testing.T) {
+	scName := "hpe-standard"
+	pvc := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "data"},
+		Spec:       v1.PersistentVolumeClaimSpec{StorageClassName: &scName},
+	}
+
+	err := snapshotClassRequiredError("csi.hpe.com", pvc)
+	require.Error(t, err)
+	msg := err.Error()
+	// The message must name the driver, PVC, and StorageClass to stay actionable.
+	assert.Contains(t, msg, `"csi.hpe.com"`)
+	assert.Contains(t, msg, "ns1/data")
+	assert.Contains(t, msg, `"hpe-standard"`)
+
+	// Defensive path: nil PVC renders explicit placeholders, not empty fields.
+	errNil := snapshotClassRequiredError("csi.hpe.com", nil)
+	require.Error(t, errNil)
+	assert.Contains(t, errNil.Error(), "<unknown>")
 }
 
 func TestGetVolumeSnapshotClassForStorageClass(t *testing.T) {
@@ -1068,7 +1194,7 @@ func TestGetVolumeSnapshotClassForStorageClass(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actualVSC, actualError := GetVolumeSnapshotClassForStorageClass(tc.driverName, snapshotClasses)
+			actualVSC, actualError := GetVolumeSnapshotClassForStorageClass(tc.driverName, snapshotClasses, true)
 
 			if tc.expectError {
 				assert.NotNil(t, actualError)
