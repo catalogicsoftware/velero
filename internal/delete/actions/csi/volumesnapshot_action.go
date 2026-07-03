@@ -70,7 +70,7 @@ func (p *volumeSnapshotDeleteItemAction) Execute(
 	// that were not created in the process of creating the Velero
 	// backup being deleted.
 	if !kubeutil.HasBackupLabel(&vs.ObjectMeta, input.Backup.Name) {
-		p.log.Info(
+		p.log.Infof(
 			"VolumeSnapshot %s/%s was not taken by backup %s, skipping deletion",
 			vs.Namespace, vs.Name, input.Backup.Name,
 		)
