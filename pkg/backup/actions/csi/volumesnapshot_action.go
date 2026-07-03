@@ -87,6 +87,40 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 		return nil, nil, "", nil, errors.WithStack(err)
 	}
 
+	// Handle the Finalizing / FinalizingPartiallyFailed phase up front and return,
+	// BEFORE calling WaitUntilVSCHandleIsReady. In these phases the CSI snapshot was
+	// already captured successfully during the InProgress phase; the backup finalizer
+	// only replays this action to clean up the now-ephemeral VolumeSnapshot. The wait
+	// can fail for transient reasons at finalize time (e.g. the optional plugin
+	// ConfigMap has been removed), and its error path runs the destructive
+	// CleanupVolumeSnapshot, which flips the VSC DeletionPolicy to Delete and
+	// cascade-deletes the underlying storage snapshot — the very snapshot a concurrent
+	// restore (e.g. the COPY workflow's temporary PVC) may still be provisioning from.
+	// DeleteVolumeSnapshot removes the VolumeSnapshot while preserving the snapshot
+	// (it keeps, or forces, the VSC DeletionPolicy to Retain).
+	if backup.Status.Phase == velerov1api.BackupPhaseFinalizing ||
+		backup.Status.Phase == velerov1api.BackupPhaseFinalizingPartiallyFailed {
+		p.log.
+			WithField("Backup", fmt.Sprintf("%s/%s", backup.Namespace, backup.Name)).
+			WithField("BackupPhase", backup.Status.Phase).
+			Debugf("Cleaning up VolumeSnapshot during finalize")
+
+		vsc, err := csi.GetVolumeSnapshotContentForVolumeSnapshot(vs, p.snapshotClient)
+		if err != nil {
+			// Could not resolve the bound VolumeSnapshotContent. Deleting the
+			// VolumeSnapshot now could cascade-delete a Delete-policy VSC and its
+			// storage snapshot, so leave the VolumeSnapshot in place; it will be
+			// reclaimed by the delete item action when the backup is deleted.
+			p.log.Warnf(
+				"Skipping finalize cleanup of VolumeSnapshot %s/%s; could not get bound VolumeSnapshotContent: %v",
+				vs.Namespace, vs.Name, err)
+			return item, nil, "", nil, nil
+		}
+
+		csi.DeleteVolumeSnapshot(*vs, *vsc, backup, p.crClient, p.log)
+		return item, nil, "", nil, nil
+	}
+
 	volumeSnapshotClassName := ""
 	if vs.Spec.VolumeSnapshotClassName != nil {
 		volumeSnapshotClassName = *vs.Spec.VolumeSnapshotClassName
@@ -131,20 +165,6 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 			vs.Namespace, vs.Name, err)
 		csi.CleanupVolumeSnapshot(vs, p.crClient, p.log)
 		return nil, nil, "", nil, errors.WithStack(err)
-	}
-
-	if backup.Status.Phase == velerov1api.BackupPhaseFinalizing ||
-		backup.Status.Phase == velerov1api.BackupPhaseFinalizingPartiallyFailed {
-		p.log.
-			WithField("Backup", fmt.Sprintf("%s/%s", backup.Namespace, backup.Name)).
-			WithField("BackupPhase", backup.Status.Phase).Debugf("Clean VolumeSnapshots.")
-
-		if vsc == nil {
-			vsc = &snapshotv1api.VolumeSnapshotContent{}
-		}
-
-		csi.DeleteVolumeSnapshot(*vs, *vsc, backup, p.crClient, p.log)
-		return item, nil, "", nil, nil
 	}
 
 	annotations := make(map[string]string)

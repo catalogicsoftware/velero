@@ -23,15 +23,21 @@ import (
 	"github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	storagev1client "k8s.io/client-go/kubernetes/typed/storage/v1"
 
-	"github.com/vmware-tanzu/velero/pkg/plugin/framework/common"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 )
+
+// changeStorageClassConfigMapPrefix is the name prefix of the per-restore
+// ConfigMap the kubeagent creates for storage-class remapping. The full name is
+// changeStorageClassConfigMapPrefix + <restore name>. One ConfigMap is created
+// per restore so that restores running in parallel each select their own mapping.
+const changeStorageClassConfigMapPrefix = "cloudcasa-io-change-sc-"
 
 // ChangeStorageClassAction updates a PV or PVC's storage class name
 // if a mapping is found in the plugin's config map.
@@ -68,13 +74,24 @@ func (a *ChangeStorageClassAction) Execute(input *velero.RestoreItemActionExecut
 	a.logger.Info("Executing ChangeStorageClassAction")
 	defer a.logger.Info("Done executing ChangeStorageClassAction")
 
-	a.logger.Debug("Getting plugin config")
-	config, err := common.GetPluginConfig(common.PluginKindRestoreItemAction, "velero.io/change-storage-class", a.configMapClient)
+	// The kubeagent runs restores in parallel and creates one change-storage-class
+	// ConfigMap per restore, named "cloudcasa-io-change-sc-<restoreName>". Fetch this
+	// restore's ConfigMap by name instead of listing on the shared plugin-config
+	// label: with concurrent restores that list would either error ("found more than
+	// one ConfigMap ...") or pick another restore's mapping. A by-name Get is also
+	// immune to orphaned ConfigMaps left behind by crashed restores.
+	cmName := changeStorageClassConfigMapPrefix + input.Restore.GetName()
+	a.logger.Debugf("Getting change-storage-class ConfigMap %s", cmName)
+	config, err := a.configMapClient.Get(context.TODO(), cmName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		a.logger.Debugf("No change-storage-class ConfigMap %s; no storage class mappings", cmName)
+		return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
+	}
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 
-	if config == nil || len(config.Data) == 0 {
+	if len(config.Data) == 0 {
 		a.logger.Debug("No storage class mappings found")
 		return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
 	}
