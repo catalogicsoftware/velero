@@ -41,6 +41,7 @@ import (
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/velero/internal/hook"
@@ -857,60 +858,138 @@ func (kb *kubernetesBackupper) CleanupBackup(ctx context.Context, req *Request) 
 	log := logrus.WithField("backup", req.Backup.Name)
 	log.Info("Starting cleanup of cancelled backup")
 
-	// FIRST: Clean up VolumeSnapshotContents
+	labelSelector := labels.SelectorFromSet(map[string]string{
+		"velero.io/backup-name": req.Backup.Name,
+	})
+
+	// FIRST: ensure every VolumeSnapshotContent has deletionPolicy Delete so
+	// the underlying storage snapshot is released when its bound
+	// VolumeSnapshot is deleted (with the policy set to Delete, deleting a
+	// VolumeSnapshot cascades to its VolumeSnapshotContent and the backend
+	// snapshot).
 	var vscList snapshotv1api.VolumeSnapshotContentList
 	if err := kb.kbClient.List(ctx, &vscList, &kbclient.ListOptions{
-		LabelSelector: labels.SelectorFromSet(map[string]string{
-			"velero.io/backup-name": req.Backup.Name,
-		}),
+		LabelSelector: labelSelector,
 	}); err != nil {
 		return errors.Wrap(err, "listing VolumeSnapshotContents")
 	}
 
 	for _, vsc := range vscList.Items {
-		if vsc.Status == nil || vsc.Status.ReadyToUse == nil {
-			continue
-		}
-		if !*vsc.Status.ReadyToUse && vsc.Status.Error == nil {
+		if vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentDelete {
 			continue
 		}
 
-		// Update deletionPolicy if needed
-		if vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentRetain {
-			vscCopy := vsc.DeepCopy()
-			vscCopy.Spec.DeletionPolicy = snapshotv1api.VolumeSnapshotContentDelete
-			if err := kb.kbClient.Update(ctx, vscCopy); err != nil {
-				log.WithError(err).Warnf("Failed to update deletionPolicy for VolumeSnapshotContent %s", vsc.Name)
+		// Updates can race with the external-snapshotter controller, so retry
+		// on conflict (retry.DefaultRetry attempts up to 5 times), re-fetching
+		// the latest VolumeSnapshotContent each time. If it is deleted out from
+		// under us, that is the outcome we want anyway, so treat NotFound as
+		// success.
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			vscCopy := &snapshotv1api.VolumeSnapshotContent{}
+			if err := kb.kbClient.Get(ctx, kbclient.ObjectKey{Name: vsc.Name}, vscCopy); err != nil {
+				return err
 			}
-		}
-
-		log.Infof("Deleting VolumeSnapshotContent %s", vsc.Name)
-		if err := kb.kbClient.Delete(ctx, &vsc); err != nil && !apierrors.IsNotFound(err) {
-			log.WithError(err).Warnf("Failed to delete VolumeSnapshotContent %s", vsc.Name)
+			if vscCopy.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentDelete {
+				return nil
+			}
+			vscCopy.Spec.DeletionPolicy = snapshotv1api.VolumeSnapshotContentDelete
+			return kb.kbClient.Update(ctx, vscCopy)
+		})
+		if err != nil && !apierrors.IsNotFound(err) {
+			log.WithError(err).Warnf("Failed to update deletionPolicy for VolumeSnapshotContent %s; it remains Retain and the backend snapshot will not be released", vsc.Name)
 		}
 	}
 
-	// THEN: Clean up VolumeSnapshots
+	// THEN: Clean up VolumeSnapshots. We delete these before the
+	// VolumeSnapshotContents because a VolumeSnapshotContent will not be
+	// removed while its bound VolumeSnapshot still exists. We delete
+	// irrespective of the status field, since an incomplete or missing status
+	// (e.g. due to a kube-apiserver issue) must not leave the resources behind.
+	// Deleting a VolumeSnapshot is safe even when its content is still Retain:
+	// the content (and the backend snapshot) is kept, not orphaned.
 	var vsList snapshotv1api.VolumeSnapshotList
 	if err := kb.kbClient.List(ctx, &vsList, &kbclient.ListOptions{
-		LabelSelector: labels.SelectorFromSet(map[string]string{
-			"velero.io/backup-name": req.Backup.Name,
-		}),
+		LabelSelector: labelSelector,
 	}); err != nil {
 		return errors.Wrap(err, "listing VolumeSnapshots")
 	}
 
 	for _, vs := range vsList.Items {
-		if vs.Status == nil || vs.Status.ReadyToUse == nil {
-			continue // ongoing snapshot
+		if raw, err := json.Marshal(vs); err == nil {
+			log.Debugf("Deleting VolumeSnapshot %s/%s, object: %s", vs.Namespace, vs.Name, string(raw))
 		}
-		if !*vs.Status.ReadyToUse && vs.Status.Error == nil {
-			continue // not done and no error
-		}
-
 		log.Infof("Deleting VolumeSnapshot %s/%s", vs.Namespace, vs.Name)
 		if err := kb.kbClient.Delete(ctx, &vs); err != nil && !apierrors.IsNotFound(err) {
 			log.WithError(err).Warnf("Failed to delete VolumeSnapshot %s/%s", vs.Namespace, vs.Name)
+		}
+	}
+
+	// FINALLY: clean up any VolumeSnapshotContents that remain. Re-list to avoid
+	// acting on stale data, since deleting the VolumeSnapshots above may have
+	// cascaded to their bound contents.
+	//
+	// The deletionPolicy that governs the cascade lives on the
+	// VolumeSnapshotContent (inherited from the VolumeSnapshotClass when it was
+	// created), not on the VolumeSnapshot. Deleting a VolumeSnapshot removes its
+	// bound content and the backend snapshot only when that content's policy is
+	// Delete. With Retain, deleting the VolumeSnapshot makes the VS object
+	// disappear but keeps the content and the backend snapshot.
+	//
+	// We flipped contents to Delete in the first phase, so a content still on
+	// Retain here is one whose flip failed; deleting it would orphan the backend
+	// snapshot, so we skip and warn. For Delete contents the cascade usually
+	// handles cleanup, but it will not run if the snapshot controller was down
+	// or the VolumeSnapshot's finalizer was force-removed (VS gone, content left
+	// behind), so we delete those explicitly here — but only once the bound
+	// VolumeSnapshot is gone, so we never destroy a backend snapshot out from
+	// under a VolumeSnapshot that still exists.
+	if err := kb.kbClient.List(ctx, &vscList, &kbclient.ListOptions{
+		LabelSelector: labelSelector,
+	}); err != nil {
+		return errors.Wrap(err, "re-listing VolumeSnapshotContents")
+	}
+
+	for _, vsc := range vscList.Items {
+		// Already being deleted (e.g. the controller cascaded from the deleted
+		// VolumeSnapshot). Leave it to finish; issuing another delete is
+		// pointless and would race the in-progress deletion.
+		if vsc.DeletionTimestamp != nil {
+			continue
+		}
+
+		// Still on Retain: deleting the API object would orphan the backend
+		// snapshot, so skip and warn instead.
+		if vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentRetain {
+			log.Warnf("Skipping deletion of VolumeSnapshotContent %s: deletionPolicy is still Retain; deleting it would orphan the backend snapshot", vsc.Name)
+			continue
+		}
+
+		// Delete policy: only remove the content once its bound VolumeSnapshot
+		// no longer exists. While the VolumeSnapshot is still present (its delete
+		// is pending or failed), deleting the content here would destroy the
+		// backend snapshot out from under a live VolumeSnapshot; leave that to
+		// the controller's cascade or a later cleanup retry. Once the
+		// VolumeSnapshot is gone the cascade can no longer run, so we delete the
+		// content ourselves to avoid leaking the backend snapshot.
+		if ref := vsc.Spec.VolumeSnapshotRef; ref.Name != "" {
+			vs := &snapshotv1api.VolumeSnapshot{}
+			err := kb.kbClient.Get(ctx, kbclient.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, vs)
+			if err == nil {
+				continue // bound VolumeSnapshot still exists; leave to the cascade
+			}
+			if !apierrors.IsNotFound(err) {
+				log.WithError(err).Warnf("Skipping deletion of VolumeSnapshotContent %s: unable to verify bound VolumeSnapshot %s/%s", vsc.Name, ref.Namespace, ref.Name)
+				continue
+			}
+			// NotFound: bound VolumeSnapshot is gone; fall through to delete.
+		}
+
+		if raw, err := json.Marshal(vsc); err == nil {
+			log.Debugf("Deleting VolumeSnapshotContent %s, object: %s", vsc.Name, string(raw))
+		}
+		log.Infof("Deleting VolumeSnapshotContent %s", vsc.Name)
+		if err := kb.kbClient.Delete(ctx, &vsc); err != nil && !apierrors.IsNotFound(err) {
+			log.WithError(err).Warnf("Failed to delete VolumeSnapshotContent %s", vsc.Name)
 		}
 	}
 
