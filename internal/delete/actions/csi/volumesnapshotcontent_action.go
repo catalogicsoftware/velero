@@ -67,7 +67,7 @@ func (p *volumeSnapshotContentDeleteItemAction) Execute(
 	// So skip deleting VolumeSnapshotContent not have the backup name
 	// in its labels.
 	if !kubeutil.HasBackupLabel(&snapCont.ObjectMeta, input.Backup.Name) {
-		p.log.Info(
+		p.log.Infof(
 			"VolumeSnapshotContent %s was not taken by backup %s, skipping deletion",
 			snapCont.Name,
 			input.Backup.Name,
@@ -88,9 +88,13 @@ func (p *volumeSnapshotContentDeleteItemAction) Execute(
 		// may not delete it correctly due to the snapshot represented by VolumeSnapshotContent
 		// already deleted on cloud provider.
 		if apierrors.IsNotFound(err) {
+			snapshotHandle := "<unknown>"
+			if snapCont.Status != nil && snapCont.Status.SnapshotHandle != nil {
+				snapshotHandle = *snapCont.Status.SnapshotHandle
+			}
 			p.log.Warnf(
 				"VolumeSnapshotContent %s of backup %s cannot be found. May leave orphan snapshot %s on cloud provider.",
-				snapCont.Name, input.Backup.Name, *snapCont.Status.SnapshotHandle)
+				snapCont.Name, input.Backup.Name, snapshotHandle)
 			return nil
 		}
 		return errors.Wrapf(err, fmt.Sprintf(
