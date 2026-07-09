@@ -225,7 +225,15 @@ func TestChangeStorageClassActionExecute(t *testing.T) {
 			)
 
 			// set up test data
+			const restoreName = "restore-1"
 			if tc.configMap != nil {
+				// The kubeagent creates one change-storage-class ConfigMap per restore,
+				// named cloudcasa-io-change-sc-<restoreName>. Rename the test's change-sc
+				// ConfigMap to that per-restore name so the by-name lookup finds it; leave
+				// other-plugin ConfigMaps under their own name so the lookup misses them.
+				if tc.configMap.Labels["velero.io/change-storage-class"] == "RestoreItemAction" {
+					tc.configMap.Name = changeStorageClassConfigMapPrefix + restoreName
+				}
 				_, err := clientset.CoreV1().ConfigMaps(tc.configMap.Namespace).Create(context.TODO(), tc.configMap, metav1.CreateOptions{})
 				require.NoError(t, err)
 			}
@@ -249,6 +257,7 @@ func TestChangeStorageClassActionExecute(t *testing.T) {
 				Item: &unstructured.Unstructured{
 					Object: unstructuredMap,
 				},
+				Restore: builder.ForRestore("velero", restoreName).Result(),
 			}
 
 			// execute method under test
@@ -266,6 +275,92 @@ func TestChangeStorageClassActionExecute(t *testing.T) {
 
 				assert.Equal(t, &unstructured.Unstructured{Object: wantUnstructured}, res.UpdatedItem)
 			}
+		})
+	}
+}
+
+// TestChangeStorageClassActionExecutePerRestore verifies that the action selects the
+// ConfigMap belonging to the restore being processed (by name), so that restores
+// running in parallel — and ConfigMaps orphaned by other/crashed restores — never
+// cross-contaminate and never trigger a "more than one ConfigMap" error.
+func TestChangeStorageClassActionExecutePerRestore(t *testing.T) {
+	newCM := func(restoreName, oldSC, newSC string) *corev1api.ConfigMap {
+		return builder.ForConfigMap("velero", changeStorageClassConfigMapPrefix+restoreName).
+			ObjectMeta(builder.WithLabels(
+				"velero.io/plugin-config", "",
+				"velero.io/change-storage-class", "RestoreItemAction",
+				"cloudcasa.io/change-storage-class", "true",
+				"cloudcasa.io/job-id-for-change-storage-class", restoreName,
+			)).
+			Data(oldSC, newSC).
+			Result()
+	}
+
+	tests := []struct {
+		name           string
+		restoreName    string
+		configMaps     []*corev1api.ConfigMap
+		storageClasses []string
+		wantSC         string // expected storageClassName on the restored PVC
+	}{
+		{
+			name:        "selects this restore's mapping and ignores other restores'",
+			restoreName: "restore-1",
+			configMaps: []*corev1api.ConfigMap{
+				newCM("restore-1", "storageclass-1", "storageclass-a"),
+				newCM("restore-2", "storageclass-1", "storageclass-b"), // other restore, must be ignored
+			},
+			storageClasses: []string{"storageclass-a", "storageclass-b"},
+			wantSC:         "storageclass-a",
+		},
+		{
+			name:        "no ConfigMap for this restore is a no-op even when others exist",
+			restoreName: "restore-1",
+			configMaps: []*corev1api.ConfigMap{
+				newCM("restore-2", "storageclass-1", "storageclass-b"),
+				newCM("restore-3", "storageclass-1", "storageclass-c"),
+			},
+			wantSC: "storageclass-1", // unchanged
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clientset := fake.NewSimpleClientset()
+			a := NewChangeStorageClassAction(
+				logrus.StandardLogger(),
+				clientset.CoreV1().ConfigMaps("velero"),
+				clientset.StorageV1().StorageClasses(),
+			)
+
+			for _, cm := range tc.configMaps {
+				_, err := clientset.CoreV1().ConfigMaps(cm.Namespace).Create(context.TODO(), cm, metav1.CreateOptions{})
+				require.NoError(t, err)
+			}
+			for _, sc := range tc.storageClasses {
+				_, err := clientset.StorageV1().StorageClasses().Create(context.TODO(), builder.ForStorageClass(sc).Result(), metav1.CreateOptions{})
+				require.NoError(t, err)
+			}
+
+			pvc := builder.ForPersistentVolumeClaim("app", "pvc-1").StorageClass("storageclass-1").Result()
+			unstructuredMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pvc)
+			require.NoError(t, err)
+
+			input := &velero.RestoreItemActionExecuteInput{
+				Item:    &unstructured.Unstructured{Object: unstructuredMap},
+				Restore: builder.ForRestore("velero", tc.restoreName).Result(),
+			}
+
+			res, err := a.Execute(input)
+			require.NoError(t, err)
+
+			gotPVC := new(corev1api.PersistentVolumeClaim)
+			require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(res.UpdatedItem.UnstructuredContent(), gotPVC))
+			gotSC := ""
+			if gotPVC.Spec.StorageClassName != nil {
+				gotSC = *gotPVC.Spec.StorageClassName
+			}
+			assert.Equal(t, tc.wantSC, gotSC)
 		})
 	}
 }

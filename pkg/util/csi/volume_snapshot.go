@@ -924,16 +924,25 @@ func WaitUntilVSCHandleIsReady(
 		catalogic.DeleteSnapshotProgressConfigMap(jobID, log)
 	}()
 
-	// Allow the plugin config to override the timeout.
+	// The plugin ConfigMap only carries an OPTIONAL CSI-snapshot-timeout override.
+	// It is routinely absent by the time this runs (e.g. the kubeagent removes it
+	// once the backup job finishes, around the finalize phase). Treat a missing or
+	// unreadable ConfigMap as non-fatal and fall back to the timeout the caller
+	// passed in (backup.Spec.CSISnapshotTimeout). Returning an error here would send
+	// the caller (VolumeSnapshotBackupItemAction) down the destructive
+	// CleanupVolumeSnapshot path, which flips the VSC DeletionPolicy to Delete and
+	// cascade-deletes the underlying storage snapshot a restore may still need.
 	config, err := catalogic.GetPluginConfig(jobID, log)
 	if err != nil {
-		log.WithError(err).Error("Failed to get plugin config")
-		return nil, errors.Wrap(err, "error getting plugin config")
-	}
-	log.Infof("Plugin config: %+v", config)
-	if config.CsiSnapshotTimeout > 0 {
-		csiSnapshotTimeout = time.Duration(config.CsiSnapshotTimeout) * time.Minute
-		log.Infof("Using configured CSI snapshot Timeout=%v", csiSnapshotTimeout)
+		log.WithError(err).Warnf(
+			"Failed to get plugin config; falling back to caller-provided CSI snapshot timeout %v",
+			csiSnapshotTimeout)
+	} else {
+		log.Infof("Plugin config: %+v", config)
+		if config.CsiSnapshotTimeout > 0 {
+			csiSnapshotTimeout = time.Duration(config.CsiSnapshotTimeout) * time.Minute
+			log.Infof("Using configured CSI snapshot Timeout=%v", csiSnapshotTimeout)
+		}
 	}
 
 	// A single deadline context spans both phases. If Phase 1 consumes 3 minutes,
