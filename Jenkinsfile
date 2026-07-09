@@ -68,9 +68,13 @@ node("cloudcasa-build") {
     def sourceBranch = env.BRANCH_NAME ?: "unknown"
     def masterEquivalentBranches = ["master", "v1.14.0.x", "jg-KUBEDR-7845"]
     def isMasterFlow = masterEquivalentBranches.contains(sourceBranch)
-    // Use "master" as the tag segment for all master-equivalent branches so the
-    // tag stays clean (e.g. 1.14.0-master.12) regardless of the actual branch name.
-    def branchTag = isMasterFlow ? "master" : sourceBranch.replaceAll('[^0-9A-Za-z-]', '-')
+    def isProductionFlow = sourceBranch == "production"
+    // production builds/pushes just like the master-equivalent branches, but tags
+    // and deployment-repo targets differ (see branchTag and Prepare deployment repo below).
+    def isReleaseFlow = isMasterFlow || isProductionFlow
+    // Use "master"/"prod" as the tag segment for release branches so the tag stays
+    // clean (e.g. 1.14.0-master.12, 1.14.0-prod.12) regardless of the actual branch name.
+    def branchTag = isMasterFlow ? "master" : (isProductionFlow ? "prod" : sourceBranch.replaceAll('[^0-9A-Za-z-]', '-'))
 
     // Keep tags cloudcasa-like while preserving velero version context.
     def baseVersion = "1.14.0"
@@ -84,9 +88,9 @@ node("cloudcasa-build") {
     def dockerRegistryCredsExternal = env.DOCKER_REGISTRY_CREDENTIALS_EXTERNAL ?: "docker.io-docker-registry"
     def dockerPrefixExternal = env.DOCKER_PREFIX_EXTERNAL ?: "catalogicsoftware"
 
-    def buildVelero = (params["${buildParamPrefix}VELERO"] ?: false) && isMasterFlow
-    def buildCloudcasaVelero = (params["${buildParamPrefix}CLOUDCASA_VELERO"] ?: false) && isMasterFlow
-    def runPrepareRepo = isMasterFlow || (params.PREPARE_REPO_FORCE_MASTER_SCOPE ? params.PREPARE_REPO_FORCE_MASTER_SCOPE.toBoolean() : false)
+    def buildVelero = (params["${buildParamPrefix}VELERO"] ?: false) && isReleaseFlow
+    def buildCloudcasaVelero = (params["${buildParamPrefix}CLOUDCASA_VELERO"] ?: false) && isReleaseFlow
+    def runPrepareRepo = isReleaseFlow || (params.PREPARE_REPO_FORCE_MASTER_SCOPE ? params.PREPARE_REPO_FORCE_MASTER_SCOPE.toBoolean() : false)
     def prepareRepoDryRun = params.PREPARE_REPO_DRY_RUN ? params.PREPARE_REPO_DRY_RUN.toBoolean() : false
 
     stage("Build velero image") {
@@ -263,7 +267,7 @@ node("cloudcasa-build") {
         }
     }
 
-    stage("Prepare deployment repo (integration)") {
+    stage("Prepare deployment repo") {
         if (buildCloudcasaVelero && runPrepareRepo) {
             withCredentials([
                 usernamePassword(
@@ -287,23 +291,35 @@ node("cloudcasa-build") {
                     // Patch cloudcasa-velero image tag in the specific files that Concourse
                     // k8s-prepare-repo.sh targets. Match the full ACR-prefixed reference so
                     // other registries (e.g. OpenShift) are not accidentally patched.
-                    sh """
-                        set -eu
-                        TAG=${cloudcasaVeleroTag}
-                        ACR_IMAGE="cloudcasaAgent.azurecr.io/catalogicsoftware/cloudcasa-velero"
+                    // production has its own overlay (archimedes/prod/*) and must not touch
+                    // the base/local/integration files that the v1.14.0.x flow updates.
+                    def acrImage = "cloudcasaAgent.azurecr.io/catalogicsoftware/cloudcasa-velero"
+                    def patchTargets = isProductionFlow ?
+                        [
+                            [file: "archimedes/prod/kas/deployment_kas_image_spec.yaml", pattern: acrImage],
+                            [file: "archimedes/prod/global-cm.yaml",                     pattern: "velero.imageRef=${acrImage}"]
+                        ] :
+                        [
+                            [file: "archimedes/base/kas/deployment.yaml",                       pattern: acrImage],
+                            [file: "archimedes/local/global-cm.yaml",                           pattern: "velero.imageRef=${acrImage}"],
+                            [file: "archimedes/integration/kas/deployment_kas_image_spec.yaml", pattern: acrImage],
+                            [file: "archimedes/integration/global-cm.yaml",                      pattern: "velero.imageRef=${acrImage}"]
+                        ]
 
-                        patch_acr_tag() {
-                            local file="\$1"
-                            local pattern="\$2"
-                            [ -f "\$file" ] || return 0
-                            sed -i "s|\${pattern}:.*|\${pattern}:\${TAG}|g" "\$file"
+                    withEnv(["TAG=${cloudcasaVeleroTag}"]) {
+                        patchTargets.each { target ->
+                            withEnv([
+                                "PATCH_FILE=${target.file}",
+                                "PATCH_PATTERN=${target.pattern}"
+                            ]) {
+                                sh '''
+                                    set -eu
+                                    [ -f "$PATCH_FILE" ] || exit 0
+                                    sed -i "s|${PATCH_PATTERN}:.*|${PATCH_PATTERN}:${TAG}|g" "$PATCH_FILE"
+                                '''
+                            }
                         }
-
-                        patch_acr_tag archimedes/base/kas/deployment.yaml                    "\${ACR_IMAGE}"
-                        patch_acr_tag archimedes/local/global-cm.yaml                        "velero.imageRef=\${ACR_IMAGE}"
-                        patch_acr_tag archimedes/integration/kas/deployment_kas_image_spec.yaml "\${ACR_IMAGE}"
-                        patch_acr_tag archimedes/integration/global-cm.yaml                  "velero.imageRef=\${ACR_IMAGE}"
-                    """
+                    }
 
                     sh """
                         set -eu
