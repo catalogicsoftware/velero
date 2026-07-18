@@ -53,6 +53,13 @@ import (
 const (
 	waitInternal                          = 2 * time.Second
 	volumeSnapshotContentProtectFinalizer = "velero.io/volume-snapshot-content-protect-finalizer"
+
+	// snapshotProgressDrainDelay is how long the deferred progress-reporter
+	// waits after writing the final snapshot state before deleting the progress
+	// ConfigMap. It gives the kubeagent time to observe and process the final
+	// update (including the "error" state on a failed/timed-out snapshot) before
+	// the ConfigMap is removed.
+	snapshotProgressDrainDelay = 500 * time.Millisecond
 )
 
 // WaitVolumeSnapshotReady waits a VS to become ready to use until the timeout reaches
@@ -954,6 +961,37 @@ func recreateVolumeSnapshotContent(
 	return nil
 }
 
+// vscErrorMessage returns the error message recorded on a
+// VolumeSnapshotContent's status, and whether an error is present at all. The
+// snapshot-controller records transient CSI driver errors here while it keeps
+// retrying in the background.
+func vscErrorMessage(vsc *snapshotv1api.VolumeSnapshotContent) (string, bool) {
+	if vsc == nil || vsc.Status == nil || vsc.Status.Error == nil {
+		return "", false
+	}
+	msg := ""
+	if vsc.Status.Error.Message != nil {
+		msg = *vsc.Status.Error.Message
+	}
+	return msg, true
+}
+
+// vscSnapshotReady reports whether a VolumeSnapshotContent should be treated as
+// a successfully-captured snapshot. It requires a populated SnapshotHandle AND
+// the absence of any error. A CSI driver can return a handle alongside a
+// transient error (e.g. a rate-limiter DeadlineExceeded); in that state the
+// handle may be stale and the VolumeSnapshot's ReadyToUse is still false, so
+// the VSC must NOT be considered ready.
+func vscSnapshotReady(vsc *snapshotv1api.VolumeSnapshotContent) bool {
+	if vsc == nil || vsc.Status == nil {
+		return false
+	}
+	if _, hasErr := vscErrorMessage(vsc); hasErr {
+		return false
+	}
+	return vsc.Status.SnapshotHandle != nil
+}
+
 // WaitUntilVSCHandleIsReady returns the VolumeSnapshotContent object associated
 // with the VolumeSnapshot. Instead of polling on a fixed interval, it uses
 // watchtools.UntilWithSync for both the VS-binding phase and the VSC
@@ -1004,7 +1042,7 @@ func WaitUntilVSCHandleIsReady(
 		if uErr != nil {
 			log.WithError(uErr).Error("Failed to update snapshot progress")
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(snapshotProgressDrainDelay)
 		catalogic.DeleteSnapshotProgressConfigMap(jobID, log)
 	}()
 
@@ -1096,6 +1134,14 @@ func WaitUntilVSCHandleIsReady(
 	); watchErr != nil {
 		log.WithError(watchErr).Errorf(
 			"Phase1 watch failed for VolumeSnapshot %s/%s", volSnap.Namespace, volSnap.Name)
+		// Record the failure and the impending cleanup before returning; the
+		// caller removes the incomplete snapshot on any error, and the deferred
+		// progress-reporter flushes this "error" state to the ConfigMap first
+		// so the snapshot never fails silently.
+		snapshotState = "error"
+		snapshotStateMessage = fmt.Sprintf(
+			"CSI snapshot did not bind before timeout for VolumeSnapshot %s/%s. The incomplete snapshot will be removed.",
+			volSnap.Namespace, volSnap.Name)
 		return nil, errors.Wrapf(watchErr,
 			"timed out or failed watching VolumeSnapshot %s/%s for VSC binding",
 			volSnap.Namespace, volSnap.Name)
@@ -1180,15 +1226,31 @@ func WaitUntilVSCHandleIsReady(
 				if !ok {
 					return false, nil
 				}
-				if updatedVSC.Status == nil || updatedVSC.Status.SnapshotHandle == nil {
+				// Do NOT treat the VSC as ready while it carries an error, even
+				// if a SnapshotHandle is already populated. A CSI driver can
+				// return a handle together with a transient error (e.g. a
+				// DeadlineExceeded from the client-side rate limiter). In that
+				// state the handle may be stale/invalid and the VolumeSnapshot's
+				// ReadyToUse is still false. Declaring success here consumes the
+				// whole csiSnapshotTimeout budget on a false positive. Keep
+				// watching until the error clears — or until the shared deadline
+				// fires, at which point the watchErr handler below turns the
+				// lingering error into a returned error, sending the caller down
+				// the CleanupVolumeSnapshot path that reclaims the incomplete
+				// snapshot.
+				if errMsg, hasErr := vscErrorMessage(updatedVSC); hasErr {
+					snapshotState = "pending"
+					snapshotStateMessage = fmt.Sprintf(
+						"VSC %s has error, awaiting CSI retry: %s", boundVSCName, errMsg)
+					log.Warnf("VSC %s reported an error; not treating as ready: %s",
+						boundVSCName, errMsg)
+					return false, nil
+				}
+				if !vscSnapshotReady(updatedVSC) {
 					snapshotState = "pending"
 					snapshotStateMessage = fmt.Sprintf(
 						"VSC %s lacks SnapshotHandle", boundVSCName)
 					log.Info(snapshotStateMessage)
-					if updatedVSC.Status != nil && updatedVSC.Status.Error != nil {
-						log.Infof("VSC %s has error: %v",
-							boundVSCName, *updatedVSC.Status.Error.Message)
-					}
 					return false, nil
 				}
 				// Capture the final, fully-populated VSC for the caller.
@@ -1200,10 +1262,24 @@ func WaitUntilVSCHandleIsReady(
 		},
 	); watchErr != nil {
 		log.WithError(watchErr).Errorf("Phase2 watch failed for VSC %s", boundVSCName)
-		if vsc.Status != nil && vsc.Status.Error != nil {
-			return nil, fmt.Errorf("CSI reconciliation timeout for VSC %s: %v",
-				boundVSCName, *vsc.Status.Error.Message)
+		// Record the failure and the impending cleanup in the progress
+		// ConfigMap before returning. The caller runs CleanupVolumeSnapshot on
+		// any error from this function, so the incomplete snapshot is about to
+		// be removed; the deferred progress-reporter above flushes this "error"
+		// state to the ConfigMap (and thus to the kubeagent) before the caller
+		// regains control — so the snapshot never fails silently.
+		if reason, hasErr := vscErrorMessage(vsc); hasErr {
+			snapshotState = "error"
+			snapshotStateMessage = fmt.Sprintf(
+				"CSI snapshot failed for VSC %s: %s. The incomplete snapshot will be removed.",
+				boundVSCName, reason)
+			return nil, fmt.Errorf("CSI reconciliation timeout for VSC %s: %s",
+				boundVSCName, reason)
 		}
+		snapshotState = "error"
+		snapshotStateMessage = fmt.Sprintf(
+			"CSI snapshot did not become ready before timeout for VSC %s. The incomplete snapshot will be removed.",
+			boundVSCName)
 		return nil, errors.Wrapf(watchErr,
 			"timed out or failed watching VSC %s for SnapshotHandle", boundVSCName)
 	}

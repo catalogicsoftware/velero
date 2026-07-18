@@ -1786,3 +1786,84 @@ func TestWaitUntilVSCHandleIsReady(t *testing.T) {
 		})
 	}
 }
+
+// TestVSCSnapshotReady covers the readiness decision used by
+// WaitUntilVSCHandleIsReady's Phase 2 watch. The critical case is a VSC that
+// carries BOTH a SnapshotHandle and an error — the state a rate-limited CSI
+// driver leaves behind — which must NOT be treated as ready.
+func TestVSCSnapshotReady(t *testing.T) {
+	handle := "snapshot-handle"
+	errMsg := "DeadlineExceeded: context deadline exceeded (client rate limiter)"
+
+	tests := []struct {
+		name       string
+		vsc        *snapshotv1api.VolumeSnapshotContent
+		wantReady  bool
+		wantErrMsg string
+		wantHasErr bool
+	}{
+		{
+			name:      "nil VSC is not ready",
+			vsc:       nil,
+			wantReady: false,
+		},
+		{
+			name:      "nil status is not ready",
+			vsc:       &snapshotv1api.VolumeSnapshotContent{},
+			wantReady: false,
+		},
+		{
+			name: "handle present without error is ready",
+			vsc: &snapshotv1api.VolumeSnapshotContent{
+				Status: &snapshotv1api.VolumeSnapshotContentStatus{
+					SnapshotHandle: &handle,
+				},
+			},
+			wantReady: true,
+		},
+		{
+			name: "no handle and no error is not ready",
+			vsc: &snapshotv1api.VolumeSnapshotContent{
+				Status: &snapshotv1api.VolumeSnapshotContentStatus{},
+			},
+			wantReady: false,
+		},
+		{
+			// A handle AND an error must not be treated as ready.
+			name: "handle present with error is NOT ready",
+			vsc: &snapshotv1api.VolumeSnapshotContent{
+				Status: &snapshotv1api.VolumeSnapshotContentStatus{
+					SnapshotHandle: &handle,
+					ReadyToUse:     boolptr.False(),
+					Error: &snapshotv1api.VolumeSnapshotError{
+						Message: &errMsg,
+					},
+				},
+			},
+			wantReady:  false,
+			wantErrMsg: errMsg,
+			wantHasErr: true,
+		},
+		{
+			name: "error with nil message still reports error and not ready",
+			vsc: &snapshotv1api.VolumeSnapshotContent{
+				Status: &snapshotv1api.VolumeSnapshotContentStatus{
+					SnapshotHandle: &handle,
+					Error:          &snapshotv1api.VolumeSnapshotError{},
+				},
+			},
+			wantReady:  false,
+			wantErrMsg: "",
+			wantHasErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.wantReady, vscSnapshotReady(tc.vsc))
+			gotMsg, gotHasErr := vscErrorMessage(tc.vsc)
+			assert.Equal(t, tc.wantHasErr, gotHasErr)
+			assert.Equal(t, tc.wantErrMsg, gotMsg)
+		})
+	}
+}
