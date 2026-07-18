@@ -30,7 +30,11 @@ const (
 	// Prefix name of configmap used to to report progress of snapshot
 	SnapshotProgressUpdateConfigMapPrefix = "cloudcasa-io-snapshot-updater-"
 
-	TimeFormat = "2006-01-06 15:04:05 UTC: "
+	// TimeFormat must match the kubeagent's sibling layout exactly. Note the day
+	// token is "02": using "06" here renders the two-digit YEAR in the day
+	// position (e.g. day "26" throughout 2026), which previously masqueraded as
+	// clock skew in customer logs.
+	TimeFormat = "2006-01-02 15:04:05 UTC: "
 
 	// VeleroCsiPluginConfigMapPrefix is the name prefix of the configmap used to store configuration parameters
 	VeleroCsiPluginConfigMapPrefix = "cloudcasa-io-velero-csi-plugin-"
