@@ -19,6 +19,9 @@ package csi
 import (
 	"context"
 	"errors"
+	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1785,4 +1788,89 @@ func TestWaitUntilVSCHandleIsReady(t *testing.T) {
 			assert.Equal(t, tc.exepctedVSC, actualVSC)
 		})
 	}
+}
+
+func TestSnapshotProgressHeartbeat(t *testing.T) {
+	log := logrus.New()
+	log.SetOutput(io.Discard)
+	const interval = 10 * time.Millisecond
+
+	t.Run("fires repeatedly on cadence even when state is unchanged", func(t *testing.T) {
+		var mu sync.Mutex
+		var seenStates []string
+		fired := make(chan struct{}, 100)
+
+		getState := func() (string, string) { return "pending", "still awaiting reconciliation" }
+		report := func(state, message string) error {
+			mu.Lock()
+			seenStates = append(seenStates, state)
+			mu.Unlock()
+			fired <- struct{}{}
+			return nil
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go snapshotProgressHeartbeat(ctx, interval, getState, report, log)
+
+		// Wait for at least three heartbeats to prove it keeps firing on cadence
+		// rather than only once.
+		for i := 0; i < 3; i++ {
+			select {
+			case <-fired:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out waiting for heartbeat #%d", i+1)
+			}
+		}
+		cancel()
+
+		mu.Lock()
+		defer mu.Unlock()
+		require.GreaterOrEqual(t, len(seenStates), 3, "expected repeated heartbeats")
+		for _, s := range seenStates {
+			// Every heartbeat carries the same (unchanged) state — that is the point.
+			assert.Equal(t, "pending", s)
+		}
+	})
+
+	t.Run("skips heartbeat while state is empty", func(t *testing.T) {
+		var count int32
+		getState := func() (string, string) { return "", "" }
+		report := func(state, message string) error {
+			atomic.AddInt32(&count, 1)
+			return nil
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 6*interval)
+		defer cancel()
+		snapshotProgressHeartbeat(ctx, interval, getState, report, log)
+
+		assert.Equal(t, int32(0), atomic.LoadInt32(&count),
+			"report must not be called while state is unobserved")
+	})
+
+	t.Run("stops firing once context is cancelled", func(t *testing.T) {
+		var count int32
+		getState := func() (string, string) { return "pending", "" }
+		report := func(state, message string) error {
+			atomic.AddInt32(&count, 1)
+			return nil
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			snapshotProgressHeartbeat(ctx, interval, getState, report, log)
+			close(done)
+		}()
+
+		time.Sleep(4 * interval)
+		cancel()
+		<-done // heartbeat goroutine has returned
+
+		after := atomic.LoadInt32(&count)
+		time.Sleep(5 * interval)
+		assert.Equal(t, after, atomic.LoadInt32(&count),
+			"no heartbeats should fire after the context is cancelled")
+	})
 }

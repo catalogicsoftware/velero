@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
@@ -53,6 +54,14 @@ import (
 const (
 	waitInternal                          = 2 * time.Second
 	volumeSnapshotContentProtectFinalizer = "velero.io/volume-snapshot-content-protect-finalizer"
+	// snapshotProgressHeartbeatInterval is the fixed cadence at which
+	// WaitUntilVSCHandleIsReady relays snapshot progress to the kubeagent while
+	// waiting for a CSI snapshot. A heartbeat is emitted every interval even when
+	// the snapshot state has not changed, so the kubeagent refreshes the job's
+	// TTL and does not evict a healthy long-running snapshot at the 60-minute
+	// timeout. The interval is deliberately coarse to avoid burdening the K8s API
+	// server, the kubeagent, and KAS with excessive updates.
+	snapshotProgressHeartbeatInterval = 5 * time.Minute
 )
 
 // WaitVolumeSnapshotReady waits a VS to become ready to use until the timeout reaches
@@ -954,6 +963,40 @@ func recreateVolumeSnapshotContent(
 	return nil
 }
 
+// snapshotProgressHeartbeat periodically relays the current snapshot state to
+// the kubeagent (via report) until ctx is cancelled. It fires on a fixed
+// cadence even when the state has not changed, so the kubeagent keeps
+// refreshing the job's TTL and a healthy long-running snapshot is not evicted
+// at the job timeout. State that has not yet been observed (empty) is skipped,
+// since report would have nothing meaningful to send.
+func snapshotProgressHeartbeat(
+	ctx context.Context,
+	interval time.Duration,
+	getState func() (state, message string),
+	report func(state, message string) error,
+	log logrus.FieldLogger,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			state, message := getState()
+			if state == "" {
+				// Nothing observed yet; report would no-op.
+				continue
+			}
+			if err := report(state, message); err != nil {
+				log.WithError(err).Warn("Failed to send snapshot progress heartbeat")
+			} else {
+				log.Infof("Sent snapshot progress heartbeat: state=%s", state)
+			}
+		}
+	}
+}
+
 // WaitUntilVSCHandleIsReady returns the VolumeSnapshotContent object associated
 // with the VolumeSnapshot. Instead of polling on a fixed interval, it uses
 // watchtools.UntilWithSync for both the VS-binding phase and the VSC
@@ -997,14 +1040,60 @@ func WaitUntilVSCHandleIsReady(
 	}
 
 	// snapshotState / snapshotStateMessage are written throughout the two watch
-	// phases and consumed by the deferred progress-reporter.
-	var snapshotState, snapshotStateMessage string
+	// phases (from the watch callbacks) and read both by the periodic heartbeat
+	// goroutine below and by the deferred progress-reporter. The mutex guards
+	// against the resulting concurrent access.
+	var (
+		stateMu              sync.Mutex
+		snapshotState        string
+		snapshotStateMessage string
+	)
+	setSnapshotState := func(state, message string) {
+		stateMu.Lock()
+		snapshotState, snapshotStateMessage = state, message
+		stateMu.Unlock()
+	}
+	getSnapshotState := func() (string, string) {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		return snapshotState, snapshotStateMessage
+	}
+
+	// Heartbeat: while the two watch phases block waiting for CSI reconciliation,
+	// the watch callbacks fire only on VS/VSC events, which may be minutes apart
+	// on a large-volume snapshot. Relay the current snapshot state to the
+	// kubeagent on a fixed cadence so that it refreshes the job's TTL. The update
+	// is sent every interval even when the state is unchanged — the point is to
+	// prove liveness, not to report a transition — so a snapshot that legitimately
+	// runs past the 60-minute job timeout is not evicted.
+	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
+	var heartbeatWG sync.WaitGroup
+	heartbeatWG.Add(1)
+	go func() {
+		defer heartbeatWG.Done()
+		snapshotProgressHeartbeat(
+			heartbeatCtx,
+			snapshotProgressHeartbeatInterval,
+			getSnapshotState,
+			func(state, message string) error {
+				return catalogic.UpdateSnapshotProgress(nil, volSnap, nil, state, message, jobID, log)
+			},
+			log,
+		)
+	}()
+
 	defer func() {
-		uErr := catalogic.UpdateSnapshotProgress(nil, volSnap, nil, snapshotState, snapshotStateMessage, jobID, log)
+		// Stop the heartbeat before writing the final status so the two cannot race
+		// on the same ConfigMap.
+		stopHeartbeat()
+		heartbeatWG.Wait()
+
+		state, message := getSnapshotState()
+		uErr := catalogic.UpdateSnapshotProgress(nil, volSnap, nil, state, message, jobID, log)
 		if uErr != nil {
 			log.WithError(uErr).Error("Failed to update snapshot progress")
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 		catalogic.DeleteSnapshotProgressConfigMap(jobID, log)
 	}()
 
@@ -1078,11 +1167,11 @@ func WaitUntilVSCHandleIsReady(
 					return false, nil
 				}
 				if vs.Status == nil || vs.Status.BoundVolumeSnapshotContentName == nil {
-					snapshotState = "pending"
-					snapshotStateMessage = fmt.Sprintf(
+					msg := fmt.Sprintf(
 						"Awaiting VolumeSnapshot reconciliation: %s/%s",
 						volSnap.Namespace, volSnap.Name)
-					log.Info(snapshotStateMessage)
+					setSnapshotState("pending", msg)
+					log.Info(msg)
 					return false, nil
 				}
 				boundVSCName = *vs.Status.BoundVolumeSnapshotContentName
@@ -1181,10 +1270,10 @@ func WaitUntilVSCHandleIsReady(
 					return false, nil
 				}
 				if updatedVSC.Status == nil || updatedVSC.Status.SnapshotHandle == nil {
-					snapshotState = "pending"
-					snapshotStateMessage = fmt.Sprintf(
+					msg := fmt.Sprintf(
 						"VSC %s lacks SnapshotHandle", boundVSCName)
-					log.Info(snapshotStateMessage)
+					setSnapshotState("pending", msg)
+					log.Info(msg)
 					if updatedVSC.Status != nil && updatedVSC.Status.Error != nil {
 						log.Infof("VSC %s has error: %v",
 							boundVSCName, *updatedVSC.Status.Error.Message)
@@ -1209,10 +1298,9 @@ func WaitUntilVSCHandleIsReady(
 	}
 
 	if vsc.Status != nil && vsc.Status.ReadyToUse != nil && *vsc.Status.ReadyToUse {
-		snapshotState, snapshotStateMessage = "completed", "CSI snapshot complete"
+		setSnapshotState("completed", "CSI snapshot complete")
 	} else {
-		snapshotState, snapshotStateMessage = "pending",
-			fmt.Sprintf("VSC %s not ReadyToUse", vsc.Name)
+		setSnapshotState("pending", fmt.Sprintf("VSC %s not ReadyToUse", vsc.Name))
 	}
 
 	log.Infof("Completed WaitUntilVSCHandleIsReady for %s/%s, VSC=%s",
