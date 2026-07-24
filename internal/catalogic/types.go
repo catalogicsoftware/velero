@@ -19,7 +19,6 @@ type PvcSnapshotProgressData struct {
 
 type PluginConfig struct {
 	SnapshotWherePossible       bool
-	SnapshotLonghorn            bool
 	CsiSnapshotTimeout          int
 	StorageClassBackupMethodMap map[string]string
 }

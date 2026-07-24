@@ -176,16 +176,6 @@ func GetPluginConfig(jobID string, log logrus.FieldLogger) (*PluginConfig, error
 		log.Info("Will backup all PVCs live")
 	}
 
-	snapshotLonghornString := string(configMap.BinaryData["snapshotLonghorn"])
-	snapshotLonghorn, err := strconv.ParseBool(snapshotLonghornString)
-	if err != nil {
-		log.Error(errors.Wrapf(err, "Failed to parse snapshotLonghorn value %q from %q", snapshotLonghornString, veleroCsiPluginConfigMapName))
-		return nil, err
-	}
-	if snapshotLonghorn {
-		log.Info("Will snapshot Longhorn PVCs instead of doing live backup")
-	}
-
 	csiSnapshotTimeoutString := string(configMap.BinaryData["csiSnapshotTimeout"])
 	csiSnapshotTimeout, err := strconv.Atoi(csiSnapshotTimeoutString)
 	if err != nil {
@@ -209,7 +199,6 @@ func GetPluginConfig(jobID string, log logrus.FieldLogger) (*PluginConfig, error
 
 	return &PluginConfig{
 		SnapshotWherePossible:       snapshotWherePossible,
-		SnapshotLonghorn:            snapshotLonghorn,
 		CsiSnapshotTimeout:          csiSnapshotTimeout,
 		StorageClassBackupMethodMap: storageClassBackupMethodMap,
 	}, nil
