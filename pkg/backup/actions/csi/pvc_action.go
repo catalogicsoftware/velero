@@ -192,10 +192,14 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 		p.crClient,
 	)
 	if err != nil {
-		return nil, nil, false, errors.Wrapf(
-			err, "failed to get VolumeSnapshotClass for StorageClass %s",
-			storageClass.Name,
-		)
+		// Surface the failure on the CSI snapshot-progress channel (relayed to
+		// KubeAgent) with the resolver's own actionable message, and return the
+		// error unwrapped so the backup-item error isn't padded with a redundant
+		// "failed to get VolumeSnapshotClass for StorageClass ..." prefix.
+		*snapshotState = "error"
+		*snapshotStateMessage = err.Error()
+		p.log.Error(err.Error())
+		return nil, nil, false, err
 	}
 	p.log.Infof(
 		"Using VolumeSnapshotClass %s for PVC %s/%s (StorageClass %s, driver %s)",

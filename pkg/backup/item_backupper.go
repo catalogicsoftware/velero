@@ -115,6 +115,19 @@ func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstr
 
 	selectedForBackup, files, err := ib.backupItemInternal(logger, obj, groupResource, preferredGVR, mustInclude, finalize)
 
+	// Remember failed items so that a later re-encounter (deduplicated via
+	// BackedUpItems) resurfaces the failure instead of passing for a success.
+	if err != nil {
+		if ib.backupRequest.FailedItems == nil {
+			ib.backupRequest.FailedItems = map[itemKey]error{}
+		}
+		ib.backupRequest.FailedItems[itemKey{
+			resource:  resourceKey(obj),
+			namespace: namespace,
+			name:      name,
+		}] = err
+	}
+
 	// Report result of the primary KubeVirt VM resource backup if it's a KubeVirt VM
 	if isKubeVirtVM {
 		kubevirtutil.KubeVirtVMOpResult(logger, groupResource, name, namespace, ib.backupRequest.Backup, selectedForBackup && err == nil, err, ib.kbClient)
@@ -242,6 +255,15 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 	}
 
 	if _, exists := ib.backupRequest.BackedUpItems[key]; exists {
+		// If the earlier attempt failed, resurface that failure so parents that
+		// reference this item (e.g. a KubeVirt VM whose PVC snapshot failed) do
+		// not treat it as successfully backed up.
+		if prevErr, failed := ib.backupRequest.FailedItems[key]; failed {
+			log.Info("Item was already processed and its backup failed; returning the previous failure.")
+			return false, itemFiles, errors.Wrapf(
+				prevErr, "item %s failed to back up earlier in this backup", key.name,
+			)
+		}
 		log.Info("Skipping item because it's already been backed up.")
 		// returning true since this item *is* in the backup, even though we're not backing it up here
 		return true, itemFiles, nil
