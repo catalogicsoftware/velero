@@ -391,7 +391,7 @@ func snapshotClassRequiredError(
 		}
 	}
 	return errors.Errorf(
-		"no VolumeSnapshotClass configured for CSI driver %q (PVC %s, StorageClass %q). "+
+		"No VolumeSnapshotClass configured for CSI driver %q (PVC %s, StorageClass %q). "+
 			"This driver requires custom parameters in its VolumeSnapshotClass, so CloudCasa "+
 			"will not create one automatically. Configure a VolumeSnapshotClass "+
 			"as described in the documentation, then retry the backup.",
