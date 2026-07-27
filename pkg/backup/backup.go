@@ -292,6 +292,7 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 	}
 
 	backupRequest.BackedUpItems = map[itemKey]struct{}{}
+	backupRequest.FailedItems = map[itemKey]error{}
 
 	podVolumeTimeout := kb.podVolumeTimeout
 	if val := backupRequest.Annotations[velerov1api.PodVolumeOperationTimeoutAnnotation]; val != "" {
@@ -713,6 +714,7 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 	}
 
 	backupRequest.BackedUpItems = map[itemKey]struct{}{}
+	backupRequest.FailedItems = map[itemKey]error{}
 
 	// set up a temp dir for the itemCollector to use to temporarily
 	// store items as they're scraped from the API.

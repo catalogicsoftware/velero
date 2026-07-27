@@ -50,12 +50,19 @@ type Request struct {
 	VolumeSnapshots           []*volume.Snapshot
 	PodVolumeBackups          []*velerov1api.PodVolumeBackup
 	BackedUpItems             map[itemKey]struct{}
-	itemOperationsList        *[]*itemoperation.BackupOperation
-	ResPolicies               *resourcepolicies.Policies
-	SkippedPVTracker          *skipPVTracker
-	VolumesInformation        volume.BackupVolumesInformation
-	IncludeNamedResources     map[string]string
-	Context                   context.Context `json:"-"`
+	// FailedItems records, per item, the error from a failed backup attempt.
+	// BackedUpItems marks an item as processed before its backup runs (to break
+	// recursion cycles), so on re-encounter a previously FAILED item would
+	// otherwise be indistinguishable from a successful one and parents (e.g. a
+	// KubeVirt VM referencing a failed PVC) would report success. The dedup path
+	// consults this map to resurface the original failure instead.
+	FailedItems           map[itemKey]error
+	itemOperationsList    *[]*itemoperation.BackupOperation
+	ResPolicies           *resourcepolicies.Policies
+	SkippedPVTracker      *skipPVTracker
+	VolumesInformation    volume.BackupVolumesInformation
+	IncludeNamedResources map[string]string
+	Context               context.Context `json:"-"`
 }
 
 // BackupVolumesInformation contains the information needs by generating
