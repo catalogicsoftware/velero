@@ -269,8 +269,6 @@ node("cloudcasa-build") {
 
     stage("Red Hat certification (cloudcasa-velero)") {
         if (buildCloudcasaVelero && isProductionFlow) {
-            def ocpCertComponentId = env.OCP_CERT_CLOUDCASA_VELERO_COMPONENT_ID
-            def quayCertImage = "quay.io/redhat-isv-containers/${ocpCertComponentId}:${cloudcasaVeleroTag}"
             def sourceImage = "${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}"
 
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
@@ -282,6 +280,11 @@ node("cloudcasa-build") {
                 ),
                 string(credentialsId: 'pyxis-api-token', variable: 'PFLT_PYXIS_API_TOKEN')
             ]) {
+                // Quay ISV robot accounts are named "redhat-isv-containers+<component-id>-robot";
+                // pull the component ID from there instead of duplicating it in a constant/env var.
+                def ocpCertComponentId = (env.QUAY_USER =~ /^redhat-isv-containers\+(.+)-robot$/)[0][1]
+                def quayCertImage = "quay.io/redhat-isv-containers/${ocpCertComponentId}:${cloudcasaVeleroTag}"
+
                 docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
                     sh """
                         set -eu
