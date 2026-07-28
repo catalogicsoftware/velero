@@ -267,6 +267,45 @@ node("cloudcasa-build") {
         }
     }
 
+    stage("Red Hat certification (cloudcasa-velero)") {
+        if (buildCloudcasaVelero && isProductionFlow) {
+            def ocpCertComponentId = env.OCP_CERT_CLOUDCASA_VELERO_COMPONENT_ID
+            def quayCertImage = "quay.io/redhat-isv-containers/${ocpCertComponentId}:${cloudcasaVeleroTag}"
+            def sourceImage = "${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}"
+
+            env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
+            withCredentials([
+                usernamePassword(
+                    credentialsId: 'quay-redhat-isv-cloudcasa-velero-robot',
+                    usernameVariable: 'QUAY_USER',
+                    passwordVariable: 'QUAY_PASS'
+                ),
+                string(credentialsId: 'pyxis-api-token', variable: 'PFLT_PYXIS_API_TOKEN')
+            ]) {
+                docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
+                    sh """
+                        set -eu
+                        echo \$QUAY_PASS | docker login -u \$QUAY_USER --password-stdin quay.io
+                        docker buildx imagetools create --tag ${quayCertImage} ${sourceImage}
+                    """
+                }
+
+                sh """
+                    set -eu
+                    docker run --rm \
+                        -v \${HOME}/.docker:/root/.docker:ro \
+                        -e PFLT_PYXIS_API_TOKEN=\$PFLT_PYXIS_API_TOKEN \
+                        quay.io/opdev/preflight:stable check container \
+                        --certification-component-id ${ocpCertComponentId} \
+                        --loglevel debug \
+                        -d /root/.docker/config.json \
+                        ${quayCertImage} \
+                        --submit
+                """
+            }
+        }
+    }
+
     stage("Prepare deployment repo") {
         if (buildCloudcasaVelero && runPrepareRepo) {
             withCredentials([
