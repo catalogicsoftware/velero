@@ -81,6 +81,9 @@ node("cloudcasa-build") {
     def veleroTag = "v${baseVersion}-${branchTag}.${env.BUILD_NUMBER}"
     def cloudcasaVeleroTag = "${baseVersion}-${branchTag}.${env.BUILD_NUMBER}"
 
+    // OpenShift / Red Hat certification component ID for cloudcasa-velero (from connect.redhat.com project)
+    def ocpCertCloudcasaVeleroComponentId = "TODO-fill-in-component-id-from-connect.redhat.com"
+
     def dockerRegistryInternal = env.DOCKER_REGISTRY_INTERNAL
     def dockerRegistryCredsInternal = env.DOCKER_REGISTRY_CREDENTIALS_INTERNAL
     def dockerPrefixInternal = "${dockerRegistryInternal}/catalogicsoftware"
@@ -269,7 +272,7 @@ node("cloudcasa-build") {
 
     stage("Red Hat certification (cloudcasa-velero)") {
         if (buildCloudcasaVelero && isProductionFlow) {
-            def ocpCertComponentId = env.OCP_CERT_CLOUDCASA_VELERO_COMPONENT_ID
+            def ocpCertComponentId = ocpCertCloudcasaVeleroComponentId
             def quayCertImage = "quay.io/redhat-isv-containers/${ocpCertComponentId}:${cloudcasaVeleroTag}"
             def sourceImage = "${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}"
 
