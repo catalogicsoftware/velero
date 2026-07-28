@@ -272,7 +272,7 @@ node("cloudcasa-build") {
 
     stage("Red Hat certification (cloudcasa-velero)") {
         if (buildCloudcasaVelero && isProductionFlow) {
-            def ocpCertComponentId = ocpCertCloudcasaVeleroComponentId
+            def ocpCertComponentId = env.OCP_CERT_CLOUDCASA_VELERO_COMPONENT_ID
             def quayCertImage = "quay.io/redhat-isv-containers/${ocpCertComponentId}:${cloudcasaVeleroTag}"
             def sourceImage = "${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}"
 
