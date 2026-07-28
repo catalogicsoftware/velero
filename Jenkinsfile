@@ -274,6 +274,11 @@ node("cloudcasa-build") {
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
             withCredentials([
                 usernamePassword(
+                    credentialsId: dockerRegistryCredsInternal,
+                    usernameVariable: 'INTERNAL_USER',
+                    passwordVariable: 'INTERNAL_PASS'
+                ),
+                usernamePassword(
                     credentialsId: 'quay-redhat-isv-cloudcasa-velero-robot',
                     usernameVariable: 'QUAY_USER',
                     passwordVariable: 'QUAY_PASS'
@@ -285,13 +290,15 @@ node("cloudcasa-build") {
                 def ocpCertComponentId = (env.QUAY_USER =~ /^redhat-isv-containers\+(.+)-robot$/)[0][1]
                 def quayCertImage = "quay.io/redhat-isv-containers/${ocpCertComponentId}:${cloudcasaVeleroTag}"
 
-                docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
-                    sh """
-                        set -eu
-                        echo \$QUAY_PASS | docker login -u \$QUAY_USER --password-stdin quay.io
-                        docker buildx imagetools create --tag ${quayCertImage} ${sourceImage}
-                    """
-                }
+                // Plain `docker login` calls (not docker.withRegistry, which scopes logins to its
+                // own isolated config and never touches $HOME/.docker/config.json) so both this
+                // registry auth and the preflight run below share the same real docker config.
+                sh """
+                    set -eu
+                    echo \$INTERNAL_PASS | docker login -u \$INTERNAL_USER --password-stdin ${dockerRegistryInternal}
+                    echo \$QUAY_PASS | docker login -u \$QUAY_USER --password-stdin quay.io
+                    docker buildx imagetools create --tag ${quayCertImage} ${sourceImage}
+                """
 
                 sh """
                     set -eu
