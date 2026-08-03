@@ -64,7 +64,7 @@ type pvcBackupItemAction struct {
 
 // liveCopyDrivers is a list of drivers for which we will skip creating the snapshot and will copy data live
 // Must match liveCopyDrivers in amdslib/utils/utils.go
-var liveCopyDrivers = []string{"nfs.csi.k8s.io", "efs.csi.aws.com", "driver.longhorn.io", "linodebs.csi.linode.com",
+var liveCopyDrivers = []string{"nfs.csi.k8s.io", "efs.csi.aws.com", "linodebs.csi.linode.com",
 	"rancher.io/local-path", "k8s.io/minikube-hostpath", "smb.csi.k8s.io"}
 
 // AppliesTo returns information indicating that the PVCBackupItemAction
@@ -659,35 +659,14 @@ func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolume
 		return false, errors.Wrap(err, "error getting plugin config")
 	}
 
-	if config.SnapshotLonghorn && (provisioner == "driver.longhorn.io") {
-		p.log.Infof("Longhorn PVC %s/%s will be snapshotted as SnapshotLonghorn is set", pvc.Namespace, pvc.Name)
-		return false, nil
-	}
+	var setBackupMethod string
+	var isBackupMethodSet bool
+	var storageClassName string
 
-	// Skip snapshot for Azure Files NFS volumes
-	if provisioner == "file.csi.azure.com" && pvc.Spec.StorageClassName != nil {
-		// Get the StorageClass to find the "protocol" parameter
-		storageClass := &storagev1api.StorageClass{}
-		if err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Name: *pvc.Spec.StorageClassName}, storageClass); err != nil {
-			return false, errors.Wrapf(err, "error getting StorageClass %s for PVC %s/%s", *pvc.Spec.StorageClassName, pvc.Namespace, pvc.Name)
-		}
-		if storageClass.Parameters != nil {
-			if protocol, exists := storageClass.Parameters["protocol"]; exists && protocol == "nfs" {
-				p.log.Infof("Skipping snapshot of PVC %s/%s with NFS protocol as it will be backed up LIVE", pvc.Namespace, pvc.Name)
-				return true, nil
-			}
-		}
+	if pvc.Spec.StorageClassName != nil {
+		storageClassName = *pvc.Spec.StorageClassName
+		setBackupMethod, isBackupMethodSet = config.StorageClassBackupMethodMap[storageClassName]
 	}
-
-	for _, driver := range liveCopyDrivers {
-		if provisioner == driver {
-			p.log.Infof("PVC %s/%s, associated PV %s with provisioner %s is not supported for snapshotting", pvc.Namespace, pvc.Name,
-				pvName, provisioner)
-			return true, nil
-		}
-	}
-
-	setBackupMethod, isBackupMethodSet := config.StorageClassBackupMethodMap[*pvc.Spec.StorageClassName]
 
 	annotations := pvc.GetAnnotations()
 	if backupMethod, found := annotations["cloudcasa.io/backup-method"]; found {
@@ -712,7 +691,30 @@ func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolume
 
 		if strings.HasPrefix(setBackupMethod, "LIVE") {
 			p.log.Infof("Skipping snapshot of PVC %s/%s with storage class %s and backup method %s", pvc.Namespace, pvc.Name,
-				*pvc.Spec.StorageClassName, setBackupMethod)
+				storageClassName, setBackupMethod)
+			return true, nil
+		}
+	}
+
+	// Skip snapshot for Azure Files NFS volumes
+	if provisioner == "file.csi.azure.com" && storageClassName != "" {
+		// Get the StorageClass to find the "protocol" parameter
+		storageClass := &storagev1api.StorageClass{}
+		if err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Name: storageClassName}, storageClass); err != nil {
+			return false, errors.Wrapf(err, "error getting StorageClass %s for PVC %s/%s", storageClassName, pvc.Namespace, pvc.Name)
+		}
+		if storageClass.Parameters != nil {
+			if protocol, exists := storageClass.Parameters["protocol"]; exists && protocol == "nfs" {
+				p.log.Infof("Skipping snapshot of PVC %s/%s with NFS protocol as it will be backed up LIVE", pvc.Namespace, pvc.Name)
+				return true, nil
+			}
+		}
+	}
+
+	for _, driver := range liveCopyDrivers {
+		if provisioner == driver {
+			p.log.Infof("PVC %s/%s, associated PV %s with provisioner %s is not supported for snapshotting", pvc.Namespace, pvc.Name,
+				pvName, provisioner)
 			return true, nil
 		}
 	}
