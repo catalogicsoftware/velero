@@ -88,8 +88,10 @@ node("cloudcasa-build") {
     def dockerRegistryCredsExternal = env.DOCKER_REGISTRY_CREDENTIALS_EXTERNAL ?: "docker.io-docker-registry"
     def dockerPrefixExternal = env.DOCKER_PREFIX_EXTERNAL ?: "catalogicsoftware"
 
-    def buildVelero = (params["${buildParamPrefix}VELERO"] ?: false) && isReleaseFlow
-    def buildCloudcasaVelero = (params["${buildParamPrefix}CLOUDCASA_VELERO"] ?: false) && isReleaseFlow
+    // Build on every branch; only master/production (isReleaseFlow) push to the
+    // deployment repo below, gated separately via runPrepareRepo.
+    def buildVelero = (params["${buildParamPrefix}VELERO"] ?: false)
+    def buildCloudcasaVelero = (params["${buildParamPrefix}CLOUDCASA_VELERO"] ?: false)
     def runPrepareRepo = isReleaseFlow || (params.PREPARE_REPO_FORCE_MASTER_SCOPE ? params.PREPARE_REPO_FORCE_MASTER_SCOPE.toBoolean() : false)
     def prepareRepoDryRun = params.PREPARE_REPO_DRY_RUN ? params.PREPARE_REPO_DRY_RUN.toBoolean() : false
 
