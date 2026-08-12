@@ -101,6 +101,12 @@ const (
 	// ExcludeFromBackupLabel is the label to exclude k8s resource from backup,
 	// even if the resource contains a matching selector label.
 	ExcludeFromBackupLabel = "velero.io/exclude-from-backup"
+
+	// ObjectLockAnnotation is set on a BackupStorageLocation by the CloudCasa
+	// agent when the objectstore has an immutability (object lock) policy
+	// enabled. Deletion of objects in such a store is bound to fail, so
+	// controllers skip object storage deletions when this is "true".
+	ObjectLockAnnotation = "cloudcasa.io/object-lock"
 )
 
 type AsyncOperationIDPrefix string

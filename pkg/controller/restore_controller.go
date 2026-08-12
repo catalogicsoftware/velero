@@ -753,6 +753,13 @@ func (r *restoreReconciler) deleteExternalResources(restore *api.Restore) error 
 		return errors.Wrap(err, fmt.Sprintf("can't get backup info, backup: %s", restore.Spec.BackupName))
 	}
 
+	// The objectstore is immutable, so deleting the restore files is bound
+	// to fail. Skip the delete calls altogether.
+	if backupInfo.location.GetAnnotations()[api.ObjectLockAnnotation] == "true" {
+		r.logger.Info("Immutable policy is enabled for this objectstore, skipping deletion of restore files in object storage")
+		return nil
+	}
+
 	// delete restore files in object storage
 	pluginManager := r.newPluginManager(r.logger)
 	defer pluginManager.CleanupClients()
@@ -765,17 +772,8 @@ func (r *restoreReconciler) deleteExternalResources(restore *api.Restore) error 
 	// Actual call to delete restore files
 	err = backupStore.DeleteRestore(restore.Name)
 	if err != nil {
-		errStr := err.Error()
-
-		// Azure: Blob is immutable
-		if strings.Contains(errStr, "BlobImmutableDueToPolicy") {
-			r.logger.WithError(err).Warn("Azure Blob is immutable due to Object Lock. Skipping delete and not retrying.")
-			return nil
-		}
-
-		// S3: Access denied due to Object Lock
-		if strings.Contains(errStr, "AccessDenied") && strings.Contains(errStr, "Object Lock") {
-			r.logger.WithError(err).Warn("S3 object is protected by Object Lock. Skipping delete and not retrying.")
+		if isObjectLockError(err) {
+			r.logger.WithError(err).Warn("Restore files are protected by an immutability policy. Skipping delete and not retrying.")
 			return nil
 		}
 

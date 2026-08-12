@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
@@ -390,9 +391,17 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	if backupStore != nil {
-		log.Info("Removing backup from backup storage")
-		if err := backupStore.DeleteBackup(backup.Name); err != nil {
-			errs = append(errs, err.Error())
+		if location.GetAnnotations()[velerov1api.ObjectLockAnnotation] == "true" {
+			log.Info("Immutable policy is enabled for this objectstore, skipping removal of backup data from backup storage")
+		} else {
+			log.Info("Removing backup from backup storage")
+			if err := backupStore.DeleteBackup(backup.Name); err != nil {
+				if isObjectLockError(err) {
+					log.WithError(err).Warn("Backup storage objects are protected by an immutability policy. Skipping delete and not retrying.")
+				} else {
+					errs = append(errs, err.Error())
+				}
+			}
 		}
 	}
 
@@ -702,4 +711,21 @@ func batchDeleteSnapshots(ctx context.Context, repoEnsurer *repository.Ensurer, 
 	}
 
 	return errs
+}
+
+// isObjectLockError reports whether err indicates that object storage
+// rejected a delete because of an immutability (object lock) policy.
+func isObjectLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+
+	// Azure: Blob is immutable
+	if strings.Contains(errStr, "BlobImmutableDueToPolicy") {
+		return true
+	}
+
+	// S3: Access denied due to Object Lock
+	return strings.Contains(errStr, "AccessDenied") && strings.Contains(errStr, "Object Lock")
 }
