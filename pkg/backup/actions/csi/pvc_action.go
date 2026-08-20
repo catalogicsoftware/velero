@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/pkg/errors"
@@ -49,6 +51,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/csi"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
+	kubevirtutil "github.com/vmware-tanzu/velero/pkg/util/kubevirt"
 
 	// Add this:
 	snapshotterclientset "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned"
@@ -60,6 +63,14 @@ type pvcBackupItemAction struct {
 	log            logrus.FieldLogger
 	crClient       crclient.Client
 	snapshotClient snapshotter.SnapshotV1Interface
+
+	cbtVmPvcsCache      map[string]cbtVmPvcsCacheEntry // keyed by job ID and namespace
+	cbtVmPvcsCacheMutex sync.Mutex
+}
+
+type cbtVmPvcsCacheEntry struct {
+	pvcSet  map[string]bool
+	created time.Time
 }
 
 // liveCopyDrivers is a list of drivers for which we will skip creating the snapshot and will copy data live
@@ -659,6 +670,18 @@ func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolume
 		return false, errors.Wrap(err, "error getting plugin config")
 	}
 
+	if !config.KubevirtCbtDisabled {
+		cbtVmPvcs, err := p.runningCbtVmPvcs(context.TODO(), jobID, pvc.Namespace)
+		if err != nil {
+			return false, err
+		}
+		if cbtVmPvcs[pvc.Name] {
+			p.log.Infof("Skipping snapshot of PVC %s/%s because it is a running KubeVirt VM disk backed up using CBT",
+				pvc.Namespace, pvc.Name)
+			return true, nil
+		}
+	}
+
 	var setBackupMethod string
 	var isBackupMethodSet bool
 	var storageClassName string
@@ -725,4 +748,39 @@ func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolume
 	}
 
 	return false, nil
+}
+
+// runningCbtVmPvcs returns the set of PVC names that back a disk of a running KubeVirt VM that has CBT enabled
+func (p *pvcBackupItemAction) runningCbtVmPvcs(ctx context.Context, jobID string, namespace string) (map[string]bool, error) {
+	p.cbtVmPvcsCacheMutex.Lock()
+	defer p.cbtVmPvcsCacheMutex.Unlock()
+
+	cacheKey := fmt.Sprintf("%s/%s", jobID, namespace)
+
+	if p.cbtVmPvcsCache != nil {
+		for key, entry := range p.cbtVmPvcsCache {
+			cacheExpiration := entry.created.Add(time.Hour)
+			if time.Now().After(cacheExpiration) {
+				delete(p.cbtVmPvcsCache, key)
+			}
+		}
+
+		if entry, found := p.cbtVmPvcsCache[cacheKey]; found {
+			return entry.pvcSet, nil
+		}
+	} else {
+		p.cbtVmPvcsCache = make(map[string]cbtVmPvcsCacheEntry)
+	}
+
+	pvcSet, err := kubevirtutil.RunningCbtVmPvcs(ctx, p.crClient, namespace)
+	if err != nil {
+		return nil, errors.Wrapf(err, "error listing running CBT-enabled KubeVirt VM disks in namespace %s", namespace)
+	}
+
+	p.cbtVmPvcsCache[cacheKey] = cbtVmPvcsCacheEntry{
+		pvcSet:  pvcSet,
+		created: time.Now(),
+	}
+
+	return pvcSet, nil
 }

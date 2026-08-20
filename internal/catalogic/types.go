@@ -21,6 +21,7 @@ type PluginConfig struct {
 	SnapshotWherePossible       bool
 	CsiSnapshotTimeout          int
 	StorageClassBackupMethodMap map[string]string
+	KubevirtCbtDisabled         bool
 }
 
 const (

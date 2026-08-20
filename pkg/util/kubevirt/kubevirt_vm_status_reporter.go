@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 
@@ -529,4 +530,51 @@ func KubeVirtVMAdditionalResourceOpResult(
 	if updateErr != nil {
 		log.Errorf("Error updating ConfigMap %s for additional resource %s/%s %s result: %v", configMapName, groupResource.String(), resName, jobType, updateErr)
 	}
+}
+
+// RunningCbtVmPvcs returns the PVC names of a running, CBT enabled KubeVirt VM
+func RunningCbtVmPvcs(ctx context.Context, kubeClient kbClient.Client, namespace string) (map[string]bool, error) {
+	vmList := &unstructured.UnstructuredList{}
+	vmList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   kubeVirtGroup,
+		Version: "v1",
+		Kind:    "VirtualMachineList",
+	})
+
+	if err := kubeClient.List(ctx, vmList, kbClient.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("listing KubeVirt VirtualMachines in namespace %s: %w", namespace, err)
+	}
+
+	pvcs := make(map[string]bool)
+	for i := range vmList.Items {
+		if ready, found, _ := unstructured.NestedBool(vmList.Items[i].Object, "status", "ready"); !found || !ready {
+			continue
+		}
+
+		if cbtState, found, _ := unstructured.NestedString(vmList.Items[i].Object, "status", "changedBlockTracking", "state"); !found || cbtState != "Enabled" {
+			continue
+		}
+
+		volumes, volumesFound, err := unstructured.NestedSlice(vmList.Items[i].Object, "spec", "template", "spec", "volumes")
+		if err != nil || !volumesFound {
+			continue
+		}
+
+		for _, v := range volumes {
+			volume, ok := v.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			if name, found, _ := unstructured.NestedString(volume, "dataVolume", "name"); found {
+				pvcs[name] = true
+			}
+
+			if claimName, found, _ := unstructured.NestedString(volume, "persistentVolumeClaim", "claimName"); found {
+				pvcs[claimName] = true
+			}
+		}
+	}
+
+	return pvcs, nil
 }

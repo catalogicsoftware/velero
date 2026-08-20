@@ -197,10 +197,22 @@ func GetPluginConfig(jobID string, log logrus.FieldLogger) (*PluginConfig, error
 		log.Info("Storage class backup method is set", "method", storageClassBackupMethodMap)
 	}
 
+	kubevirtCbtDisabledString := string(configMap.BinaryData["kubevirtCbtDisabled"])
+	kubevirtCbtDisabled, err := strconv.ParseBool(kubevirtCbtDisabledString)
+	if err != nil {
+		log.Error(errors.Wrapf(err, "Failed to parse kubevirtCbtDisabled value %q from %q", kubevirtCbtDisabledString,
+			veleroCsiPluginConfigMapName))
+		return nil, err
+	}
+	if !kubevirtCbtDisabled {
+		log.Info("KubeVirt CBT is enabled; VM disk PVCs will be backed up live")
+	}
+
 	return &PluginConfig{
 		SnapshotWherePossible:       snapshotWherePossible,
 		CsiSnapshotTimeout:          csiSnapshotTimeout,
 		StorageClassBackupMethodMap: storageClassBackupMethodMap,
+		KubevirtCbtDisabled:         kubevirtCbtDisabled,
 	}, nil
 }
 
