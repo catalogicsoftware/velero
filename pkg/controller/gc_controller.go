@@ -33,6 +33,7 @@ import (
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	pkgbackup "github.com/vmware-tanzu/velero/pkg/backup"
 	veleroclient "github.com/vmware-tanzu/velero/pkg/client"
+	"github.com/vmware-tanzu/velero/pkg/instance"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
 )
@@ -77,6 +78,7 @@ func NewGCReconciler(
 func (c *gcReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	s := kube.NewPeriodicalEnqueueSource(c.logger, mgr.GetClient(), &velerov1api.BackupList{}, c.frequency, kube.PeriodicalEnqueueSourceOption{})
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Backup{}, builder.WithPredicates(predicate.Funcs{
 			UpdateFunc: func(ue event.UpdateEvent) bool {
 				return false
@@ -109,6 +111,9 @@ func (c *gcReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting backup %s", req.String())
+	}
+	if skipForeign(log, backup) {
+		return ctrl.Result{}, nil
 	}
 	log.Debugf("backup: %s", backup.Name)
 
@@ -188,6 +193,10 @@ func (c *gcReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 	log.Info("Creating a new deletion request")
 	ndbr := pkgbackup.NewDeleteBackupRequest(backup.Name, string(backup.UID))
 	ndbr.SetNamespace(backup.Namespace)
+	// The request must stay with the engine instance that owns the backup.
+	if id, ok := backup.Labels[instance.LabelKey]; ok {
+		ndbr.Labels[instance.LabelKey] = id
+	}
 	if err := veleroclient.CreateRetryGenerateName(c, ctx, ndbr); err != nil {
 		log.WithError(err).Error("error creating DeleteBackupRequests")
 		return ctrl.Result{}, errors.Wrap(err, "error creating DeleteBackupRequest")
