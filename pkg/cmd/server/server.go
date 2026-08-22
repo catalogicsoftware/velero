@@ -67,6 +67,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/controller"
 	velerodiscovery "github.com/vmware-tanzu/velero/pkg/discovery"
 	"github.com/vmware-tanzu/velero/pkg/features"
+	"github.com/vmware-tanzu/velero/pkg/instance"
 	"github.com/vmware-tanzu/velero/pkg/itemoperationmap"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/nodeagent"
@@ -272,6 +273,7 @@ type server struct {
 	// resources in the namespace where Velero is installed, or the cluster-scoped
 	// resources. The crClient doesn't have the limitation.
 	crClient              ctrlclient.Client
+	instanceScope         instance.Scope
 	ctx                   context.Context
 	cancelFunc            context.CancelFunc
 	logger                logrus.FieldLogger
@@ -366,12 +368,28 @@ func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*s
 
 	ctrl.SetLogger(logrusr.New(logger))
 
+	// Scope this engine to one job's CRs (or, for the shared engine, to CRs
+	// without an instance label) at the cache level and in every controller.
+	instanceScope := instance.FromEnv()
+	logger.Infof("Engine CR scope: %s", instanceScope)
+	controller.SetInstanceScope(instanceScope)
+
 	mgr, err := ctrl.NewManager(clientConfig, ctrl.Options{
 		Scheme: scheme,
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{
 				f.Namespace(): {},
 			},
+			ByObject: instanceScope.ByObject(
+				f.Namespace(),
+				&velerov1api.Backup{},
+				&velerov1api.Restore{},
+				&velerov1api.DeleteBackupRequest{},
+				&velerov1api.BackupStorageLocation{},
+				&velerov1api.VolumeSnapshotLocation{},
+				&velerov1api.DownloadRequest{},
+				&velerov1api.Schedule{},
+			),
 		},
 	})
 	if err != nil {
@@ -410,6 +428,7 @@ func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*s
 		discoveryClient:       discoveryClient,
 		dynamicClient:         dynamicClient,
 		crClient:              crClient,
+		instanceScope:         instanceScope,
 		ctx:                   ctx,
 		cancelFunc:            cancelFunc,
 		logger:                logger,
