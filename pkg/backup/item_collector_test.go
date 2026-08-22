@@ -28,9 +28,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
+	"github.com/vmware-tanzu/velero/pkg/instance"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	"github.com/vmware-tanzu/velero/pkg/test"
 	"github.com/vmware-tanzu/velero/pkg/util/collections"
@@ -276,4 +278,21 @@ func TestItemCollectorBackupNamespaces(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A per-job engine must never collect engine CRs: the collector's dynamic
+// client bypasses the instance-scoped cache. The early return must fire
+// before any collaborator is touched, hence the empty itemCollector.
+func TestGetResourceItemsSkipsEngineGroupForInstancedEngine(t *testing.T) {
+	t.Setenv(instance.EnvName, "job-a")
+	r := &itemCollector{}
+
+	items, err := r.getResourceItems(
+		logrus.New(),
+		schema.GroupVersion{Group: velerov1api.SchemeGroupVersion.Group, Version: "v1"},
+		metav1.APIResource{Name: "backups", Namespaced: true},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, items)
 }

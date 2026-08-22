@@ -490,18 +490,25 @@ func (s *server) setupBeforeControllerRun() error {
 		return errors.WithStack(err)
 	}
 
-	markInProgressCRsFailed(s.ctx, client, s.namespace, s.logger)
+	markInProgressCRsFailed(s.ctx, client, s.namespace, s.instanceScope, s.logger)
 
-	if err := setDefaultBackupLocation(s.ctx, client, s.namespace, s.config.defaultBackupLocation, s.logger); err != nil {
+	if err := setDefaultBackupLocation(s.ctx, client, s.namespace, s.config.defaultBackupLocation, s.instanceScope, s.logger); err != nil {
 		return err
 	}
 	return nil
 }
 
 // setDefaultBackupLocation set the BSL that matches the "velero server --default-backup-storage-location"
-func setDefaultBackupLocation(ctx context.Context, client ctrlclient.Client, namespace, defaultBackupLocation string, logger logrus.FieldLogger) error {
+func setDefaultBackupLocation(ctx context.Context, client ctrlclient.Client, namespace, defaultBackupLocation string, scope instance.Scope, logger logrus.FieldLogger) error {
 	if defaultBackupLocation == "" {
 		logger.Debug("No default backup storage location specified. Velero will not automatically select a backup storage location for new backups.")
+		return nil
+	}
+
+	// A per-job engine addresses its storage location by name and never
+	// manages the shared default one.
+	if scope.Instanced() {
+		logger.Debug("Instanced engine, skipping default backup storage location handling")
 		return nil
 	}
 
@@ -513,6 +520,11 @@ func setDefaultBackupLocation(ctx context.Context, client ctrlclient.Client, nam
 		} else {
 			return errors.WithStack(err)
 		}
+	}
+
+	if !scope.Owns(backupLocation) {
+		logger.WithField("backupStorageLocation", defaultBackupLocation).Debug("Default backup storage location belongs to another engine instance, skipping")
+		return nil
 	}
 
 	if !backupLocation.Spec.Default {
@@ -1091,15 +1103,17 @@ func (s *server) runProfiler() {
 
 // if there is a restarting during the reconciling of backups/restores/etc, these CRs may be stuck in progress status
 // markInProgressCRsFailed tries to mark the in progress CRs as failed when starting the server to avoid the issue
-func markInProgressCRsFailed(ctx context.Context, client ctrlclient.Client, namespace string, log logrus.FieldLogger) {
-	markInProgressBackupsFailed(ctx, client, namespace, log)
+func markInProgressCRsFailed(ctx context.Context, client ctrlclient.Client, namespace string, scope instance.Scope, log logrus.FieldLogger) {
+	markInProgressBackupsFailed(ctx, client, namespace, scope, log)
 
-	markInProgressRestoresFailed(ctx, client, namespace, log)
+	markInProgressRestoresFailed(ctx, client, namespace, scope, log)
 }
 
-func markInProgressBackupsFailed(ctx context.Context, client ctrlclient.Client, namespace string, log logrus.FieldLogger) {
+func markInProgressBackupsFailed(ctx context.Context, client ctrlclient.Client, namespace string, scope instance.Scope, log logrus.FieldLogger) {
 	backups := &velerov1api.BackupList{}
-	if err := client.List(ctx, backups, &ctrlclient.ListOptions{Namespace: namespace}); err != nil {
+	// The direct client bypasses the scoped cache, so filter here: another
+	// instance's in-progress backups are its own healthy business.
+	if err := client.List(ctx, backups, &ctrlclient.ListOptions{Namespace: namespace}, scope.ListOption()); err != nil {
 		log.WithError(errors.WithStack(err)).Error("failed to list backups")
 		return
 	}
@@ -1122,9 +1136,9 @@ func markInProgressBackupsFailed(ctx context.Context, client ctrlclient.Client, 
 	}
 }
 
-func markInProgressRestoresFailed(ctx context.Context, client ctrlclient.Client, namespace string, log logrus.FieldLogger) {
+func markInProgressRestoresFailed(ctx context.Context, client ctrlclient.Client, namespace string, scope instance.Scope, log logrus.FieldLogger) {
 	restores := &velerov1api.RestoreList{}
-	if err := client.List(ctx, restores, &ctrlclient.ListOptions{Namespace: namespace}); err != nil {
+	if err := client.List(ctx, restores, &ctrlclient.ListOptions{Namespace: namespace}, scope.ListOption()); err != nil {
 		log.WithError(errors.WithStack(err)).Error("failed to list restores")
 		return
 	}
