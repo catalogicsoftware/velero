@@ -34,8 +34,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/pager"
 
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	"github.com/vmware-tanzu/velero/pkg/discovery"
+	"github.com/vmware-tanzu/velero/pkg/instance"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	"github.com/vmware-tanzu/velero/pkg/util/collections"
@@ -364,6 +366,14 @@ func (r *itemCollector) getResourceItems(
 		gvr = gv.WithResource(resource.Name)
 		gr  = gvr.GroupResource()
 	)
+
+	// A per-job engine never captures engine CRs: the collector's dynamic
+	// client bypasses the instance-scoped cache, so backing them up could
+	// read other instances' resources.
+	if instance.FromEnv().Instanced() && gv.Group == velerov1api.SchemeGroupVersion.Group {
+		log.Info("Skipping resource: engine resources are not backed up by a per-job engine")
+		return nil, nil
+	}
 
 	orders := getOrderedResourcesForType(
 		r.backupRequest.Backup.Spec.OrderedResources,
