@@ -466,6 +466,13 @@ func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*s
 		credentialSecretStore: credentialSecretStore,
 	}
 
+	// Tell the agent this engine understands instance scoping. An image built
+	// before it never writes this, and the agent refuses to hand such an engine
+	// a job rather than let two engines process the same resources.
+	if err := instance.AnnouncePodCapability(ctx, kubeClient, f.Namespace(), instanceScope); err != nil {
+		logger.WithError(err).Warn("Could not announce the engine scope on this pod")
+	}
+
 	return s, nil
 }
 

@@ -17,6 +17,7 @@ limitations under the License.
 package instance
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -24,10 +25,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 func labeled(id string) client.Object {
@@ -174,5 +176,36 @@ func TestByObjectModesAppliesThePerKindSelector(t *testing.T) {
 		if ns.LabelSelector.String() != want {
 			t.Fatalf("%T: namespace selector %q, want %q", obj, ns.LabelSelector, want)
 		}
+	}
+}
+
+func TestAnnouncePodCapabilityStampsThePod(t *testing.T) {
+	t.Setenv(PodNameEnv, "cc-helper-job-1")
+	t.Setenv(PodNamespaceEnv, "cloudcasa-io")
+
+	client := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "cc-helper-job-1", Namespace: "cloudcasa-io"},
+	})
+
+	if err := AnnouncePodCapability(context.Background(), client, "ignored", New("job-1")); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+
+	pod, err := client.CoreV1().Pods("cloudcasa-io").Get(context.Background(), "cc-helper-job-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if got := pod.Annotations[CapabilityAnnotation]; got != "true" {
+		t.Fatalf("capability annotation %q, want \"true\"", got)
+	}
+	if got := pod.Annotations[InstanceAnnotation]; got != "job-1" {
+		t.Fatalf("instance annotation %q, want \"job-1\"", got)
+	}
+}
+
+func TestAnnouncePodCapabilityNeedsThePodName(t *testing.T) {
+	t.Setenv(PodNameEnv, "")
+	if err := AnnouncePodCapability(context.Background(), fake.NewSimpleClientset(), "cloudcasa-io", New("")); err == nil {
+		t.Fatal("expected an error when the pod name is unknown")
 	}
 }

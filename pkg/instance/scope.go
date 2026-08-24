@@ -20,12 +20,16 @@ limitations under the License.
 package instance
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -166,4 +170,48 @@ func (s Scope) ByObjectModes(namespace string, modes map[client.Object]KindMode)
 		}
 	}
 	return byObject
+}
+
+const (
+	// CapabilityAnnotation is set by this engine on its own pod at startup, so
+	// the agent can tell an engine that understands instance scoping from one
+	// built before it existed. An image without this code never writes it, and
+	// that absence is the whole signal — no version string to parse.
+	CapabilityAnnotation = "cloudcasa.io/engine-instance-scope"
+
+	// InstanceAnnotation records the scope this engine resolved, for support.
+	InstanceAnnotation = "cloudcasa.io/engine-instance-id"
+
+	// PodNameEnv names the pod this engine runs in.
+	PodNameEnv = "MY_POD_NAME"
+
+	// PodNamespaceEnv names its namespace.
+	PodNamespaceEnv = "MY_POD_NAMESPACE"
+)
+
+// AnnouncePodCapability records on this engine's own pod that it understands
+// instance scoping, and which scope it resolved.
+//
+// Best effort by design: an engine that cannot annotate itself should still
+// serve its job. The agent treats a missing annotation as an engine too old to
+// isolate one job's resources from another's, and refuses to hand it work
+// before creating anything bound to an instance.
+func AnnouncePodCapability(ctx context.Context, client kubernetes.Interface, namespace string, scope Scope) error {
+	podName := os.Getenv(PodNameEnv)
+	if podName == "" {
+		return fmt.Errorf("instance: %s is not set, cannot announce the engine capability", PodNameEnv)
+	}
+	if fromEnv := os.Getenv(PodNamespaceEnv); fromEnv != "" {
+		namespace = fromEnv
+	}
+
+	patch := fmt.Sprintf(
+		`{"metadata":{"annotations":{%q:"true",%q:%q}}}`,
+		CapabilityAnnotation, InstanceAnnotation, scope.ID())
+	_, err := client.CoreV1().Pods(namespace).Patch(
+		ctx, podName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("instance: could not annotate pod %s/%s: %w", namespace, podName, err)
+	}
+	return nil
 }
