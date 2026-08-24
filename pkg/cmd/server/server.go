@@ -289,6 +289,41 @@ type server struct {
 	credentialSecretStore credentials.SecretStore
 }
 
+// kindModes decides, per kind, whether this engine owns the objects bound to
+// its instance or only reads the shared unlabelled ones.
+//
+// A kind whose controller is disabled is one this engine never reconciles, so
+// it can only be reading it: a restore refers to a stub backup, and both a
+// backup and a restore read a storage location. Those describe a recovery
+// point rather than a job, so several jobs share one copy and it carries no
+// instance label. Deriving the mode from the controller set keeps the two from
+// drifting apart.
+func kindModes(disabledControllers []string) map[ctrlclient.Object]instance.KindMode {
+	disabled := make(map[string]bool, len(disabledControllers))
+	for _, name := range disabledControllers {
+		disabled[name] = true
+	}
+	mode := func(controllerName string) instance.KindMode {
+		if disabled[controllerName] {
+			return instance.KindShared
+		}
+		return instance.KindOwned
+	}
+
+	return map[ctrlclient.Object]instance.KindMode{
+		&velerov1api.Backup{}:              mode(controller.Backup),
+		&velerov1api.Restore{}:             mode(controller.Restore),
+		&velerov1api.DeleteBackupRequest{}: mode(controller.BackupDeletion),
+		&velerov1api.DownloadRequest{}:     mode(controller.DownloadRequest),
+		&velerov1api.Schedule{}:            mode(controller.Schedule),
+		// Storage locations describe the recovery point, never a job, so they
+		// are always shared. Nothing in the backup or restore path reads their
+		// status, and there is no volume snapshot location controller at all.
+		&velerov1api.BackupStorageLocation{}:  instance.KindShared,
+		&velerov1api.VolumeSnapshotLocation{}: instance.KindShared,
+	}
+}
+
 func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*server, error) {
 	if err := uploader.ValidateUploaderType(config.uploaderType); err != nil {
 		return nil, err
@@ -380,16 +415,7 @@ func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*s
 			DefaultNamespaces: map[string]cache.Config{
 				f.Namespace(): {},
 			},
-			ByObject: instanceScope.ByObject(
-				f.Namespace(),
-				&velerov1api.Backup{},
-				&velerov1api.Restore{},
-				&velerov1api.DeleteBackupRequest{},
-				&velerov1api.BackupStorageLocation{},
-				&velerov1api.VolumeSnapshotLocation{},
-				&velerov1api.DownloadRequest{},
-				&velerov1api.Schedule{},
-			),
+			ByObject: instanceScope.ByObjectModes(f.Namespace(), kindModes(config.disabledControllers)),
 		},
 	})
 	if err != nil {
