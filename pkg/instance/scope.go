@@ -177,6 +177,9 @@ const (
 	// the agent can tell an engine that understands instance scoping from one
 	// built before it existed. An image without this code never writes it, and
 	// that absence is the whole signal — no version string to parse.
+	//
+	// The agent mirrors these two strings in amdslib/types, which is a
+	// separate module. Keep them identical.
 	CapabilityAnnotation = "cloudcasa.io/engine-instance-scope"
 
 	// InstanceAnnotation records the scope this engine resolved, for support.
