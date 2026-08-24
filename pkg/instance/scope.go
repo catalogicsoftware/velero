@@ -117,17 +117,52 @@ func (s Scope) Predicate() predicate.Predicate {
 	}
 }
 
+// KindMode says how an engine treats one resource kind.
+type KindMode int
+
+const (
+	// KindOwned is a kind the engine reconciles, so it sees only the objects
+	// bound to its own instance.
+	KindOwned KindMode = iota
+	// KindShared is a kind the engine only reads. Resources describing a
+	// recovery point rather than a job — a storage location, a volume
+	// snapshot location, the stub backup a restore or delete refers to — are
+	// shared by every job that reads that recovery point and therefore carry
+	// no instance label at all. An engine sees exactly the unlabelled ones,
+	// which is what the shared engine already sees.
+	KindShared
+)
+
+// SelectorFor is the label selector for a kind held in the given mode.
+func (s Scope) SelectorFor(mode KindMode) labels.Selector {
+	if mode == KindShared {
+		return absentSelector
+	}
+	return s.Selector()
+}
+
 // ByObject returns cache options that restrict the informers of the given
 // namespaced kinds, in namespace, to this scope, so cached reads never
-// return foreign CRs. The selector is set per namespace explicitly because
-// controller-runtime v0.17 ignores ByObject.Label once DefaultNamespaces
-// is configured.
+// return foreign CRs. Every kind is treated as owned; use ByObjectModes to
+// mark the ones this engine only reads. The selector is set per namespace
+// explicitly because controller-runtime v0.17 ignores ByObject.Label once
+// DefaultNamespaces is configured.
 func (s Scope) ByObject(namespace string, objects ...client.Object) map[client.Object]cache.ByObject {
-	byObject := make(map[client.Object]cache.ByObject, len(objects))
+	modes := make(map[client.Object]KindMode, len(objects))
 	for _, obj := range objects {
+		modes[obj] = KindOwned
+	}
+	return s.ByObjectModes(namespace, modes)
+}
+
+// ByObjectModes is ByObject with a mode chosen per kind.
+func (s Scope) ByObjectModes(namespace string, modes map[client.Object]KindMode) map[client.Object]cache.ByObject {
+	byObject := make(map[client.Object]cache.ByObject, len(modes))
+	for obj, mode := range modes {
+		selector := s.SelectorFor(mode)
 		byObject[obj] = cache.ByObject{
-			Label:      s.Selector(),
-			Namespaces: map[string]cache.Config{namespace: {LabelSelector: s.Selector()}},
+			Label:      selector,
+			Namespaces: map[string]cache.Config{namespace: {LabelSelector: selector}},
 		}
 	}
 	return byObject

@@ -25,6 +25,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
@@ -112,4 +114,65 @@ func TestListOption(t *testing.T) {
 	opts := &client.ListOptions{}
 	New("job-a").ListOption().ApplyToList(opts)
 	assert.Equal(t, LabelKey+"=job-a", opts.LabelSelector.String())
+}
+
+func TestSelectorForSharedKindIgnoresTheInstance(t *testing.T) {
+	labeled := labels.Set{LabelKey: "job-1"}
+	other := labels.Set{LabelKey: "job-2"}
+	unlabeled := labels.Set{}
+
+	// A shared kind carries no instance label, so every engine — instanced or
+	// not — selects exactly the unlabelled objects.
+	for _, scope := range []Scope{New(""), New("job-1")} {
+		shared := scope.SelectorFor(KindShared)
+		if !shared.Matches(unlabeled) {
+			t.Fatalf("%s: shared selector must match an unlabelled object", scope)
+		}
+		if shared.Matches(labeled) || shared.Matches(other) {
+			t.Fatalf("%s: shared selector must not match a labelled object", scope)
+		}
+	}
+
+	// An owned kind still isolates one instance from another.
+	owned := New("job-1").SelectorFor(KindOwned)
+	if !owned.Matches(labeled) {
+		t.Fatal("owned selector must match this instance's object")
+	}
+	if owned.Matches(other) || owned.Matches(unlabeled) {
+		t.Fatal("owned selector must match only this instance's object")
+	}
+}
+
+func TestByObjectModesAppliesThePerKindSelector(t *testing.T) {
+	scope := New("job-1")
+	shared := &velerov1api.BackupStorageLocation{}
+	owned := &velerov1api.Restore{}
+
+	byObject := scope.ByObjectModes("cloudcasa-io", map[client.Object]KindMode{
+		shared: KindShared,
+		owned:  KindOwned,
+	})
+
+	if len(byObject) != 2 {
+		t.Fatalf("expected an entry per kind, got %d", len(byObject))
+	}
+	for obj, mode := range map[client.Object]KindMode{shared: KindShared, owned: KindOwned} {
+		entry, ok := byObject[obj]
+		if !ok {
+			t.Fatalf("no cache entry for %T", obj)
+		}
+		want := scope.SelectorFor(mode).String()
+		if entry.Label.String() != want {
+			t.Fatalf("%T: label selector %q, want %q", obj, entry.Label, want)
+		}
+		// v0.17 ignores ByObject.Label once DefaultNamespaces is set, so the
+		// per-namespace selector has to carry the same restriction.
+		ns, ok := entry.Namespaces["cloudcasa-io"]
+		if !ok {
+			t.Fatalf("%T: no per-namespace config", obj)
+		}
+		if ns.LabelSelector.String() != want {
+			t.Fatalf("%T: namespace selector %q, want %q", obj, ns.LabelSelector, want)
+		}
+	}
 }
