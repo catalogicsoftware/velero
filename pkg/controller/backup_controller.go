@@ -154,6 +154,7 @@ func NewBackupReconciler(
 
 func (b *backupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Backup{}).
 		Complete(b)
 }
@@ -228,6 +229,9 @@ func (b *backupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		log.WithError(err).Error("error getting backup")
 		return ctrl.Result{}, err
+	}
+	if skipForeign(log, original) {
+		return ctrl.Result{}, nil
 	}
 
 	if original.Annotations["velero.io/backup-cancelled"] == "true" {

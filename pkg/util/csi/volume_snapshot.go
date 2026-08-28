@@ -960,6 +960,49 @@ func recreateVolumeSnapshotContent(
 // SnapshotHandle-ready phase, so it reacts immediately to reconciliation events.
 // The full csiSnapshotTimeout budget is shared across both phases via a single
 // context deadline.
+// annotateVSCWithPVC records on the VolumeSnapshotContent which PVC it came
+// from. The external snapshotter writes to the same object, so a conflicting
+// update is retried rather than reported.
+func annotateVSCWithPVC(
+	ctx context.Context,
+	crClient crclient.Client,
+	vsc *snapshotv1api.VolumeSnapshotContent,
+	boundVSCName string,
+	latestVS *snapshotv1api.VolumeSnapshot,
+	log logrus.FieldLogger,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := crClient.Get(ctx, crclient.ObjectKey{Name: boundVSCName}, vsc); err != nil {
+			return err
+		}
+		if vsc.Annotations == nil {
+			vsc.Annotations = make(map[string]string)
+		}
+		updated := false
+		if _, exists := vsc.Annotations["cc-pvc-name"]; !exists &&
+			latestVS.Spec.Source.PersistentVolumeClaimName != nil {
+			vsc.Annotations["cc-pvc-name"] = *latestVS.Spec.Source.PersistentVolumeClaimName
+			updated = true
+		}
+		if _, exists := vsc.Annotations["cc-pvc-namespace"]; !exists {
+			vsc.Annotations["cc-pvc-namespace"] = latestVS.Namespace
+			updated = true
+		}
+		if updated {
+			if err := crClient.Update(ctx, vsc); err != nil {
+				// The retry above absorbs a conflict, and a failure that outlasts
+				// it is reported by the caller. At warn this counts a conflict the
+				// backup recovered from against its warning total.
+				log.WithError(err).Debugf(
+					"VSC annotation update for %s did not apply; retrying", boundVSCName)
+				return err
+			}
+			log.Infof("Updated PVC annotations on VSC %s", boundVSCName)
+		}
+		return nil
+	})
+}
+
 func WaitUntilVSCHandleIsReady(
 	volSnap *snapshotv1api.VolumeSnapshot,
 	snapshotClient snapshotter.SnapshotV1Interface, // NEW parameter — see call-site instructions
@@ -1114,33 +1157,7 @@ func WaitUntilVSCHandleIsReady(
 	// Phase 1 has confirmed the binding, and before Phase 2 starts watching.
 	// -------------------------------------------------------------------------
 	vsc := new(snapshotv1api.VolumeSnapshotContent)
-	if annotationErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		if err := crClient.Get(ctx, crclient.ObjectKey{Name: boundVSCName}, vsc); err != nil {
-			return err
-		}
-		if vsc.Annotations == nil {
-			vsc.Annotations = make(map[string]string)
-		}
-		updated := false
-		if _, exists := vsc.Annotations["cc-pvc-name"]; !exists &&
-			latestVS.Spec.Source.PersistentVolumeClaimName != nil {
-			vsc.Annotations["cc-pvc-name"] = *latestVS.Spec.Source.PersistentVolumeClaimName
-			updated = true
-		}
-		if _, exists := vsc.Annotations["cc-pvc-namespace"]; !exists {
-			vsc.Annotations["cc-pvc-namespace"] = latestVS.Namespace
-			updated = true
-		}
-		if updated {
-			if err := crClient.Update(ctx, vsc); err != nil {
-				log.WithError(err).Warnf(
-					"Failed VSC annotation update for %s; retrying", boundVSCName)
-				return err
-			}
-			log.Infof("Updated PVC annotations on VSC %s", boundVSCName)
-		}
-		return nil
-	}); annotationErr != nil {
+	if annotationErr := annotateVSCWithPVC(ctx, crClient, vsc, boundVSCName, latestVS, log); annotationErr != nil {
 		log.WithError(annotationErr).Errorf(
 			"Failed to update annotations on VSC %s", boundVSCName)
 		return nil, errors.Wrapf(annotationErr, "failed to annotate VSC %s", boundVSCName)

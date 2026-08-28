@@ -89,6 +89,7 @@ func (r *restoreOperationsReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			restore.Status.Phase == velerov1api.RestorePhaseWaitingForPluginOperationsPartiallyFailed)
 	})
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Restore{}, builder.WithPredicates(kube.FalsePredicate{})).
 		WatchesRawSource(s, nil, builder.WithPredicates(gp)).
 		Complete(r)
@@ -108,6 +109,9 @@ func (r *restoreOperationsReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting restore %s", req.String())
+	}
+	if skipForeign(log, original) {
+		return ctrl.Result{}, nil
 	}
 	restore := original.DeepCopy()
 	log.Debugf("restore: %s", restore.Name)

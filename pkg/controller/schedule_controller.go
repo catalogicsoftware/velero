@@ -71,6 +71,7 @@ func NewScheduleReconciler(
 func (c *scheduleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	s := kube.NewPeriodicalEnqueueSource(c.logger, mgr.GetClient(), &velerov1.ScheduleList{}, scheduleSyncPeriod, kube.PeriodicalEnqueueSourceOption{})
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		// global predicate, works for both For and Watch
 		WithEventFilter(kube.NewAllEventPredicate(func(obj client.Object) bool {
 			schedule := obj.(*velerov1.Schedule)
@@ -101,6 +102,9 @@ func (c *scheduleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting schedule %s", req.String())
+	}
+	if skipForeign(log, schedule) {
+		return ctrl.Result{}, nil
 	}
 	c.metrics.InitSchedule(schedule.Name)
 

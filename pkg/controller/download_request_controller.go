@@ -99,6 +99,9 @@ func (r *downloadRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		log.WithError(err).Error("Error getting DownloadRequest")
 		return ctrl.Result{}, errors.WithStack(err)
 	}
+	if skipForeign(log, downloadRequest) {
+		return ctrl.Result{}, nil
+	}
 
 	if downloadRequest.Status != (velerov1api.DownloadRequestStatus{}) && downloadRequest.Status.Expiration != nil {
 		if downloadRequest.Status.Expiration.Time.Before(r.clock.Now()) {
@@ -229,6 +232,7 @@ func (r *downloadRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.DownloadRequest{}).
 		WatchesRawSource(downloadRequestSource, nil, builder.WithPredicates(downloadRequestPredicates)).
 		Complete(r)
