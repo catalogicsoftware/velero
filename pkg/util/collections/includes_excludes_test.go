@@ -122,6 +122,69 @@ func TestShouldInclude(t *testing.T) {
 	}
 }
 
+func TestShouldExclude(t *testing.T) {
+	tests := []struct {
+		name     string
+		includes []string
+		excludes []string
+		item     string
+		want     bool
+	}{
+		{
+			name: "empty excludes list should exclude nothing",
+			item: "foo",
+			want: false,
+		},
+		{
+			name:     "item in excludes list should be excluded",
+			excludes: []string{"foo", "bar"},
+			item:     "foo",
+			want:     true,
+		},
+		{
+			name:     "item not in excludes list should not be excluded",
+			excludes: []string{"foo"},
+			item:     "bar",
+			want:     false,
+		},
+		{
+			name:     "item merely absent from a non-empty includes list is not excluded",
+			includes: []string{"foo"},
+			item:     "bar",
+			want:     false,
+		},
+		{
+			name:     "an item both included and excluded should be excluded",
+			includes: []string{"foo"},
+			excludes: []string{"foo"},
+			item:     "foo",
+			want:     true,
+		},
+		{
+			name:     "wildcard exclude should exclude matching item",
+			excludes: []string{"*.bar"},
+			item:     "foo.bar",
+			want:     true,
+		},
+		{
+			name:     "wildcard exclude mismatch should not exclude item",
+			excludes: []string{"*.bar"},
+			item:     "bar.foo",
+			want:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			includesExcludes := NewIncludesExcludes().Includes(tc.includes...).Excludes(tc.excludes...)
+
+			if got := includesExcludes.ShouldExclude(tc.item); got != tc.want {
+				t.Errorf("want %t, got %t", tc.want, got)
+			}
+		})
+	}
+}
+
 func TestValidateIncludesExcludes(t *testing.T) {
 	tests := []struct {
 		name     string
