@@ -1296,13 +1296,14 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		"groupResource": groupResource.String(),
 	})
 
-	// If the restore was NOT initiated with IncludeNamedResources,
-	// then enforce the regular inclusion check.Check if group/resource
-	// should be restored. We need to do this here since this method
-	// may be getting called for an additional item which is a
-	// group/resource that's excluded.
-	if !ctx.includeNamedResourcesSpecified &&
-		!ctx.resourceIncludesExcludes.ShouldInclude(groupResource.String()) &&
+	// Check if group/resource should be restored. We need to do this here since
+	// this method may be getting called for an additional item which is a
+	// group/resource that's excluded. A restore scoped by IncludeNamedResources
+	// relaxes the includes list so such dependents survive, but an explicit
+	// exclusion still applies.
+	excluded := ctx.resourceIncludesExcludes.ShouldExclude(groupResource.String())
+	notIncluded := !ctx.resourceIncludesExcludes.ShouldInclude(groupResource.String())
+	if (excluded || (notIncluded && !ctx.includeNamedResourcesSpecified)) &&
 		!ctx.resourceMustHave.Has(groupResource.String()) {
 		restoreLogger.Info("Not restoring item because resource is excluded")
 		return warnings, errs, itemExists
