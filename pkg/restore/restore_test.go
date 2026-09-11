@@ -2114,6 +2114,64 @@ func TestRestoreActionAdditionalItems(t *testing.T) {
 			},
 		},
 		{
+			name: "when using IncludeNamedResources, additional items whose resource is explicitly excluded are not restored",
+			restore: defaultRestore().
+				IncludeNamedResources(map[string]string{"pods": "ns-1/pod-1"}).
+				ExcludedResources("persistentvolumes").
+				Result(),
+			backup: defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("pods", builder.ForPod("ns-1", "pod-1").Result()).
+				AddItems("persistentvolumes", builder.ForPersistentVolume("pv-1").Result()).
+				Done(),
+			apiResources: []*test.APIResource{test.Pods(), test.PVs()},
+			actions: []riav2.RestoreItemAction{
+				&pluggableAction{
+					executeFunc: func(input *velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error) {
+						return &velero.RestoreItemActionExecuteOutput{
+							UpdatedItem: input.Item,
+							AdditionalItems: []velero.ResourceIdentifier{
+								{GroupResource: kuberesource.PersistentVolumes, Name: "pv-1"},
+							},
+						}, nil
+					},
+				},
+			},
+			want: map[*test.APIResource][]string{
+				test.Pods(): {"ns-1/pod-1"},
+				test.PVs():  nil,
+			},
+		},
+		{
+			name: "when using IncludeNamedResources, additional items whose resource is only non-included are restored",
+			restore: defaultRestore().
+				IncludeNamedResources(map[string]string{"pods": "ns-1/pod-1"}).
+				IncludedResources("pods").
+				Result(),
+			backup: defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("pods", builder.ForPod("ns-1", "pod-1").Result()).
+				AddItems("persistentvolumes", builder.ForPersistentVolume("pv-1").Result()).
+				Done(),
+			apiResources: []*test.APIResource{test.Pods(), test.PVs()},
+			actions: []riav2.RestoreItemAction{
+				&pluggableAction{
+					executeFunc: func(input *velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error) {
+						return &velero.RestoreItemActionExecuteOutput{
+							UpdatedItem: input.Item,
+							AdditionalItems: []velero.ResourceIdentifier{
+								{GroupResource: kuberesource.PersistentVolumes, Name: "pv-1"},
+							},
+						}, nil
+					},
+				},
+			},
+			want: map[*test.APIResource][]string{
+				test.Pods(): {"ns-1/pod-1"},
+				test.PVs():  {"/pv-1"},
+			},
+		},
+		{
 			name:    "when using a restore resource filter, additional items that are non-included resources are not restored",
 			restore: defaultRestore().IncludedResources("pods").Result(),
 			backup:  defaultBackup().Result(),
