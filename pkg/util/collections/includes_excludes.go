@@ -105,6 +105,13 @@ func (ie *IncludesExcludes) ShouldInclude(s string) bool {
 	return ie.includes.Len() == 0 || ie.includes.Has("*") || ie.includes.match(s)
 }
 
+// ShouldExclude returns whether the specified item matches the excludes list.
+// ShouldInclude returns false both for an excluded item and for one merely
+// absent from a non-empty includes list; this reports only the former.
+func (ie *IncludesExcludes) ShouldExclude(s string) bool {
+	return ie.excludes.match(s)
+}
+
 // IncludesExcludesInterface is used as polymorphic IncludesExcludes for Global and scope
 // resources Include/Exclude.
 type IncludesExcludesInterface interface {

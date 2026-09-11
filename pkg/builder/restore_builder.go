@@ -95,6 +95,12 @@ func (b *RestoreBuilder) ExcludedResources(resources ...string) *RestoreBuilder 
 	return b
 }
 
+// IncludeNamedResources sets the Restore's named resources, keyed by resource type.
+func (b *RestoreBuilder) IncludeNamedResources(named map[string]string) *RestoreBuilder {
+	b.object.Spec.IncludeNamedResources = named
+	return b
+}
+
 // ExistingResourcePolicy sets the Restore's resource policy.
 func (b *RestoreBuilder) ExistingResourcePolicy(policy string) *RestoreBuilder {
 	b.object.Spec.ExistingResourcePolicy = velerov1api.PolicyType(policy)
