@@ -99,6 +99,9 @@ func (r *backupFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		log.WithError(err).Error("Error getting Backup")
 		return ctrl.Result{}, errors.WithStack(err)
 	}
+	if skipForeign(log, backup) {
+		return ctrl.Result{}, nil
+	}
 
 	if val, ok := backup.Annotations["velero.io/backup-cancelled"]; ok && val == "true" {
 		log.Infof("Detected cancelled backup %s. Running cleanup tasks...", backup.Name)
@@ -253,6 +256,7 @@ func (r *backupFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 func (r *backupFinalizerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Backup{}).
 		Complete(r)
 }
