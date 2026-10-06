@@ -45,6 +45,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
+	"github.com/vmware-tanzu/velero/pkg/persistence/bundlecrypt"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
 	"github.com/vmware-tanzu/velero/pkg/podvolume"
@@ -310,6 +311,17 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// Download the tarball
 		backupFile, err := downloadToTempFile(backup.Name, backupStore, log)
 
+		// Going on without the DeleteItemActions would remove the bundle and
+		// leave the backup's snapshots behind.
+		if err != nil && bundlecrypt.IsDecryptError(err) {
+			log.WithError(err).Errorf("Unable to read the encrypted tarball for backup %s, not deleting it", backup.Name)
+			r.metrics.RegisterBackupDeletionFailed(backupScheduleName)
+			_, patchErr := r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
+				r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
+				r.Status.Errors = append(r.Status.Errors, fmt.Sprintf("unable to read the encrypted tarball of backup %s: %v", backup.Name, err))
+			})
+			return ctrl.Result{}, patchErr
+		}
 		if err != nil {
 			log.WithError(err).Errorf("Unable to download tarball for backup %s, skipping associated DeleteItemAction plugins", backup.Name)
 		} else {

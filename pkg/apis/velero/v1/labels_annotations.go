@@ -107,6 +107,16 @@ const (
 	// enabled. Deletion of objects in such a store is bound to fail, so
 	// controllers skip object storage deletions when this is "true".
 	ObjectLockAnnotation = "cloudcasa.io/object-lock"
+
+	// BundleKeyFileAnnotation is set on a BackupStorageLocation by the
+	// CloudCasa agent to the path of the file holding the key that encrypts
+	// the bundle files written there.
+	BundleKeyFileAnnotation = "cloudcasa.io/bundle-key-file"
+
+	// BundleEncryptionRequiredAnnotation set to "true" on a
+	// BackupStorageLocation makes reads refuse bundle files that are not
+	// encrypted.
+	BundleEncryptionRequiredAnnotation = "cloudcasa.io/bundle-encryption-required"
 )
 
 type AsyncOperationIDPrefix string

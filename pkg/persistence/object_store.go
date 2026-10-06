@@ -383,8 +383,18 @@ func (b *objectBackupStoreGetter) Get(location *velerov1api.BackupStorageLocatio
 		"prefix": prefix,
 	}))
 
+	store, err := withBundleEncryption(newLoggingObjectStore(objectStore, log), location)
+	if err != nil {
+		log.WithError(err).Error("ObjectStore: unable to set up bundle encryption")
+		return nil, err
+	}
+	if bundleEncrypted(location) {
+		log.WithField("required", location.GetAnnotations()[velerov1api.BundleEncryptionRequiredAnnotation] == "true").
+			Info("ObjectStore: bundle files are encrypted")
+	}
+
 	return &objectBackupStore{
-		objectStore: newLoggingObjectStore(objectStore, log),
+		objectStore: store,
 		bucket:      bucket,
 		layout:      NewObjectStoreLayout(prefix),
 		logger:      log,
