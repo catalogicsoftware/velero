@@ -141,15 +141,21 @@ const (
 
 // CSI related plugin actions' constant variable
 const (
-	VolumeSnapshotLabel                             = "velero.io/volume-snapshot-name"
-	VolumeSnapshotHandleAnnotation                  = "velero.io/csi-volumesnapshot-handle"
-	VolumeSnapshotRestoreSize                       = "velero.io/csi-volumesnapshot-restore-size"
-	DriverNameAnnotation                            = "velero.io/csi-driver-name"
-	VSCDeletionPolicyAnnotation                     = "velero.io/csi-vsc-deletion-policy"
-	VolumeGroupSnapshotHandleAnnotation             = "velero.io/csi-volumegroupsnapshot-handle"
-	VolumeSnapshotClassSelectorLabel                = "velero.io/csi-volumesnapshot-class"
-	VolumeSnapshotClassDriverBackupAnnotationPrefix = "velero.io/csi-volumesnapshot-class"
-	VolumeSnapshotClassDriverPVCAnnotation          = "velero.io/csi-volumesnapshot-class"
+	VolumeSnapshotLabel                                   = "velero.io/volume-snapshot-name"
+	VolumeSnapshotHandleAnnotation                        = "velero.io/csi-volumesnapshot-handle"
+	VolumeSnapshotRestoreSize                             = "velero.io/csi-volumesnapshot-restore-size"
+	DriverNameAnnotation                                  = "velero.io/csi-driver-name"
+	VSCDeletionPolicyAnnotation                           = "velero.io/csi-vsc-deletion-policy"
+	VolumeGroupSnapshotHandleAnnotation                   = "velero.io/csi-volumegroupsnapshot-handle"
+	VolumeSnapshotClassSelectorLabel                      = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassDriverBackupAnnotationPrefix       = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassDriverPVCAnnotation                = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassStorageClassBackupAnnotationPrefix = "cloudcasa.io/csi-sc-vsc-mapping-"
+
+	// SnapshotClassRequiredDriversAnnotation lists, comma-separated, the CSI
+	// drivers whose VolumeSnapshotClass must be configured explicitly; the
+	// plugin never auto-creates one for them. Set by the kubeagent on the Backup.
+	SnapshotClassRequiredDriversAnnotation = "cloudcasa.io/snapshot-class-required-drivers"
 
 	// https://kubernetes.io/zh-cn/docs/concepts/storage/volume-snapshot-classes/
 	VolumeSnapshotClassKubernetesAnnotation = "snapshot.storage.kubernetes.io/is-default-class"
