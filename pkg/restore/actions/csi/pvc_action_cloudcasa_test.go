@@ -421,3 +421,16 @@ func TestSnapshotRestoreLeavesAzureFilesToTheMover(t *testing.T) {
 		}
 	}
 }
+
+// A VolumeSnapshot of the same name in another namespace is not this PVC's.
+func TestExecuteMatchesAzureFilesSnapshotContentByNamespace(t *testing.T) {
+	restore, pvc, objects, _ := azureFilesFixture(t, "")
+	otherNamespace := builder.ForVolumeSnapshotContent("snapcontent-5678").Driver(azureFilesDriver).Result()
+	otherNamespace.Spec.VolumeSnapshotRef = corev1api.ObjectReference{Namespace: "other", Name: "cc-pvc-1-abcde"}
+	objects = append(objects[:len(objects)-1], otherNamespace)
+	p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects...)}
+
+	_, _, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+	require.ErrorContains(t, err, "Failed to get VolumeSnapshotContent for VolumeSnapshot ns/cc-pvc-1-abcde")
+}

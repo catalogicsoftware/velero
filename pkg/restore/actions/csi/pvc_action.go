@@ -342,7 +342,8 @@ func (p *pvcRestoreItemAction) processAzureRestore(pvc *corev1api.PersistentVolu
 	}
 	var volumeSnapshotContentName string
 	for _, vsc := range vscList.Items {
-		if vsc.Spec.VolumeSnapshotRef.Name == volumeSnapshotName && strings.HasPrefix(vsc.Name, "snapcontent-") {
+		if vsc.Spec.VolumeSnapshotRef.Namespace == pvc.Namespace && vsc.Spec.VolumeSnapshotRef.Name == volumeSnapshotName &&
+			strings.HasPrefix(vsc.Name, "snapcontent-") {
 			volumeSnapshotContentName = vsc.Name
 			break
 		}
