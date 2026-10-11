@@ -18,6 +18,9 @@ package backup
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -774,4 +777,47 @@ func (e *excludeResourceIE) ShouldInclude(typeName string) bool {
 }
 func (e *excludeResourceIE) ShouldExclude(typeName string) bool {
 	return typeName == e.excluded
+}
+
+// An item whose backup failed must not pass as backed up when it is reached
+// again, e.g. a PVC that a KubeVirt VM names after its snapshot failed.
+func TestBackupItemInternalResurfacesEarlierFailure(t *testing.T) {
+	req := baseRequest()
+	req.BackedUpItems = NewBackedUpItemsMap()
+	ib := newTestItemBackupper(req)
+	pvc := builder.ForPersistentVolumeClaim("ns", "pvc-1").Result()
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pvc)
+	require.NoError(t, err)
+	item := &unstructured.Unstructured{Object: obj}
+	key := itemKey{resource: resourceKey(item), namespace: "ns", name: "pvc-1"}
+	pvcGR := schema.GroupResource{Resource: "persistentvolumeclaims"}
+
+	req.BackedUpItems.AddItem(key)
+	selected, _, err := ib.backupItemInternal(logrus.New(), item, pvcGR, pvcGR.WithVersion("v1"), false, false, nil)
+	require.NoError(t, err)
+	assert.True(t, selected, "a successful earlier backup still counts as backed up")
+
+	req.BackedUpItems.RecordFailure(key, errors.New("snapshot failed"))
+	selected, _, err = ib.backupItemInternal(logrus.New(), item, pvcGR, pvcGR.WithVersion("v1"), false, false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshot failed")
+	assert.False(t, selected)
+}
+
+// Failures are recorded from parallel ItemBlock workers.
+func TestBackedUpItemsMapFailureIsConcurrencySafe(t *testing.T) {
+	m := NewBackedUpItemsMap()
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			key := itemKey{resource: "pods", namespace: "ns", name: fmt.Sprintf("p-%d", i)}
+			m.RecordFailure(key, errors.New("failed"))
+			_, _ = m.Failure(key)
+		}()
+	}
+	wg.Wait()
+	_, failed := m.Failure(itemKey{resource: "pods", namespace: "ns", name: "p-7"})
+	assert.True(t, failed)
 }

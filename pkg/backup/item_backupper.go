@@ -91,6 +91,19 @@ type FileForArchive struct {
 // was actually backed up.
 func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstructured, groupResource schema.GroupResource, preferredGVR schema.GroupVersionResource, mustInclude, finalize bool, itemBlock *BackupItemBlock) (bool, []FileForArchive, error) {
 	selectedForBackup, files, err := ib.backupItemInternal(logger, obj, groupResource, preferredGVR, mustInclude, finalize, itemBlock)
+
+	// Remember failed items so that a later re-encounter (deduplicated via
+	// BackedUpItems) resurfaces the failure instead of passing for a success.
+	if err != nil {
+		if metadata, metaErr := meta.Accessor(obj); metaErr == nil {
+			ib.backupRequest.BackedUpItems.RecordFailure(itemKey{
+				resource:  resourceKey(obj),
+				namespace: metadata.GetNamespace(),
+				name:      metadata.GetName(),
+			}, err)
+		}
+	}
+
 	// return if not selected, an error occurred, there are no files to add, or for finalize
 	if !selectedForBackup || err != nil || len(files) == 0 || finalize {
 		return selectedForBackup, files, err
@@ -214,6 +227,15 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 	}
 
 	if ib.backupRequest.BackedUpItems.Has(key) {
+		// If the earlier attempt failed, resurface that failure so parents that
+		// reference this item (e.g. a KubeVirt VM whose PVC snapshot failed) do
+		// not treat it as successfully backed up.
+		if prevErr, failed := ib.backupRequest.BackedUpItems.Failure(key); failed {
+			log.Info("Item was already processed and its backup failed; returning the previous failure.")
+			return false, itemFiles, errors.Wrapf(
+				prevErr, "item %s failed to back up earlier in this backup", key.name,
+			)
+		}
 		log.Info("Skipping item because it's already been backed up.")
 		// returning true since this item *is* in the backup, even though we're not backing it up here
 		return true, itemFiles, nil
