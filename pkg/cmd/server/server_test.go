@@ -532,3 +532,71 @@ func Test_kindModes(t *testing.T) {
 	assert.Equal(t, instance.KindShared, modeOf(restore, &velerov1api.DeleteBackupRequest{}))
 	assert.Equal(t, instance.KindOwned, modeOf(restore, &velerov1api.Restore{}))
 }
+
+func Test_withUnusedControllersDisabled(t *testing.T) {
+	unused := []string{
+		constant.ControllerBackupSync, constant.ControllerGarbageCollection, constant.ControllerSchedule,
+		constant.ControllerServerStatusRequest, constant.ControllerBackupRepo, constant.ControllerDownloadRequest,
+	}
+	assert.Equal(t, unused, withUnusedControllersDisabled(nil))
+
+	allControllers := func() map[string]struct{} {
+		enabled := map[string]struct{}{}
+		for _, name := range config.DisableableControllers {
+			enabled[name] = struct{}{}
+		}
+		return enabled
+	}
+	enabledAfter := func(disabled []string) []string {
+		enabled := allControllers()
+		require.NoError(t, removeControllers(disabled, enabled, logrus.New()))
+		names := make([]string, 0, len(enabled))
+		for name := range enabled {
+			names = append(names, name)
+		}
+		return names
+	}
+
+	// The lists kubeagent passes today (helperpod.go) already contain most
+	// unused controllers; adding the rest must not repeat a name.
+	base := []string{"backup-sync", "gc", "server-status-request", "schedule", "backup-repo"}
+	jobs := map[string]struct {
+		extra   []string
+		enabled []string
+	}{
+		"backup": {
+			extra:   []string{"backup-deletion", "restore", "restore-operations", "restore-finalizer"},
+			enabled: []string{"backup-queue", "backup", "backup-operations", "backup-finalizer"},
+		},
+		"restore": {
+			extra:   []string{"backup", "backup-operations", "backup-finalizer", "backup-deletion"},
+			enabled: []string{"backup-queue", "restore", "restore-operations", "restore-finalizer"},
+		},
+		"delete": {
+			extra: []string{"backup", "backup-operations", "backup-finalizer",
+				"restore", "restore-operations", "restore-finalizer", "download-request"},
+			enabled: []string{"backup-queue", "backup-deletion"},
+		},
+	}
+	for job, tc := range jobs {
+		t.Run(job, func(t *testing.T) {
+			disabled := withUnusedControllersDisabled(append(append([]string{}, base...), tc.extra...))
+			assert.ElementsMatch(t, tc.enabled, enabledAfter(disabled))
+		})
+	}
+
+	// Restore-only mode appends names that may already be disabled.
+	assert.Equal(t, []string{"schedule", "gc", "backup"}, uniqueControllers([]string{"schedule", "gc", "schedule", "backup", "gc"}))
+	assert.NotPanics(t, func() {
+		enabledAfter(uniqueControllers(append(withUnusedControllersDisabled(nil), constant.ControllerSchedule, constant.ControllerGarbageCollection)))
+	})
+
+	// The unused kinds are only read, so their cache selects shared objects.
+	modes := kindModes(withUnusedControllersDisabled(nil))
+	for obj, mode := range modes {
+		switch obj.(type) {
+		case *velerov1api.Schedule, *velerov1api.DownloadRequest:
+			assert.Equal(t, instance.KindShared, mode, "%T", obj)
+		}
+	}
+}

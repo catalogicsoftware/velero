@@ -165,6 +165,38 @@ type server struct {
 	credentialSecretStore credentials.SecretStore
 }
 
+// cloudcasaUnusedControllers are never used by a CloudCasa engine: CloudCasa
+// schedules, expires and syncs its backups itself, does not use Velero
+// repositories, and never creates ServerStatusRequests or DownloadRequests.
+var cloudcasaUnusedControllers = []string{
+	constant.ControllerBackupSync,
+	constant.ControllerGarbageCollection,
+	constant.ControllerSchedule,
+	constant.ControllerServerStatusRequest,
+	constant.ControllerBackupRepo,
+	constant.ControllerDownloadRequest,
+}
+
+// uniqueControllers drops repeated names, keeping the first occurrence, so
+// removeControllers never sees a controller twice.
+func uniqueControllers(names []string) []string {
+	seen := make(map[string]bool, len(names))
+	unique := make([]string, 0, len(names))
+	for _, name := range names {
+		if !seen[name] {
+			seen[name] = true
+			unique = append(unique, name)
+		}
+	}
+	return unique
+}
+
+// withUnusedControllersDisabled adds every controller CloudCasa never uses to
+// the disable list given on the command line.
+func withUnusedControllersDisabled(disabled []string) []string {
+	return uniqueControllers(append(append([]string{}, disabled...), cloudcasaUnusedControllers...))
+}
+
 // kindModes decides, per kind, whether this engine owns the objects bound to
 // its instance or only reads the shared unlabelled ones. A kind whose
 // controller is disabled is only read here, and a storage location describes
@@ -295,6 +327,9 @@ func newServer(f client.Factory, config *config.Config, logger *logrus.Logger) (
 
 	// Scope this engine to one job's CRs (or, for the shared engine, to CRs
 	// without an instance label) at the cache level and in every controller.
+	config.DisabledControllers = withUnusedControllersDisabled(config.DisabledControllers)
+	logger.Infof("Disabled controllers: %s", strings.Join(config.DisabledControllers, ","))
+
 	instanceScope := instance.FromEnv()
 	logger.Infof("Engine CR scope: %s", instanceScope)
 	controller.SetInstanceScope(instanceScope)
@@ -660,6 +695,8 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			constant.ControllerSchedule,
 		)
 	}
+
+	s.config.DisabledControllers = uniqueControllers(s.config.DisabledControllers)
 
 	// Remove disabled controllers so they are not initialized. If a match is not found we want
 	// to halt the system so the user knows this operation was not possible.
