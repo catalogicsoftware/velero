@@ -19,7 +19,9 @@ package csi
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/util/retry"
@@ -43,6 +45,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/vmware-tanzu/velero/internal/catalogic"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	velerov2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	veleroclient "github.com/vmware-tanzu/velero/pkg/client"
@@ -87,6 +90,27 @@ type pvcBackupItemAction struct {
 
 // AppliesTo returns information indicating that the PVCBackupItemAction
 // should be invoked to backup PVCs.
+// liveCopyDrivers is a list of drivers for which we will skip creating the snapshot and will copy data live
+// Must match liveCopyDrivers in amdslib/utils/utils.go
+var liveCopyDrivers = []string{"nfs.csi.k8s.io", "efs.csi.aws.com", "linodebs.csi.linode.com",
+	"rancher.io/local-path", "k8s.io/minikube-hostpath", "smb.csi.k8s.io", "azlocal.csi.azure.com"}
+
+// getPluginConfig reads the job's CloudCasa plugin ConfigMap; tests replace it.
+var getPluginConfig = catalogic.GetPluginConfig
+
+// updateSnapshotProgress relays a snapshot state to kubeagent; tests replace it.
+var updateSnapshotProgress = catalogic.UpdateSnapshotProgress
+
+// snapshotProgressError is a failure to create a VolumeSnapshot together with
+// the message relayed to kubeagent. Error() is the wrapped error's text.
+type snapshotProgressError struct {
+	message string
+	err     error
+}
+
+func (e *snapshotProgressError) Error() string { return e.err.Error() }
+func (e *snapshotProgressError) Unwrap() error { return e.err }
+
 func (p *pvcBackupItemAction) AppliesTo() (velero.ResourceSelector, error) {
 	return velero.ResourceSelector{
 		IncludedResources: []string{"persistentvolumeclaims"},
@@ -167,6 +191,7 @@ func (p *pvcBackupItemAction) validatePVCandPV(
 ) (
 	valid bool,
 	updateItem runtime.Unstructured,
+	pv *corev1api.PersistentVolume,
 	err error,
 ) {
 	updateItem = item
@@ -175,6 +200,7 @@ func (p *pvcBackupItemAction) validatePVCandPV(
 	if pvc.Spec.StorageClassName == nil {
 		return false,
 			updateItem,
+			nil,
 			errors.Errorf(
 				"Cannot snapshot PVC %s/%s, PVC has no storage class.",
 				pvc.Namespace, pvc.Name)
@@ -186,9 +212,9 @@ func (p *pvcBackupItemAction) validatePVCandPV(
 	)
 
 	// Do nothing if this is not a CSI provisioned volume
-	pv, err := kubeutil.GetPVForPVC(&pvc, p.crClient)
+	pv, err = kubeutil.GetPVForPVC(&pvc, p.crClient)
 	if err != nil {
-		return false, updateItem, errors.WithStack(err)
+		return false, updateItem, nil, errors.WithStack(err)
 	}
 
 	if pv.Spec.PersistentVolumeSource.CSI == nil {
@@ -203,10 +229,10 @@ func (p *pvcBackupItemAction) validatePVCandPV(
 			})
 		data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&pvc)
 		updateItem = &unstructured.Unstructured{Object: data}
-		return false, updateItem, err
+		return false, updateItem, nil, err
 	}
 
-	return true, updateItem, nil
+	return true, updateItem, pv, nil
 }
 
 func (p *pvcBackupItemAction) createVolumeSnapshot(
@@ -222,7 +248,10 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 		context.TODO(), crclient.ObjectKey{Name: *pvc.Spec.StorageClassName},
 		storageClass,
 	); err != nil {
-		return nil, errors.Wrap(err, "error getting storage class")
+		return nil, &snapshotProgressError{
+			message: fmt.Sprintf("Storage Class %s not found", *pvc.Spec.StorageClassName),
+			err:     errors.Wrap(err, "error getting storage class"),
+		}
 	}
 
 	p.log.Debugf("Fetching VolumeSnapshotClass for %s", storageClass.Provisioner)
@@ -234,12 +263,15 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 		p.crClient,
 	)
 	if err != nil {
-		return nil, errors.Wrapf(
-			err, "failed to get VolumeSnapshotClass for StorageClass %s",
-			storageClass.Name,
-		)
+		// Relay the resolver's own actionable message and return it unwrapped, so
+		// the backup error is not padded with a redundant prefix.
+		p.log.Error(err.Error())
+		return nil, &snapshotProgressError{message: err.Error(), err: err}
 	}
-	p.log.Infof("VolumeSnapshotClass=%s", vsClass.Name)
+	p.log.Infof(
+		"Using VolumeSnapshotClass %s for PVC %s/%s (StorageClass %s, driver %s)",
+		vsClass.Name, pvc.Namespace, pvc.Name, storageClass.Name, storageClass.Provisioner,
+	)
 
 	vsLabels := map[string]string{}
 	for k, v := range pvc.ObjectMeta.Labels {
@@ -250,7 +282,7 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 	// Craft the vs object to be created
 	vs = &snapshotv1api.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "velero-" + pvc.Name + "-",
+			GenerateName: "cc-" + pvc.Name + "-",
 			Namespace:    pvc.Namespace,
 			Labels:       vsLabels,
 		},
@@ -263,9 +295,9 @@ func (p *pvcBackupItemAction) createVolumeSnapshot(
 	}
 
 	if err := p.crClient.Create(context.TODO(), vs); err != nil {
-		return nil, errors.Wrapf(
-			err, "error creating volume snapshot",
-		)
+		message := "error creating volume snapshot"
+		p.log.Error(errors.Wrap(err, message).Error())
+		return nil, &snapshotProgressError{message: message, err: errors.Wrapf(err, "error creating volume snapshot")}
 	}
 	p.log.Infof(
 		"Created VolumeSnapshot %s",
@@ -302,10 +334,11 @@ func (p *pvcBackupItemAction) Execute(
 	); err != nil {
 		return nil, nil, "", nil, errors.WithStack(err)
 	}
-	if valid, item, err := p.validatePVCandPV(
+	valid, item, pv, err := p.validatePVCandPV(
 		pvc,
 		item,
-	); !valid {
+	)
+	if !valid {
 		if err != nil {
 			return nil, nil, "", nil, err
 		}
@@ -347,8 +380,41 @@ func (p *pvcBackupItemAction) Execute(
 		}
 	}
 
+	// A failure up to the VolumeSnapshot's creation is relayed to kubeagent here;
+	// progress from then on is reported by WaitUntilVSCHandleIsReady.
+	var snapshotState, snapshotStateMessage string
+	defer func() {
+		uErr := updateSnapshotProgress(&pvc, nil, nil, snapshotState, snapshotStateMessage, backup.Name, p.log)
+		if uErr != nil {
+			p.log.Error(err, "<SNAPSHOT PROGRESS UPDATE> Failed to update snapshot progress. Continuing...")
+		}
+	}()
+
+	storageClass := new(storagev1api.StorageClass)
+	if err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Name: *pvc.Spec.StorageClassName}, storageClass); err != nil {
+		snapshotState = "error"
+		snapshotStateMessage = fmt.Sprintf("Storage Class %s not found", *pvc.Spec.StorageClassName)
+		p.log.Error(errors.Wrap(err, snapshotStateMessage).Error())
+		return nil, nil, "", nil, errors.Wrap(err, "error getting storage class")
+	}
+
+	// CloudCasa's backup method rules decide before any snapshot, including a
+	// VolumeGroupSnapshot, is taken.
+	skip, err := p.shouldSkipSnapshot(&pvc, pv.Name, storageClass.Provisioner, backup.Name)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	if skip {
+		return item, nil, "", nil, nil
+	}
+
 	vs, err := p.getVolumeSnapshotReference(context.TODO(), pvc, backup)
 	if err != nil {
+		var progressErr *snapshotProgressError
+		if errors.As(err, &progressErr) {
+			snapshotState = "error"
+			snapshotStateMessage = progressErr.message
+		}
 		return nil, nil, "", nil, err
 	}
 
@@ -370,12 +436,20 @@ func (p *pvcBackupItemAction) Execute(
 	labels := map[string]string{
 		velerov1api.VolumeSnapshotLabel: vs.Name,
 		velerov1api.BackupNameLabel:     backup.Name,
+		"cloudcasa-initial-volume-name": pvc.Spec.VolumeName,
 	}
 
-	annotations := map[string]string{
-		velerov1api.VolumeSnapshotLabel:                 vs.Name,
-		velerov1api.MustIncludeAdditionalItemAnnotation: "true",
+	if storageClass != nil {
+		labels["cloudcasa-storage-class-provisioner"] = storageClass.Provisioner
 	}
+
+	if storageClass.Provisioner == "file.csi.azure.com" {
+		catalogic.SetStaticAzureAnotation(&pvc, labels, storageClass, p.log)
+	}
+
+	annotations := labels
+	annotations[velerov1api.VolumeNamespaceLabel] = vs.Name
+	annotations[velerov1api.MustIncludeAdditionalItemAnnotation] = "true"
 
 	var additionalItems []velero.ResourceIdentifier
 	operationID := ""
@@ -1227,4 +1301,80 @@ func setPVCStorageResourceRequest(
 				pvc.Namespace, pvc.Name, rs.String())
 		}
 	}
+}
+
+func (p *pvcBackupItemAction) shouldSkipSnapshot(pvc *corev1api.PersistentVolumeClaim, pvName string, provisioner string,
+	jobID string) (bool, error) {
+
+	config, err := getPluginConfig(jobID, p.log)
+	if err != nil {
+		return false, errors.Wrap(err, "error getting plugin config")
+	}
+
+	var setBackupMethod string
+	var isBackupMethodSet bool
+	var storageClassName string
+
+	if pvc.Spec.StorageClassName != nil {
+		storageClassName = *pvc.Spec.StorageClassName
+		setBackupMethod, isBackupMethodSet = config.StorageClassBackupMethodMap[storageClassName]
+	}
+
+	annotations := pvc.GetAnnotations()
+	if backupMethod, found := annotations["cloudcasa.io/backup-method"]; found {
+		backupMethod = strings.ToUpper(strings.TrimSpace(backupMethod))
+		if slices.Contains([]string{"SNAPSHOT", "LIVE_FROM_PVC", "LIVE_FROM_HOST_POD_VOL", "LIVE", "SKIP"}, backupMethod) {
+			setBackupMethod = backupMethod
+			isBackupMethodSet = true
+		} else {
+			p.log.Infof("Ignoring invalid backup method %s for PVC %s/%s", backupMethod, pvc.Namespace, pvc.Name)
+		}
+	}
+
+	if isBackupMethodSet {
+		if setBackupMethod == "SNAPSHOT" {
+			return false, nil
+		}
+
+		if setBackupMethod == "SKIP" {
+			p.log.Infof("Skipping snapshot of PVC %s/%s because backupMethod is set to SKIP", pvc.Namespace, pvc.Name)
+			return true, nil
+		}
+
+		if strings.HasPrefix(setBackupMethod, "LIVE") {
+			p.log.Infof("Skipping snapshot of PVC %s/%s with storage class %s and backup method %s", pvc.Namespace, pvc.Name,
+				storageClassName, setBackupMethod)
+			return true, nil
+		}
+	}
+
+	// Skip snapshot for Azure Files NFS volumes
+	if provisioner == "file.csi.azure.com" && storageClassName != "" {
+		// Get the StorageClass to find the "protocol" parameter
+		storageClass := &storagev1api.StorageClass{}
+		if err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Name: storageClassName}, storageClass); err != nil {
+			return false, errors.Wrapf(err, "error getting StorageClass %s for PVC %s/%s", storageClassName, pvc.Namespace, pvc.Name)
+		}
+		if storageClass.Parameters != nil {
+			if protocol, exists := storageClass.Parameters["protocol"]; exists && protocol == "nfs" {
+				p.log.Infof("Skipping snapshot of PVC %s/%s with NFS protocol as it will be backed up LIVE", pvc.Namespace, pvc.Name)
+				return true, nil
+			}
+		}
+	}
+
+	for _, driver := range liveCopyDrivers {
+		if provisioner == driver {
+			p.log.Infof("PVC %s/%s, associated PV %s with provisioner %s is not supported for snapshotting", pvc.Namespace, pvc.Name,
+				pvName, provisioner)
+			return true, nil
+		}
+	}
+
+	if !config.SnapshotWherePossible {
+		p.log.Infof("Skipping snapshot of PVC %s/%s because SnapshotWherePossible is false", pvc.Namespace, pvc.Name)
+		return true, nil
+	}
+
+	return false, nil
 }
