@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"time"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 
@@ -49,6 +51,8 @@ import (
 const (
 	AnnSelectedNode          = "volume.kubernetes.io/selected-node"
 	GenerateNameRandomLength = 5
+	HarvesterhCiIoOwnedBy    = "harvesterhci.io/owned-by"
+	pvcDeleteTimeoutSeconds  = 2 * 60
 )
 
 // pvcRestoreItemAction is a restore item action plugin for Velero
@@ -89,13 +93,19 @@ func (p *pvcRestoreItemAction) Execute(
 	})
 	logger.Info("Starting PVCRestoreItemAction for PVC")
 
+	if err := p.handleExistingPvc(input, &pvc); err != nil {
+		logger.Warnf("Failed to handle existing PVC: %v", err)
+	}
+
 	// If PVC already exists, returns early.
-	if p.isResourceExist(pvc, *input.Restore) {
+	if exists, _ := p.isResourceExist(pvc, *input.Restore); exists {
 		logger.Warnf("PVC already exists. Skip restore this PVC.")
 		return &velero.RestoreItemActionExecuteOutput{
 			UpdatedItem: input.Item,
 		}, nil
 	}
+
+	delete(pvc.Annotations, HarvesterhCiIoOwnedBy)
 
 	// If cross-namespace restore is configured, change the namespace
 	// for PVC object to be restored
@@ -110,7 +120,21 @@ func (p *pvcRestoreItemAction) Execute(
 	additionalItems := []velero.ResourceIdentifier{}
 	if boolptr.IsSetToFalse(input.Restore.Spec.RestorePVs) {
 		logger.Info("Restore did not request for PVs to be restored from snapshot")
-		pvc.Spec.VolumeName = ""
+
+		// If DR volumes are used, then do not reset the volume name.
+		useDrVolumes := false
+		if useDrVolumesStr, ok := input.Restore.Annotations["cloudcasa-use-dr-volumes"]; ok {
+			var err error
+			useDrVolumes, err = strconv.ParseBool(useDrVolumesStr)
+			if err != nil {
+				p.log.Errorf("Failed to convert \"cloudcasa-use-dr-volumes\" annotation to boolean: %v", err)
+				return nil, errors.WithStack(err)
+			}
+		}
+
+		if !useDrVolumes {
+			pvc.Spec.VolumeName = ""
+		}
 		pvc.Spec.DataSource = nil
 		pvc.Spec.DataSourceRef = nil
 	} else {
@@ -495,7 +519,7 @@ func restoreFromDataUploadResult(
 func (p *pvcRestoreItemAction) isResourceExist(
 	pvc corev1api.PersistentVolumeClaim,
 	restore velerov1api.Restore,
-) bool {
+) (bool, *corev1api.PersistentVolumeClaim) {
 	// get target namespace to restore into, if different from source namespace
 	targetNamespace := pvc.Namespace
 	if target, ok := restore.Spec.NamespaceMapping[pvc.Namespace]; ok {
@@ -511,9 +535,89 @@ func (p *pvcRestoreItemAction) isResourceExist(
 		},
 		tmpPVC,
 	); err == nil {
-		return true
+		return true, tmpPVC
 	}
-	return false
+	return false, nil
+}
+
+// handleExistingPvc checks if target PVC exists and deletes it if the existing resource policy is "update"
+// and the PV has a "Retain" reclaim policy because PVC can't be updated and it will be in "Lost" state after restore.
+// If PVC is attached to a pod we can't delete it.
+func (p *pvcRestoreItemAction) handleExistingPvc(input *velero.RestoreItemActionExecuteInput, pvc *corev1api.PersistentVolumeClaim) error {
+	if input.Restore.Spec.ExistingResourcePolicy != velerov1api.PolicyTypeUpdate {
+		p.log.Info("Skipping check for existing PVC because existing resource policy is not \"update\"")
+		return nil
+	}
+
+	targetNamespace := pvc.Namespace
+	if newTargetNamespace, found := input.Restore.Spec.NamespaceMapping[pvc.Namespace]; found {
+		targetNamespace = newTargetNamespace
+	}
+
+	p.log.Infof("Checking if PVC %s/%s exists", targetNamespace, pvc.Name)
+
+	exists, existingPvc := p.isResourceExist(*pvc, *input.Restore)
+	if !exists {
+		p.log.Infof("PVC %s/%s not found", targetNamespace, pvc.Name)
+		return nil
+	}
+
+	if existingPvc.Spec.VolumeName == "" {
+		p.log.Infof("Existing PVC %s/%s has no associated PV", targetNamespace, pvc.Name)
+		return nil
+	}
+
+	existingPv := new(corev1api.PersistentVolume)
+	if err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Name: existingPvc.Spec.VolumeName}, existingPv); err != nil {
+		p.log.Errorf("Failed to get existing PV %s: %v", existingPvc.Spec.VolumeName, err)
+		return err
+	}
+
+	if existingPv.Spec.PersistentVolumeReclaimPolicy != corev1api.PersistentVolumeReclaimRetain {
+		p.log.Infof("Existing PV %s does not have \"Retain\" reclaim policy", existingPv.Name)
+		return nil
+	}
+
+	podList := new(corev1api.PodList)
+	if err := p.crClient.List(context.TODO(), podList, crclient.InNamespace(targetNamespace)); err != nil {
+		p.log.Errorf("Failed to list pods in namespace %s: %s", targetNamespace, err)
+		return err
+	}
+
+	for _, pod := range podList.Items {
+		for _, vol := range pod.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == pvc.Name {
+				p.log.Infof("PVC %s/%s is attached to pod %s, can't delete it", targetNamespace, pvc.Name, pod.Name)
+				return nil
+			}
+		}
+	}
+
+	p.log.Infof("Deleting existing PVC %s/%s because existing resource policy is \"update\" and PV %s has \"Retain\" reclaim policy",
+		targetNamespace, pvc.Name, existingPv.Name)
+
+	if err := p.crClient.Delete(context.TODO(), existingPvc); err != nil {
+		p.log.Errorf("Failed to delete existing PVC %s/%s: %v", targetNamespace, pvc.Name, err)
+		return err
+	}
+
+	for try := range pvcDeleteTimeoutSeconds {
+		if exists, _ := p.isResourceExist(*pvc, *input.Restore); !exists {
+			p.log.Infof("PVC %s/%s deleted successfully", targetNamespace, pvc.Name)
+			return nil
+		}
+
+		if try%10 == 0 {
+			p.log.Infof("Waiting for PVC %s/%s to be deleted", targetNamespace, pvc.Name)
+		}
+
+		time.Sleep(time.Second)
+	}
+
+	errorMessage := fmt.Sprintf("Failed to delete PVC %s/%s after %d seconds", targetNamespace, pvc.Name, pvcDeleteTimeoutSeconds)
+	p.log.Error(errorMessage)
+
+	return errors.New(errorMessage)
 }
 
 func NewPvcRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
