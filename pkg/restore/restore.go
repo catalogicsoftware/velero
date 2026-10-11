@@ -44,6 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/selection"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -370,6 +371,7 @@ func (kr *kubernetesRestorer) RestoreWithResolvers(
 		backupVolumeInfoMap:            req.BackupVolumeInfoMap,
 		restoreVolumeInfoTracker:       req.RestoreVolumeInfoTracker,
 		hooksWaitExecutor:              hooksWaitExecutor,
+		isCrossClusterRestore:          req.Restore.Annotations["cloudcasa-cross-cluster-restore"] == "true",
 		resourceDeletionStatusTracker:  req.ResourceDeletionStatusTracker,
 		clusterScopedFilterMap:         clusterScopedFilterMap,
 		namespacedFilterMap:            namespacedFilterMap,
@@ -443,6 +445,8 @@ type restoreContext struct {
 
 	includeNamedResourcesSpecified bool
 	pvListCache                    *corev1api.PersistentVolumeList
+	storageClassMapping            map[string]string // cached old→new SC mapping from configmap
+	isCrossClusterRestore          bool              // Restore CR has cloudcasa-cross-cluster-restore annotation
 }
 
 type resolvedResourceFilter struct {
@@ -751,6 +755,8 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 
 	// Need to set this for additionalItems to be restored.
 	ctx.restoreDir = dir
+
+	ctx.loadStorageClassMapping()
 
 	backupResources, err := archive.NewParser(ctx.log, ctx.fileSystem).Parse(ctx.restoreDir)
 	// If ErrNotExist occurs, it implies that the backup to be restored includes zero items.
@@ -1676,6 +1682,12 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 					// Return early because we don't want to restore the PV itself, we
 					// want to dynamically re-provision it.
 					return warnings, errs, itemExists
+				} else if ctx.shouldDynamicallyProvisionRetainPV(obj) {
+					restoreLogger.Infof("Dynamically re-provisioning persistent volume %s "+
+						"because cross-cluster restore or storage class mapping is configured, "+
+						"even though reclaim policy is not Delete.", backupResourceName)
+					ctx.pvsToProvision.Insert(backupResourceName)
+					return warnings, errs, itemExists
 				} else {
 					obj, err = ctx.handleSkippedPVHasRetainPolicy(obj, restoreLogger)
 					if err != nil {
@@ -1724,6 +1736,13 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 				return warnings, errs, itemExists
 
 			default:
+				if ctx.shouldDynamicallyProvisionRetainPV(obj) {
+					restoreLogger.Infof("Dynamically re-provisioning persistent volume %s "+
+						"because cross-cluster restore or storage class mapping is configured, "+
+						"even though reclaim policy is not Delete.", backupResourceName)
+					ctx.pvsToProvision.Insert(backupResourceName)
+					return warnings, errs, itemExists
+				}
 				obj, err = ctx.handleSkippedPVHasRetainPolicy(obj, restoreLogger)
 				if err != nil {
 					errs.Add(namespace, err)
@@ -3322,6 +3341,73 @@ func namedResourcesIncludeClusterScoped(named map[string]string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// loadStorageClassMapping reads the change-storage-class configmap(s) that carry
+// the CloudCasa job label and caches the old→new storage class mapping.
+func (ctx *restoreContext) loadStorageClassMapping() {
+	ctx.storageClassMapping = make(map[string]string)
+
+	pluginConfigReq, err := labels.NewRequirement(
+		"velero.io/plugin-config", selection.Exists, nil,
+	)
+	if err != nil {
+		ctx.log.WithError(err).Warn("Failed to build plugin-config label requirement")
+		return
+	}
+
+	changeScReq, err := labels.NewRequirement(
+		"velero.io/change-storage-class", selection.Equals, []string{"RestoreItemAction"},
+	)
+	if err != nil {
+		ctx.log.WithError(err).Warn("Failed to build change-storage-class label requirement")
+		return
+	}
+
+	cloudcasaReq, err := labels.NewRequirement(
+		"cloudcasa.io/job-id-for-change-storage-class", selection.Equals, []string{ctx.restore.Name},
+	)
+	if err != nil {
+		ctx.log.WithError(err).Warn("Failed to build cloudcasa job-id label requirement")
+		return
+	}
+
+	selector := labels.NewSelector().Add(*pluginConfigReq, *changeScReq, *cloudcasaReq)
+
+	cmList := &corev1api.ConfigMapList{}
+	err = ctx.kbClient.List(go_context.Background(), cmList, &crclient.ListOptions{
+		Namespace:     ctx.restore.Namespace,
+		LabelSelector: selector,
+	})
+	if err != nil {
+		ctx.log.WithError(err).Warn("Failed to list storage class mapping configmaps")
+		return
+	}
+
+	for i := range cmList.Items {
+		for oldSC, newSC := range cmList.Items[i].Data {
+			ctx.storageClassMapping[oldSC] = newSC
+			ctx.log.Infof("StorageClassMapping: %s -> %s (from configmap %s)",
+				oldSC, newSC, cmList.Items[i].Name)
+		}
+	}
+}
+
+// shouldDynamicallyProvisionRetainPV returns true if a PV with a non-Delete
+// reclaim policy should be dynamically re-provisioned instead of restored as-is:
+// the Restore CR is annotated as a cross-cluster restore AND a storage class
+// mapping exists for it.
+func (ctx *restoreContext) shouldDynamicallyProvisionRetainPV(
+	obj *unstructured.Unstructured,
+) bool {
+	if ctx.isCrossClusterRestore && len(ctx.storageClassMapping) > 0 {
+		ctx.log.Infof(
+			"PV %s: cross-cluster restore with storage class mapping detected, "+
+				"will dynamically provision despite Retain reclaim policy.", obj.GetName(),
+		)
+		return true
 	}
 	return false
 }

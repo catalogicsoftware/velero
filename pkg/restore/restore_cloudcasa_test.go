@@ -25,11 +25,13 @@ import (
 	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/test"
+	"github.com/vmware-tanzu/velero/pkg/types"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
 )
@@ -146,7 +148,7 @@ func TestRestoreClearsAStaleVolumeBindingUnderTheUpdatePolicy(t *testing.T) {
 			pv := builder.ForPersistentVolume("pv-1").ClaimRef("ns-1", "pvc-1").
 				ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).
 				ObjectMeta(builder.WithAnnotations(kubeutil.KubeAnnBindCompleted, "yes")).Result()
-			pv.Spec.ClaimRef.UID = types.UID("uid-of-the-deleted-pvc")
+			pv.Spec.ClaimRef.UID = k8stypes.UID("uid-of-the-deleted-pvc")
 			pv.Spec.ClaimRef.ResourceVersion = "5"
 			require.NoError(t, h.restorer.kbClient.Create(t.Context(), pv.DeepCopy()))
 			h.AddItems(t, test.PVs(pv))
@@ -169,6 +171,68 @@ func TestRestoreClearsAStaleVolumeBindingUnderTheUpdatePolicy(t *testing.T) {
 			} else {
 				assert.Equal(t, "uid-of-the-deleted-pvc", uid)
 			}
+		})
+	}
+}
+
+// A cross-cluster restore with a storage class mapping re-provisions a
+// Retain-policy PV through its PVC instead of restoring the PV as it was.
+func TestRestoreReprovisionsRetainVolumesAcrossClusters(t *testing.T) {
+	skipped := map[string]volume.BackupVolumeInfo{"pv-1": {PVName: "pv-1", Skipped: true}}
+	tests := []struct {
+		name          string
+		crossCluster  bool
+		mapping       bool
+		volumeInfoMap map[string]volume.BackupVolumeInfo
+		wantPVs       []string
+		wantVolume    string
+	}{
+		{name: "cross-cluster with a mapping", crossCluster: true, mapping: true, volumeInfoMap: skipped, wantPVs: []string{}},
+		{name: "cross-cluster with a mapping, no volume info", crossCluster: true, mapping: true, wantPVs: []string{}},
+		{name: "cross-cluster without a mapping", crossCluster: true, volumeInfoMap: skipped, wantPVs: []string{"/pv-1"}, wantVolume: "pv-1"},
+		{name: "a mapping on the same cluster", mapping: true, volumeInfoMap: skipped, wantPVs: []string{"/pv-1"}, wantVolume: "pv-1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.restorer.resourcePriorities = types.Priorities{HighPriorities: []string{"persistentvolumes", "persistentvolumeclaims"}}
+			restore := defaultRestore().Result()
+			if tc.crossCluster {
+				restore.Annotations = map[string]string{"cloudcasa-cross-cluster-restore": "true"}
+			}
+			if tc.mapping {
+				cm := builder.ForConfigMap(restore.Namespace, "cloudcasa-io-change-sc-restore-1").
+					ObjectMeta(builder.WithLabels("velero.io/plugin-config", "", "velero.io/change-storage-class", "RestoreItemAction",
+						"cloudcasa.io/job-id-for-change-storage-class", restore.Name)).
+					Data("sc-old", "sc-new").Result()
+				require.NoError(t, h.restorer.kbClient.Create(t.Context(), cm))
+			}
+			tarball := test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).
+						StorageClass("sc-old").ClaimRef("ns-1", "pvc-1").Result()).
+				AddItems("persistentvolumeclaims",
+					builder.ForPersistentVolumeClaim("ns-1", "pvc-1").VolumeName("pv-1").StorageClass("sc-old").Result()).
+				Done()
+			for _, r := range []*test.APIResource{test.PVs(), test.PVCs()} {
+				h.DiscoveryClient.WithAPIResource(r)
+			}
+			require.NoError(t, h.restorer.discoveryHelper.Refresh())
+
+			_, errs := h.restorer.Restore(&Request{
+				Log:                 h.log,
+				Restore:             restore,
+				Backup:              defaultBackup().Result(),
+				BackupReader:        tarball,
+				BackupVolumeInfoMap: tc.volumeInfoMap,
+			}, nil, nil)
+
+			assertEmptyResults(t, errs)
+			assertAPIContents(t, h, map[*test.APIResource][]string{test.PVs(): tc.wantPVs})
+			pvc, err := h.DynamicClient.Resource(test.PVCs().GVR()).Namespace("ns-1").Get(t.Context(), "pvc-1", metav1.GetOptions{})
+			require.NoError(t, err)
+			volumeName, _, _ := unstructured.NestedString(pvc.Object, "spec", "volumeName")
+			assert.Equal(t, tc.wantVolume, volumeName)
 		})
 	}
 }
