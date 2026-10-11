@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.5
-  name: datadownloads.velero.io
+  name: datadownloads.cloudcasa.io
 spec:
-  group: velero.io
+  group: cloudcasa.io
   names:
     kind: DataDownload
     listKind: DataDownloadList

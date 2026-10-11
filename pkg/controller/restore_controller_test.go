@@ -298,7 +298,7 @@ func TestRestoreReconcile(t *testing.T) {
 			restore:                         NewRestore("foo", "bar", "backup-1", "ns-1", "*", velerov1api.RestorePhaseNew).Result(),
 			expectedErr:                     false,
 			expectedPhase:                   string(velerov1api.RestorePhaseFailedValidation),
-			expectedValidationErrors:        []string{"Error retrieving backup: backup.velero.io \"backup-1\" not found"},
+			expectedValidationErrors:        []string{"Error retrieving backup: backup.cloudcasa.io \"backup-1\" not found"},
 			backupStoreGetBackupMetadataErr: errors.New("no backup here"),
 		},
 		{

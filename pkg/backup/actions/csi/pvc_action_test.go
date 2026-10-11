@@ -156,7 +156,7 @@ func TestExecute(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "velero.io/v1",
+							APIVersion: "cloudcasa.io/v1",
 							Kind:       "Backup",
 							Name:       "test",
 							UID:        "",

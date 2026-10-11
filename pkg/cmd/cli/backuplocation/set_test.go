@@ -104,7 +104,7 @@ func TestSetCommand_Execute(t *testing.T) {
 	_, stderr, err := veleroexec.RunCommand(cmd)
 
 	if err != nil {
-		assert.Contains(t, stderr, "backupstoragelocations.velero.io \"bsl-1\" not found")
+		assert.Contains(t, stderr, "backupstoragelocations.cloudcasa.io \"bsl-1\" not found")
 		return
 	}
 	t.Fatalf("process ran with err %v, want backup delete successfully", err)

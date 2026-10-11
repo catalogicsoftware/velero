@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.5
-  name: backups.velero.io
+  name: backups.cloudcasa.io
 spec:
-  group: velero.io
+  group: cloudcasa.io
   names:
     kind: Backup
     listKind: BackupList

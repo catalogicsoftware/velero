@@ -389,7 +389,7 @@ func TestExecute(t *testing.T) {
 			name:        "restore's backup cannot be found",
 			restore:     builder.ForRestore("velero", "testRestore").Backup("testBackup").Result(),
 			pvc:         builder.ForPersistentVolumeClaim("velero", "testPVC").Result(),
-			expectedErr: "fail to get backup for restore: backups.velero.io \"testBackup\" not found",
+			expectedErr: "fail to get backup for restore: backups.cloudcasa.io \"testBackup\" not found",
 		},
 		{
 			name:    "Restore from VolumeSnapshot",

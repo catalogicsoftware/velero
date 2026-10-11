@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.5
-  name: datauploads.velero.io
+  name: datauploads.cloudcasa.io
 spec:
-  group: velero.io
+  group: cloudcasa.io
   names:
     kind: DataUpload
     listKind: DataUploadList

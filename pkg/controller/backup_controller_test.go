@@ -192,7 +192,7 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 		{
 			name:         "non-existent backup location fails validation",
 			backup:       defaultBackup().StorageLocation("nonexistent").Result(),
-			expectedErrs: []string{"an existing backup storage location was not specified at backup creation time and the default nonexistent was not found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.velero.io \"nonexistent\" not found"},
+			expectedErrs: []string{"an existing backup storage location was not specified at backup creation time and the default nonexistent was not found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.cloudcasa.io \"nonexistent\" not found"},
 		},
 		{
 			name:           "backup for read-only backup location fails validation",
@@ -386,7 +386,7 @@ func Test_prepareBackupRequest_BackupStorageLocation(t *testing.T) {
 			backupLocationInAPIServer:        nil,
 			defaultBackupLocationInAPIServer: nil,
 			expectedSuccess:                  false,
-			expectedValidationError:          "an existing backup storage location was not specified at backup creation time and the default test-backup-location was not found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.velero.io \"test-backup-location\" not found",
+			expectedValidationError:          "an existing backup storage location was not specified at backup creation time and the default test-backup-location was not found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.cloudcasa.io \"test-backup-location\" not found",
 		},
 		{
 			name:                             "Using default BackupLocation and it can be found in ApiServer",
@@ -404,7 +404,7 @@ func Test_prepareBackupRequest_BackupStorageLocation(t *testing.T) {
 			backupLocationInAPIServer:        nil,
 			defaultBackupLocationInAPIServer: nil,
 			expectedSuccess:                  false,
-			expectedValidationError:          fmt.Sprintf("an existing backup storage location was not specified at backup creation time and the server default %s does not exist. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.velero.io \"%s\" not found", defaultBackupLocation, defaultBackupLocation),
+			expectedValidationError:          fmt.Sprintf("an existing backup storage location was not specified at backup creation time and the server default %s does not exist. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.cloudcasa.io \"%s\" not found", defaultBackupLocation, defaultBackupLocation),
 		},
 	}
 
@@ -723,7 +723,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -763,7 +763,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -807,7 +807,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -847,7 +847,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -889,7 +889,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -931,7 +931,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -973,7 +973,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1015,7 +1015,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1057,7 +1057,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1100,7 +1100,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1143,7 +1143,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1186,7 +1186,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1230,7 +1230,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1274,7 +1274,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1318,7 +1318,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1363,7 +1363,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1407,7 +1407,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1455,7 +1455,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1505,7 +1505,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
-					APIVersion: "velero.io/v1",
+					APIVersion: "cloudcasa.io/v1",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: velerov1api.DefaultNamespace,
@@ -1686,7 +1686,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "aws-us-west-1").Provider("aws").Result(),
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "some-name").Provider("fake-provider").Result(),
 			},
-			expectedErrors: "a VolumeSnapshotLocation CRD for the location random-name with the name specified in the backup spec needs to be created before this snapshot can be executed. Error: volumesnapshotlocations.velero.io \"random-name\" not found", expectedSuccess: false,
+			expectedErrors: "a VolumeSnapshotLocation CRD for the location random-name with the name specified in the backup spec needs to be created before this snapshot can be executed. Error: volumesnapshotlocations.cloudcasa.io \"random-name\" not found", expectedSuccess: false,
 			bsl: *defaultBSL,
 		},
 		{
@@ -1771,7 +1771,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "some-name").Provider("fake-provider").Result(),
 			},
 			expectedVolumeSnapshotLocationNames: nil,
-			expectedErrors:                      "a VolumeSnapshotLocation CRD for the location random-name with the name specified in the backup spec needs to be created before this snapshot can be executed. Error: volumesnapshotlocations.velero.io \"random-name\" not found", expectedSuccess: false,
+			expectedErrors:                      "a VolumeSnapshotLocation CRD for the location random-name with the name specified in the backup spec needs to be created before this snapshot can be executed. Error: volumesnapshotlocations.cloudcasa.io \"random-name\" not found", expectedSuccess: false,
 			bsl: *defaultBSL,
 		},
 		{
