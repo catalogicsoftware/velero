@@ -1806,13 +1806,29 @@ func TestWaitUntilVSCHandleIsReady(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actualVSC, actualError := WaitUntilVSCHandleIsReady(tc.volSnap, fakeClient, logrus.New().WithField("fake", "test"), 0)
-			if tc.expectError && actualError == nil {
+			// The progress report needs the backup label, which every VolumeSnapshot
+			// created by the backup carries. The watch shares one deadline, so a
+			// failing case is bounded by a short timeout.
+			volSnap := tc.volSnap.DeepCopy()
+			if volSnap.Labels == nil {
+				volSnap.Labels = map[string]string{}
+			}
+			volSnap.Labels[velerov1api.BackupNameLabel] = "backup-1"
+			timeout := 30 * time.Second
+			if tc.expectError {
+				timeout = time.Second
+			}
+
+			actualVSC, actualError := WaitUntilVSCHandleIsReady(volSnap, fakeClient, logrus.New().WithField("fake", "test"), timeout)
+			if tc.expectError {
 				require.Error(t, actualError)
 				assert.Nil(t, actualVSC)
 				return
 			}
-			assert.Equal(t, tc.exepctedVSC, actualVSC)
+			require.NoError(t, actualError)
+			assert.Equal(t, tc.exepctedVSC.Name, actualVSC.Name)
+			assert.Equal(t, tc.exepctedVSC.Status.SnapshotHandle, actualVSC.Status.SnapshotHandle)
+			assert.Equal(t, volSnap.Namespace, actualVSC.Annotations["cc-pvc-namespace"])
 		})
 	}
 }
@@ -2155,4 +2171,37 @@ func TestGetVolumeSnapshotClassCreatesFallbackClass(t *testing.T) {
 	again, err := GetVolumeSnapshotClass("blah.csi.k8s.io", backup, pvc, logrus.New(), fakeClient)
 	require.NoError(t, err)
 	assert.Equal(t, "cloudcasa-blah-csi-k8s-io", again.Name)
+}
+
+// The wait watches the objects, so it returns as soon as the snapshot is bound
+// and handled instead of on the next poll (KUBEDR-7625).
+func TestWaitUntilVSCHandleIsReadyReactsToLaterBinding(t *testing.T) {
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).
+		SourcePVC("pvc-1").Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs)
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		bound := vs.DeepCopy()
+		require.NoError(t, client.Get(t.Context(), crclient.ObjectKeyFromObject(vs), bound))
+		vscName := "vsc-1"
+		bound.Status = &snapshotv1api.VolumeSnapshotStatus{BoundVolumeSnapshotContentName: &vscName}
+		require.NoError(t, client.Update(t.Context(), bound))
+		handle := "handle-1"
+		require.NoError(t, client.Create(t.Context(),
+			builder.ForVolumeSnapshotContent(vscName).Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}).Result()))
+	}()
+
+	start := time.Now()
+	vsc, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), time.Minute)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Equal(t, "vsc-1", vsc.Name)
+	assert.Equal(t, "handle-1", *vsc.Status.SnapshotHandle)
+	assert.Equal(t, "pvc-1", vsc.Annotations["cc-pvc-name"])
+	assert.Equal(t, "ns", vsc.Annotations["cc-pvc-namespace"])
+	assert.Equal(t, "vsc-1", *vs.Status.BoundVolumeSnapshotContentName, "the caller's VolumeSnapshot gets the live status")
+	assert.Less(t, elapsed, 3*time.Second, "a 5s poll would not have returned yet")
 }

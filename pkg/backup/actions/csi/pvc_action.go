@@ -657,7 +657,8 @@ func cancelDataUpload(
 
 func NewPvcBackupItemAction(f veleroclient.Factory) plugincommon.HandlerInitializer {
 	return func(logger logrus.FieldLogger) (any, error) {
-		crClient, err := f.KubebuilderClient()
+		// WaitUntilVSCHandleIsReady watches the snapshot objects, so the client must watch.
+		crClient, err := f.KubebuilderWatchClient()
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
