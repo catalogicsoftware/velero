@@ -18,10 +18,13 @@ package csi
 
 import (
 	"context"
+	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/google/uuid"
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/sirupsen/logrus"
+	corev1api "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +42,10 @@ type volumeSnapshotContentDeleteItemAction struct {
 	log      logrus.FieldLogger
 	crClient crclient.Client
 }
+
+const tempVSCCreateDeleteGap = 2 * time.Second
+
+var sleepBetweenTempVSCCreateAndDelete = time.Sleep
 
 // AppliesTo returns information indicating
 // VolumeSnapshotContentRestoreItemAction action should be invoked
@@ -82,27 +89,81 @@ func (p *volumeSnapshotContentDeleteItemAction) Execute(
 		p.crClient,
 		snapshotv1api.VolumeSnapshotContentDelete,
 	); err != nil {
-		// #4764: Leave a warning when VolumeSnapshotContent cannot be found for deletion.
-		// Manual deleting VolumeSnapshotContent can cause this.
-		// It's tricky for Velero to handle this inconsistency.
-		// Even if Velero restores the VolumeSnapshotContent, CSI snapshot controller
-		// may not delete it correctly due to the snapshot represented by VolumeSnapshotContent
-		// already deleted on cloud provider.
 		if apierrors.IsNotFound(err) {
-			snapshotHandle := "<unknown>"
-			if snapCont.Status != nil && snapCont.Status.SnapshotHandle != nil {
-				snapshotHandle = *snapCont.Status.SnapshotHandle
-			}
-			p.log.Warnf(
-				"VolumeSnapshotContent %s of backup %s cannot be found. May leave orphan snapshot %s on cloud provider.",
-				snapCont.Name, input.Backup.Name, snapshotHandle)
-			return nil
+			return p.deleteThroughTempVSC(snapCont, input.Backup.Name)
 		}
 		return errors.Wrapf(err,
 			"failed to set DeletionPolicy on volumesnapshotcontent %s. Skipping deletion",
 			snapCont.Name)
 	}
 
+	if err := p.crClient.Delete(
+		context.TODO(),
+		&snapCont,
+	); err != nil && !apierrors.IsNotFound(err) {
+		p.log.Infof("VolumeSnapshotContent %s not found", snapCont.Name)
+		return err
+	}
+
+	return nil
+}
+
+// deleteThroughTempVSC deletes the storage snapshot of a VolumeSnapshotContent
+// that is no longer in the cluster: it re-creates the content from the backup
+// under a new name with policy Delete, then deletes it.
+func (p *volumeSnapshotContentDeleteItemAction) deleteThroughTempVSC(
+	snapCont snapshotv1api.VolumeSnapshotContent,
+	backupName string,
+) error {
+	if snapCont.Status == nil || snapCont.Status.SnapshotHandle == nil {
+		p.log.Warnf(
+			"VolumeSnapshotContent %s of backup %s cannot be found and the backup has no snapshot handle for it. "+
+				"May leave orphan snapshot <unknown> on cloud provider.",
+			snapCont.Name, backupName)
+		return nil
+	}
+	p.log.Infof("VolumeSnapshotContent %s of backup %s cannot be found. Deleting snapshot %s through a temporary VolumeSnapshotContent.",
+		snapCont.Name, backupName, *snapCont.Status.SnapshotHandle)
+
+	uuid, err := uuid.NewRandom()
+	if err != nil {
+		p.log.WithError(err).Errorf("Fail to generate the UUID to create VSC %s", snapCont.Name)
+		return errors.Wrapf(err, "Fail to generate the UUID to create VSC %s", snapCont.Name)
+	}
+	snapCont.Name = "vsc-" + uuid.String()
+
+	snapCont.Spec.DeletionPolicy = snapshotv1api.VolumeSnapshotContentDelete
+
+	snapCont.Spec.Source = snapshotv1api.VolumeSnapshotContentSource{
+		SnapshotHandle: snapCont.Status.SnapshotHandle,
+	}
+
+	snapCont.Spec.VolumeSnapshotRef = corev1api.ObjectReference{
+		APIVersion: snapshotv1api.SchemeGroupVersion.String(),
+		Kind:       "VolumeSnapshot",
+		Namespace:  "ns-" + string(snapCont.UID),
+		Name:       "name-" + string(snapCont.UID),
+	}
+
+	snapCont.ResourceVersion = ""
+
+	if snapCont.Spec.VolumeSnapshotClassName != nil {
+		// Delete VolumeSnapshotClass from the VolumeSnapshotContent.
+		// This is necessary to make the deletion independent of the VolumeSnapshotClass.
+		snapCont.Spec.VolumeSnapshotClassName = nil
+		p.log.Debugf("Deleted VolumeSnapshotClassName from VolumeSnapshotContent %s to make deletion independent of VolumeSnapshotClass",
+			snapCont.Name)
+	}
+
+	if err := p.crClient.Create(context.TODO(), &snapCont); err != nil {
+		return errors.Wrapf(err, "fail to create VolumeSnapshotContent %s", snapCont.Name)
+	}
+
+	// Add a small delay before delete to avoid create/delete race conditions in CSI controllers.
+	sleepBetweenTempVSCCreateAndDelete(tempVSCCreateDeleteGap)
+
+	// Delete the temp VSC immediately to trigger cloud snapshot removal.
+	// The CSI driver will handle the actual cloud snapshot deletion.
 	if err := p.crClient.Delete(
 		context.TODO(),
 		&snapCont,
