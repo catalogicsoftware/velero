@@ -225,12 +225,12 @@ func (p *pvcRestoreItemAction) Execute(
 			if err != nil {
 				logger.Errorf("Failed to restore PVC from VolumeSnapshot.")
 				relayRestoreProgress(&pvc, "error",
-					fmt.Sprintf("failed to restore PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
+					fmt.Sprintf("failed to restore PVC %s/%s from the CSI snapshot", pvc.Namespace, pvc.Name),
 					input.Restore.Name, logger)
 				return nil, errors.WithStack(err)
 			}
 			relayRestoreProgress(&pvc, "completed",
-				fmt.Sprintf("Successfully created PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
+				fmt.Sprintf("Successfully created PVC %s/%s from the CSI snapshot", pvc.Namespace, pvc.Name),
 				input.Restore.Name, logger)
 
 			// The Azure Files mover restores without the VolumeSnapshot.

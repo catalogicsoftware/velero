@@ -263,7 +263,7 @@ func TestExecuteRelaysRestoreProgress(t *testing.T) {
 		_, _, err := executeRestoreOnPVC(t, p, restore, pvc)
 
 		require.NoError(t, err)
-		assert.Equal(t, []relayedProgress{{"completed", "Successfully created PVC pvc-1/ns from the CSI snapshot", "restore-1"}}, *relayed)
+		assert.Equal(t, []relayedProgress{{"completed", "Successfully created PVC ns/pvc-1 from the CSI snapshot", "restore-1"}}, *relayed)
 		assert.Equal(t, []string{"restore-1"}, *deleted)
 	})
 	t.Run("failed", func(t *testing.T) {
@@ -275,7 +275,7 @@ func TestExecuteRelaysRestoreProgress(t *testing.T) {
 		_, _, err := executeRestoreOnPVC(t, p, restore, pvc)
 
 		require.Error(t, err)
-		assert.Equal(t, []relayedProgress{{"error", "failed to restore PVC pvc-1/ns from the CSI snapshot", "restore-1"}}, *relayed)
+		assert.Equal(t, []relayedProgress{{"error", "failed to restore PVC ns/pvc-1 from the CSI snapshot", "restore-1"}}, *relayed)
 		assert.Equal(t, []string{"restore-1"}, *deleted)
 	})
 }
