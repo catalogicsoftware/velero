@@ -386,7 +386,7 @@ func (p *pvcBackupItemAction) Execute(
 	defer func() {
 		uErr := updateSnapshotProgress(&pvc, nil, nil, snapshotState, snapshotStateMessage, backup.Name, p.log)
 		if uErr != nil {
-			p.log.Error(err, "<SNAPSHOT PROGRESS UPDATE> Failed to update snapshot progress. Continuing...")
+			p.log.WithError(uErr).Error("<SNAPSHOT PROGRESS UPDATE> Failed to update snapshot progress. Continuing...")
 		}
 	}()
 

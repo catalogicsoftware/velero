@@ -18,12 +18,15 @@ package csi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1api "k8s.io/api/core/v1"
@@ -226,4 +229,29 @@ func TestExecuteKeepsLabelsAndAnnotationsApart(t *testing.T) {
 		assert.Contains(t, pvc.Labels, key)
 		assert.Contains(t, pvc.Annotations, key)
 	}
+}
+
+// When relaying progress fails, the log names the relay error.
+func TestExecuteLogsTheProgressRelayError(t *testing.T) {
+	previous := updateSnapshotProgress
+	updateSnapshotProgress = func(*corev1api.PersistentVolumeClaim, *snapshotv1api.VolumeSnapshot,
+		*snapshotv1api.VolumeSnapshotContent, string, string, string, logrus.FieldLogger) error {
+		return errors.New("configmap write refused")
+	}
+	t.Cleanup(func() { updateSnapshotProgress = previous })
+
+	logger, hook := logrustest.NewNullLogger()
+	client := velerotest.NewFakeControllerRuntimeClient(t, cloudcasaPVCFixture()[:2]...) // no StorageClass
+	p := &pvcBackupItemAction{log: logger, crClient: client}
+
+	_, err := executeOnPVC(t, p, builder.ForBackup("velero", "backup-1").Result())
+	require.Error(t, err)
+
+	found := false
+	for _, entry := range hook.AllEntries() {
+		if strings.Contains(entry.Message, "Failed to update snapshot progress") {
+			found = fmt.Sprint(entry.Data[logrus.ErrorKey]) == "configmap write refused"
+		}
+	}
+	assert.True(t, found, "the relay error is logged")
 }
