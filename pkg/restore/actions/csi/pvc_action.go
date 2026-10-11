@@ -340,14 +340,7 @@ func (p *pvcRestoreItemAction) processAzureRestore(pvc *corev1api.PersistentVolu
 	if err := p.crClient.List(context.TODO(), vscList); err != nil {
 		return errors.Wrapf(err, "Failed to list VolumeSnapshotContents to restore PVC %s/%s", pvc.Namespace, pvc.Name)
 	}
-	var volumeSnapshotContentName string
-	for _, vsc := range vscList.Items {
-		if vsc.Spec.VolumeSnapshotRef.Namespace == pvc.Namespace && vsc.Spec.VolumeSnapshotRef.Name == volumeSnapshotName &&
-			strings.HasPrefix(vsc.Name, "snapcontent-") {
-			volumeSnapshotContentName = vsc.Name
-			break
-		}
-	}
+	volumeSnapshotContentName := azureFilesSnapshotContent(vscList.Items, pvc, volumeSnapshotName, restore.Spec.BackupName)
 	if volumeSnapshotContentName == "" {
 		return errors.Errorf("Failed to get VolumeSnapshotContent for VolumeSnapshot %s/%s", pvc.Namespace, volumeSnapshotName)
 	}
@@ -389,6 +382,28 @@ func (p *pvcRestoreItemAction) processAzureRestore(pvc *corev1api.PersistentVolu
 	log.Infof("Azure Files PVC Found %s/%s. Sleeping %v before returning from restore PVC action plugin", pvc.Namespace, pvc.Name, pvcRestoreWaitTime)
 	azureFilesSleep(pvcRestoreWaitTime)
 	return nil
+}
+
+// azureFilesSnapshotContent names the in-cluster VolumeSnapshotContent of the
+// PVC's backed-up VolumeSnapshot. A Delete-policy content is re-created at the
+// end of the backup with a placeholder VolumeSnapshotRef; it keeps its backup
+// label and the cc-pvc-* annotations, which find it.
+func azureFilesSnapshotContent(vscs []snapshotv1api.VolumeSnapshotContent, pvc *corev1api.PersistentVolumeClaim,
+	volumeSnapshotName, backupName string) string {
+	for _, vsc := range vscs {
+		ref := vsc.Spec.VolumeSnapshotRef
+		if strings.HasPrefix(vsc.Name, "snapcontent-") && ref.Namespace == pvc.Namespace && ref.Name == volumeSnapshotName {
+			return vsc.Name
+		}
+	}
+	for _, vsc := range vscs {
+		if strings.HasPrefix(vsc.Name, "snapcontent-") &&
+			vsc.Labels[velerov1api.BackupNameLabel] == label.GetValidName(backupName) &&
+			vsc.Annotations["cc-pvc-namespace"] == pvc.Namespace && vsc.Annotations["cc-pvc-name"] == pvc.Name {
+			return vsc.Name
+		}
+	}
+	return ""
 }
 
 // setPVCStorageResourceRequest raises the PVC's storage request to restoreSize.

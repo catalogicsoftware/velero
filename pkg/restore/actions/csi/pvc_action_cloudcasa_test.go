@@ -36,6 +36,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 	"github.com/vmware-tanzu/velero/pkg/util"
+	"github.com/vmware-tanzu/velero/pkg/util/csi"
 )
 
 // Unit tests run outside a cluster, where kubeagent's progress ConfigMap
@@ -433,4 +434,90 @@ func TestExecuteMatchesAzureFilesSnapshotContentByNamespace(t *testing.T) {
 	_, _, err := executeRestoreOnPVC(t, p, restore, pvc)
 
 	require.ErrorContains(t, err, "Failed to get VolumeSnapshotContent for VolumeSnapshot ns/cc-pvc-1-abcde")
+}
+
+// An Azure Files snapshot taken with a Delete-policy class has its content
+// re-created at the end of the backup with a placeholder VolumeSnapshotRef.
+// The mover restore must still find that content.
+func TestExecuteFindsAzureFilesContentRecreatedAfterTheBackup(t *testing.T) {
+	restore, pvc, objects, _ := azureFilesFixture(t, "")
+	objects = objects[:len(objects)-2] // without the fixture's contents
+	vscName, handle, ready := "snapcontent-1234", "share-snapshot-1", true
+	vs := builder.ForVolumeSnapshot("ns", "cc-pvc-1-abcde").Status().BoundVolumeSnapshotContentName(vscName).Result()
+	vs.Status.ReadyToUse = &ready
+	vsc := builder.ForVolumeSnapshotContent(vscName).Driver(azureFilesDriver).
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1"),
+			builder.WithAnnotations("cc-pvc-name", "pvc-1", "cc-pvc-namespace", "ns")).
+		Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}).Result()
+	vsc.Spec.DeletionPolicy = snapshotv1api.VolumeSnapshotContentDelete
+	vsc.Spec.VolumeSnapshotRef = corev1api.ObjectReference{Namespace: "ns", Name: "cc-pvc-1-abcde"}
+	client := velerotest.NewFakeControllerRuntimeClient(t, append(objects, vs, vsc)...)
+
+	// The end of the backup, as the engine runs it.
+	csi.DeleteVolumeSnapshot(*vs, *vsc, builder.ForBackup("velero", "backup-1").Result(), client, logrus.New())
+	kept := new(snapshotv1api.VolumeSnapshotContent)
+	require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: vscName}, kept))
+	require.Equal(t, snapshotv1api.VolumeSnapshotContentRetain, kept.Spec.DeletionPolicy)
+	require.NotEqual(t, "cc-pvc-1-abcde", kept.Spec.VolumeSnapshotRef.Name, "the content has a placeholder reference")
+
+	p := &pvcRestoreItemAction{log: logrus.New(), crClient: client}
+	_, restored, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+	require.NoError(t, err)
+	assert.Equal(t, vscName, restored.Annotations["cloudcasa-volume-snapshot-content-name"])
+}
+
+// A re-created content is the restore's backup's content of the same PVC.
+func TestExecuteMatchesRecreatedAzureFilesContentByBackupAndPVC(t *testing.T) {
+	recreated := func(name, backup, pvcNamespace, pvcName string) runtime.Object {
+		vsc := builder.ForVolumeSnapshotContent(name).Driver(azureFilesDriver).
+			ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, backup),
+				builder.WithAnnotations("cc-pvc-name", pvcName, "cc-pvc-namespace", pvcNamespace)).Result()
+		vsc.Spec.VolumeSnapshotRef = corev1api.ObjectReference{Namespace: "ns-uid", Name: "name-uid"}
+		return vsc
+	}
+	tests := []struct {
+		name     string
+		contents []runtime.Object
+		want     string
+	}{
+		{
+			name: "this backup's content of this PVC",
+			contents: []runtime.Object{
+				recreated("snapcontent-1", "backup-0", "ns", "pvc-1"),
+				recreated("snapcontent-2", "backup-1", "ns", "pvc-1"),
+				recreated("snapcontent-3", "backup-1", "ns", "pvc-2"),
+				recreated("snapcontent-4", "backup-1", "other", "pvc-1"),
+			},
+			want: "snapcontent-2",
+		},
+		{
+			name: "no content of this PVC in this backup",
+			contents: []runtime.Object{
+				recreated("snapcontent-1", "backup-0", "ns", "pvc-1"),
+				recreated("snapcontent-3", "backup-1", "ns", "pvc-2"),
+				recreated("snapcontent-4", "backup-1", "other", "pvc-1"),
+			},
+		},
+		{
+			name:     "a content made by a restore",
+			contents: []runtime.Object{recreated("4f1c0d2e9a7b", "backup-1", "ns", "pvc-1")},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			restore, pvc, objects, _ := azureFilesFixture(t, "")
+			objects = append(objects[:len(objects)-2], tc.contents...)
+			p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects...)}
+
+			_, restored, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+			if tc.want == "" {
+				require.ErrorContains(t, err, "Failed to get VolumeSnapshotContent for VolumeSnapshot ns/cc-pvc-1-abcde")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, restored.Annotations["cloudcasa-volume-snapshot-content-name"])
+		})
+	}
 }
