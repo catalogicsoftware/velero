@@ -467,6 +467,10 @@ func (v *BackupVolumesInformation) generateVolumeInfoForCSIVolumeSnapshot() {
 		if volumeSnapshotContent.Status.SnapshotHandle != nil {
 			snapshotHandle = *volumeSnapshotContent.Status.SnapshotHandle
 		}
+		volumeSnapshotClassName := ""
+		if volumeSnapshot.Spec.VolumeSnapshotClassName != nil {
+			volumeSnapshotClassName = *volumeSnapshot.Spec.VolumeSnapshotClassName
+		}
 		volumeGroupSnapshotHandle := ""
 		if volumeSnapshotContent.Status != nil && volumeSnapshotContent.Status.VolumeGroupSnapshotHandle != nil {
 			volumeGroupSnapshotHandle = *volumeSnapshotContent.Status.VolumeGroupSnapshotHandle
@@ -487,7 +491,7 @@ func (v *BackupVolumesInformation) generateVolumeInfoForCSIVolumeSnapshot() {
 					SnapshotHandle:            snapshotHandle,
 					OperationID:               operation.Spec.OperationID,
 					VSName:                    volumeSnapshot.Name,
-					VSCLSName:                 *volumeSnapshot.Spec.VolumeSnapshotClassName,
+					VSCLSName:                 volumeSnapshotClassName,
 					ReadyToUse:                volumeSnapshot.Status.ReadyToUse,
 					VolumeGroupSnapshotHandle: volumeGroupSnapshotHandle,
 				},

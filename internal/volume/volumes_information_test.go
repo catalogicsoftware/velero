@@ -1264,3 +1264,44 @@ func TestGetVolumeSnapshotClasses(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []snapshotv1api.VolumeSnapshotClass{*class}, result)
 }
+
+// A VolumeSnapshot may name no class (the CSI default class is used, or it was
+// created by a VolumeGroupSnapshot); its volume info must still be generated.
+func TestGenerateVolumeInfoForCSIVolumeSnapshotWithoutClass(t *testing.T) {
+	now := metav1.Now()
+	readyToUse := true
+	volumesInfo := BackupVolumesInformation{}
+	volumesInfo.Init()
+	volumesInfo.pvMap.insert(corev1api.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "testPV"}}, "testPVC", "velero")
+	volumesInfo.BackupOperations = append(volumesInfo.BackupOperations, &itemoperation.BackupOperation{
+		Spec: itemoperation.BackupOperationSpec{
+			OperationID: "testID",
+			ResourceIdentifier: velero.ResourceIdentifier{
+				GroupResource: schema.GroupResource{Group: "snapshot.storage.k8s.io", Resource: "volumesnapshots"},
+				Namespace:     "velero",
+				Name:          "testVS",
+			},
+		},
+	})
+	volumesInfo.volumeSnapshots = []snapshotv1api.VolumeSnapshot{{
+		ObjectMeta: metav1.ObjectMeta{Name: "testVS", Namespace: "velero", CreationTimestamp: now},
+		Spec: snapshotv1api.VolumeSnapshotSpec{
+			Source: snapshotv1api.VolumeSnapshotSource{PersistentVolumeClaimName: stringPtr("testPVC")},
+		},
+		Status: &snapshotv1api.VolumeSnapshotStatus{
+			BoundVolumeSnapshotContentName: stringPtr("testContent"),
+			CreationTime:                   &now,
+			ReadyToUse:                     &readyToUse,
+		},
+	}}
+	volumesInfo.volumeSnapshotContents = []snapshotv1api.VolumeSnapshotContent{
+		*builder.ForVolumeSnapshotContent("testContent").Driver("pd.csi.storage.gke.io").
+			Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: stringPtr("testSnapshotHandle")}).Result(),
+	}
+	volumesInfo.logger = logging.DefaultLogger(logrus.DebugLevel, logging.FormatJSON)
+
+	require.NotPanics(t, volumesInfo.generateVolumeInfoForCSIVolumeSnapshot)
+	require.Len(t, volumesInfo.volumeInfos, 1)
+	assert.Equal(t, "testVS", volumesInfo.volumeInfos[0].CSISnapshotInfo.VSName)
+	assert.Empty(t, volumesInfo.volumeInfos[0].CSISnapshotInfo.VSCLSName)
+}
