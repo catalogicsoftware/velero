@@ -22,11 +22,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/test"
+	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
 )
 
@@ -121,6 +125,50 @@ func TestRestoreUpdatesAnExistingNamespaceUnderTheUpdatePolicy(t *testing.T) {
 			got, err := h.DynamicClient.Resource(test.Namespaces().GVR()).Get(t.Context(), "ns-1", metav1.GetOptions{})
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantLabels, got.GetLabels())
+		})
+	}
+}
+
+// With the update policy, a PV still claimed by an earlier PVC of the same
+// name loses that stale binding, so the restored PVC can bind to it.
+func TestRestoreClearsAStaleVolumeBindingUnderTheUpdatePolicy(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      string
+		wantCleared bool
+	}{
+		{name: "update policy", policy: string(velerov1api.PolicyTypeUpdate), wantCleared: true},
+		{name: "no policy"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			pv := builder.ForPersistentVolume("pv-1").ClaimRef("ns-1", "pvc-1").
+				ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).
+				ObjectMeta(builder.WithAnnotations(kubeutil.KubeAnnBindCompleted, "yes")).Result()
+			pv.Spec.ClaimRef.UID = types.UID("uid-of-the-deleted-pvc")
+			pv.Spec.ClaimRef.ResourceVersion = "5"
+			require.NoError(t, h.restorer.kbClient.Create(t.Context(), pv.DeepCopy()))
+			h.AddItems(t, test.PVs(pv))
+			tarball := test.NewTarWriter(t).
+				AddItems("persistentvolumeclaims", builder.ForPersistentVolumeClaim("ns-1", "pvc-1").Result()).
+				Done()
+			restore := defaultRestore().ExistingResourcePolicy(tc.policy).Result()
+
+			_, errs := runRestore(t, h, restore, tarball, test.PVCs(), test.PVs())
+
+			assertEmptyResults(t, errs)
+			got, err := h.DynamicClient.Resource(test.PVs().GVR()).Get(t.Context(), "pv-1", metav1.GetOptions{})
+			require.NoError(t, err)
+			uid, _, _ := unstructured.NestedString(got.Object, "spec", "claimRef", "uid")
+			name, _, _ := unstructured.NestedString(got.Object, "spec", "claimRef", "name")
+			assert.Equal(t, "pvc-1", name, "the claim stays reserved for the PVC name")
+			if tc.wantCleared {
+				assert.Empty(t, uid)
+				assert.NotContains(t, got.GetAnnotations(), kubeutil.KubeAnnBindCompleted)
+			} else {
+				assert.Equal(t, "uid-of-the-deleted-pvc", uid)
+			}
 		})
 	}
 }
