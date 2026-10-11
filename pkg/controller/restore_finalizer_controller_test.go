@@ -1090,3 +1090,46 @@ func TestCleanupStubVGSC(t *testing.T) {
 		})
 	}
 }
+
+// When patching a restored PV fails, the finalizer does not also wait for
+// restore exec hooks; otherwise it waits for them as usual.
+func TestFinalizerSkipsTheHookWaitWhenPVPatchingFails(t *testing.T) {
+	failingPV := []*volume.BackupVolumeInfo{{
+		BackupMethod: "PodVolumeBackup",
+		PVCName:      "pvc1",
+		PVName:       "pv1",
+		PVCNamespace: "ns1",
+		PVInfo:       &volume.PVInfo{ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete)},
+	}}
+	tests := []struct {
+		name         string
+		volumeInfo   []*volume.BackupVolumeInfo
+		wantPVErr    bool
+		wantHookWait bool
+	}{
+		{name: "PV patching fails", volumeInfo: failingPV, wantPVErr: true},
+		{name: "nothing to patch", wantHookWait: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := builder.ForRestore(velerov1api.DefaultNamespace, "restore").Result()
+			tracker := hook.NewMultiHookTracker()
+			tracker.Add(restore.Name, "ns1", "pod", "con1", "s1", "h1", hook.PhasePre, 0) // never recorded
+			ctx := &finalizerContext{
+				logger:           velerotest.NewLogger(),
+				crClient:         velerotest.NewFakeControllerRuntimeClientBuilder(t).Build(),
+				restore:          restore,
+				restoredPVCList:  map[string]struct{}{"ns1/pvc1": {}},
+				volumeInfo:       tc.volumeInfo,
+				multiHookTracker: tracker,
+				resourceTimeout:  time.Second,
+			}
+			require.NoError(t, ctx.crClient.Create(t.Context(), restore))
+
+			_, errs := ctx.execute()
+
+			assert.Equal(t, tc.wantPVErr, len(errs.Namespaces["ns1"]) > 0, "PV patch error")
+			assert.Equal(t, tc.wantHookWait, len(errs.Namespaces[velerov1api.DefaultNamespace]) > 0, "hook wait timed out")
+		})
+	}
+}

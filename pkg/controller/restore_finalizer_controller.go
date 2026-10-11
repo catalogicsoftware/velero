@@ -311,6 +311,24 @@ func (ctx *finalizerContext) execute() (results.Result, results.Result) {
 		warnings.Merge(&vgscWarnings)
 	}
 
+	// Pods on volumes that failed to bind may never run their exec hooks, so
+	// waiting for those hooks would only hold the restore until the timeout.
+	if !pdpErrs.IsEmpty() {
+		ctx.logger.Warn("PV patching failed. Skipping restore exec hook wait.")
+		for _, msg := range pdpErrs.Velero {
+			ctx.logger.Warnf("Velero error: %s", msg)
+		}
+		for _, msg := range pdpErrs.Cluster {
+			ctx.logger.Warnf("Cluster error: %s", msg)
+		}
+		for ns, msgs := range pdpErrs.Namespaces {
+			for _, msg := range msgs {
+				ctx.logger.Warnf("Namespace: %s, error: %s", ns, msg)
+			}
+		}
+		return warnings, errs
+	}
+
 	rehErrs := ctx.WaitRestoreExecHook()
 	errs.Merge(&rehErrs)
 
