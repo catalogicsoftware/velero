@@ -6305,3 +6305,13 @@ func TestBackupIncludeNamedResources(t *testing.T) {
 		})
 	}
 }
+
+// Empty entries (a trailing or doubled comma) name no object and must not
+// become identifiers that the collector then fails to get.
+func TestParseIncludeNamedResourcesSkipsEmptyEntries(t *testing.T) {
+	ids := parseIncludeNamedResources(map[string]string{"pods": "ns-1/a, ,ns-1/b,"}, logrus.New())
+	assert.Equal(t, []velero.ResourceIdentifier{
+		{GroupResource: schema.GroupResource{Resource: "pods"}, Namespace: "ns-1", Name: "a"},
+		{GroupResource: schema.GroupResource{Resource: "pods"}, Namespace: "ns-1", Name: "b"},
+	}, ids)
+}

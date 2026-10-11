@@ -1525,6 +1525,9 @@ func parseIncludeNamedResources(includeMap map[string]string, log logrus.FieldLo
 		log.Infof("Parsing resource type '%s' with names string: '%s'", resourceType, namesStr)
 		for _, n := range strings.Split(namesStr, ",") {
 			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
 			var ns, name string
 			if strings.Contains(n, "/") {
 				parts := strings.SplitN(n, "/", 2)

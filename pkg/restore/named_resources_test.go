@@ -149,3 +149,9 @@ func TestGetVolumeSnapshotDetailsFromExtractedBackup(t *testing.T) {
 	assert.Equal(t, "vs-1", vsName)
 	assert.Equal(t, "class-1", vsClassName)
 }
+
+// A trailing comma must not make a namespaced-only restore look cluster-scoped.
+func TestNamedRestoreClusterScopeIgnoresEmptyEntries(t *testing.T) {
+	assert.False(t, namedResourcesIncludeClusterScoped(map[string]string{"pods": "ns-1/a,", "configmaps": " "}))
+	assert.True(t, namedResourcesIncludeClusterScoped(map[string]string{"persistentvolumes": "pv-1,"}))
+}

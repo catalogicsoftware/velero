@@ -780,20 +780,7 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 		// Honour an explicit IncludeClusterResources; otherwise enable it only
 		// when a named item is cluster-scoped (a name without "namespace/").
 		if ctx.restore.Spec.IncludeClusterResources == nil {
-			hasClusterScoped := false
-			for _, namesStr := range ctx.restore.Spec.IncludeNamedResources {
-				for _, n := range strings.Split(namesStr, ",") {
-					if !strings.Contains(strings.TrimSpace(n), "/") {
-						hasClusterScoped = true
-						break
-					}
-				}
-				if hasClusterScoped {
-					break
-				}
-			}
-
-			if hasClusterScoped {
+			if namedResourcesIncludeClusterScoped(ctx.restore.Spec.IncludeNamedResources) {
 				enableClusterScopedResourcesInRestore := true
 				ctx.restore.Spec.IncludeClusterResources = &enableClusterScopedResourcesInRestore
 				ctx.log.Infof("IncludeClusterResources set to true because named resources include cluster-scoped items")
@@ -3154,6 +3141,20 @@ func determineRestoreStatus(
 	return shouldRestoreStatus
 }
 
+// namedResourcesIncludeClusterScoped reports whether any named object is
+// cluster-scoped, i.e. given as a bare name without "namespace/".
+func namedResourcesIncludeClusterScoped(named map[string]string) bool {
+	for _, namesStr := range named {
+		for _, n := range strings.Split(namesStr, ",") {
+			n = strings.TrimSpace(n)
+			if n != "" && !strings.Contains(n, "/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // filterBackupResourcesByNamedResources filters backup resources based on explicitly named resources in the restore request.
 func filterBackupResourcesByNamedResources(
 	ctx *restoreContext, // Restore context containing necessary clients and configuration
@@ -3175,6 +3176,9 @@ func filterBackupResourcesByNamedResources(
 		// Iterate over each specified name for this resource type
 		for _, n := range names {
 			n = strings.TrimSpace(n) // Trim any leading or trailing whitespace
+			if n == "" {
+				continue
+			}
 
 			var ns, name string // Variables to hold namespace and resource name
 
