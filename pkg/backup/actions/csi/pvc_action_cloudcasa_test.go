@@ -117,7 +117,9 @@ func executeOnPVC(t *testing.T, p *pvcBackupItemAction, backup *velerov1api.Back
 }
 
 // bindFirstVolumeSnapshot plays the CSI snapshot controller for the first
-// VolumeSnapshot created in the namespace.
+// VolumeSnapshot created in the namespace. The fake client's watch does not
+// replay what happened between the wait's list and watch, so the bound
+// snapshot is written again once the wait is surely watching.
 func bindFirstVolumeSnapshot(t *testing.T, client crclient.Client) <-chan error {
 	t.Helper()
 	done := make(chan error, 1)
@@ -140,7 +142,17 @@ func bindFirstVolumeSnapshot(t *testing.T, client crclient.Client) <-chan error 
 			return
 		}
 		vsList.Items[0].Status = &snapshotv1api.VolumeSnapshotStatus{BoundVolumeSnapshotContentName: &vscName, ReadyToUse: &ready}
-		done <- client.Update(t.Context(), &vsList.Items[0])
+		if err := client.Update(t.Context(), &vsList.Items[0]); err != nil {
+			done <- err
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+		vs := &snapshotv1api.VolumeSnapshot{}
+		if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(&vsList.Items[0]), vs); err != nil {
+			done <- err
+			return
+		}
+		done <- client.Update(t.Context(), vs)
 	}()
 	return done
 }
@@ -254,4 +266,45 @@ func TestExecuteLogsTheProgressRelayError(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "the relay error is logged")
+}
+
+// kubeagent shows the PVC as active while the CSI driver takes the snapshot,
+// so "pending" is relayed once the snapshot exists and before the wait ends.
+func TestExecuteReportsPendingWhileWaiting(t *testing.T) {
+	pending := make(chan struct{})
+	var states []string
+	var pendingMessage string
+	previous := updateSnapshotProgress
+	updateSnapshotProgress = func(_ *corev1api.PersistentVolumeClaim, _ *snapshotv1api.VolumeSnapshot,
+		_ *snapshotv1api.VolumeSnapshotContent, state, message, _ string, _ logrus.FieldLogger) error {
+		if state == "" {
+			return nil
+		}
+		states = append(states, state)
+		if state == "pending" && len(states) == 1 {
+			pendingMessage = message
+			close(pending)
+		}
+		return nil
+	}
+	t.Cleanup(func() { updateSnapshotProgress = previous })
+
+	client := velerotest.NewFakeControllerRuntimeClient(t, cloudcasaPVCFixture()...)
+	p := &pvcBackupItemAction{log: logrus.New(), crClient: client}
+	bound := make(chan error, 1)
+	go func() {
+		select {
+		case <-pending:
+			bound <- <-bindFirstVolumeSnapshot(t, client)
+		case <-time.After(10 * time.Second):
+			bound <- errors.New("no pending report")
+		}
+	}()
+
+	_, err := executeOnPVC(t, p, builder.ForBackup("velero", "backup-1").CSISnapshotTimeout(3*time.Second).Result())
+	require.NoError(t, err)
+	require.NoError(t, <-bound)
+
+	assert.Equal(t, []string{"pending"}, states)
+	assert.Equal(t, "Waiting for CSI driver to reconcile volumesnapshot ns/pvc-1", pendingMessage)
 }

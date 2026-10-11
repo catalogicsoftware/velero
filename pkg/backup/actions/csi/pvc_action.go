@@ -381,7 +381,7 @@ func (p *pvcBackupItemAction) Execute(
 	}
 
 	// A failure up to the VolumeSnapshot's creation is relayed to kubeagent here;
-	// progress from then on is reported by WaitUntilVSCHandleIsReady.
+	// after it, "pending" and then the wait's own report.
 	var snapshotState, snapshotStateMessage string
 	defer func() {
 		uErr := updateSnapshotProgress(&pvc, nil, nil, snapshotState, snapshotStateMessage, backup.Name, p.log)
@@ -416,6 +416,13 @@ func (p *pvcBackupItemAction) Execute(
 			snapshotStateMessage = progressErr.message
 		}
 		return nil, nil, "", nil, err
+	}
+
+	// kubeagent shows the PVC as active until the wait reports the outcome.
+	if uErr := updateSnapshotProgress(&pvc, nil, nil, "pending",
+		fmt.Sprintf("Waiting for CSI driver to reconcile volumesnapshot %s/%s", pvc.Namespace, pvc.Name),
+		backup.Name, p.log); uErr != nil {
+		p.log.WithError(uErr).Error("<SNAPSHOT PROGRESS UPDATE> Failed to update snapshot progress. Continuing...")
 	}
 
 	// Wait until VS associated VSC snapshot handle created before
