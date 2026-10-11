@@ -3260,7 +3260,7 @@ func handlePersistentVolumeClaims(
 		log.Infof("PVC '%s/%s' was backed up using CSI Snapshot", namespace, name)
 
 		// Retrieve the VolumeSnapshot and VolumeSnapshotClass names
-		vsName, vsclsName := getVolumeSnapshotDetails(resource, namespace, name, volumeInfo, log)
+		vsName, vsclsName := getVolumeSnapshotDetails(ctx, resource, namespace, name, volumeInfo)
 
 		// If VolumeSnapshotClass doesn't exist in the cluster, add it to filtered resources
 		if vsclsName != "" && !slices.Contains(ctx.restore.Spec.ExcludedResources, "volumesnapshotclasses.snapshot.storage.k8s.io") && !checkVolumeSnapshotClassExists(ctx, vsclsName) {
@@ -3292,10 +3292,11 @@ func findBackupVolumeInfo(ctx *restoreContext, namespace, name string) *volume.B
 
 // getVolumeSnapshotDetails retrieves the VolumeSnapshot and VolumeSnapshotClass names
 func getVolumeSnapshotDetails(
+	ctx *restoreContext,
 	resource, namespace, name string,
 	volumeInfo *volume.BackupVolumeInfo,
-	log logrus.FieldLogger,
 ) (string, string) {
+	log := ctx.log
 	vsName, vsclsName := volumeInfo.CSISnapshotInfo.VSName, volumeInfo.CSISnapshotInfo.VSCLSName
 
 	if vsName != "" && vsclsName != "" {
@@ -3304,7 +3305,7 @@ func getVolumeSnapshotDetails(
 
 	log.Warnf("Missing CSI Snapshot details for PVC '%s/%s'. Retrieving from backup resources...", namespace, name)
 
-	pvc := retrieveUnstructuredObject(resource, namespace, name, log)
+	pvc := retrieveUnstructuredObject(ctx, resource, namespace, name)
 	if pvc == nil {
 		log.Errorf("Failed to retrieve PVC '%s/%s' for additional CSI information", namespace, name)
 		return vsName, vsclsName
@@ -3323,7 +3324,7 @@ func getVolumeSnapshotDetails(
 	// Extract VolumeSnapshotClass name from the VolumeSnapshot object
 	if vsclsName == "" && vsName != "" {
 		log.Infof("Retrieving VolumeSnapshot '%s' to determine VolumeSnapshotClass", vsName)
-		vs := retrieveUnstructuredObject("volumesnapshots.snapshot.storage.k8s.io", namespace, vsName, log)
+		vs := retrieveUnstructuredObject(ctx, "volumesnapshots.snapshot.storage.k8s.io", namespace, vsName)
 		if vs != nil {
 			log.Infof("Successfully retrieved VolumeSnapshot '%s' for class lookup", vsName)
 			if value, found, err := unstructured.NestedString(vs.Object, "spec", "volumesnapshotclass"); err == nil && found {
@@ -3393,15 +3394,16 @@ func addItemToFilteredResources(resourceType, namespace, name string, filteredRe
 }
 
 // retrieveUnstructuredObject retrieves an unstructured Kubernetes resource from a backup archive.
-func retrieveUnstructuredObject(resourceType, namespace, name string, log logrus.FieldLogger) *unstructured.Unstructured {
+func retrieveUnstructuredObject(ctx *restoreContext, resourceType, namespace, name string) *unstructured.Unstructured {
+	log := ctx.log
 	log.Infof("Retrieving unstructured object: resourceType='%s', namespace='%s', name='%s'", resourceType, namespace, name)
 
-	// Compute the file path where the resource data is stored in the backup.
-	filePath := archive.GetItemFilePath("/backup", resourceType, namespace, name)
+	// Compute the file path of the item in the extracted backup.
+	filePath := archive.GetItemFilePath(ctx.restoreDir, resourceType, namespace, name)
 	log.Debugf("Computed file path for object: %s", filePath)
 
 	// Attempt to read the file contents.
-	data, err := os.ReadFile(filePath)
+	data, err := ctx.fileSystem.ReadFile(filePath)
 	if err != nil {
 		// Log an error if the file could not be read and return nil.
 		log.Errorf("Failed to read file at path '%s': %v", filePath, err)

@@ -129,3 +129,22 @@ func TestFilterBackupResourcesByNamedResources(t *testing.T) {
 		assert.Empty(t, filtered)
 	})
 }
+
+// Backups made before the volume info carried the snapshot names fall back to
+// the PVC and VolumeSnapshot extracted from the backup tarball.
+func TestGetVolumeSnapshotDetailsFromExtractedBackup(t *testing.T) {
+	restoreDir := "/tmp/velero-restore-1"
+	pvcJSON := `{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"pvc-csi","namespace":"ns-1",` +
+		`"annotations":{"velero.io/volume-snapshot-name":"vs-1"}}}`
+	vsJSON := `{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshot","metadata":{"name":"vs-1","namespace":"ns-1"},` +
+		`"spec":{"volumeSnapshotClassName":"class-1"}}`
+	fs := velerotest.NewFakeFileSystem().
+		WithFile(archive.GetItemFilePath(restoreDir, "persistentvolumeclaims", "ns-1", "pvc-csi"), []byte(pvcJSON)).
+		WithFile(archive.GetItemFilePath(restoreDir, vsResource, "ns-1", "vs-1"), []byte(vsJSON))
+	ctx := &restoreContext{log: logrus.New(), restoreDir: restoreDir, fileSystem: fs}
+	volumeInfo := &volume.BackupVolumeInfo{BackupMethod: volume.CSISnapshot, CSISnapshotInfo: &volume.CSISnapshotInfo{}}
+
+	vsName, _ := getVolumeSnapshotDetails(ctx, "persistentvolumeclaims", "ns-1", "pvc-csi", volumeInfo)
+
+	assert.Equal(t, "vs-1", vsName)
+}
