@@ -130,15 +130,9 @@ func UpdateSnapshotProgress(
 
 // DeleteSnapshotProgressConfigMap deletes the configmap used to report snapshot progress
 func DeleteSnapshotProgressConfigMap(jobID string, log logrus.FieldLogger) {
-	// creates the in-cluster config
-	config, err := rest.InClusterConfig()
+	clientset, err := GetClientset(log)
 	if err != nil {
-		log.Error(errors.Wrap(err, "Failed to create in-cluster config"))
-	}
-	// creates the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Error(errors.Wrap(err, "Failed to create in-cluster clientset"))
+		return
 	}
 	snapshotProgressUpdateConfigMapName := SnapshotProgressUpdateConfigMapPrefix + jobID
 	err = clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Delete(context.TODO(), snapshotProgressUpdateConfigMapName, v1.DeleteOptions{})
