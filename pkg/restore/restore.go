@@ -3327,7 +3327,7 @@ func getVolumeSnapshotDetails(
 		vs := retrieveUnstructuredObject(ctx, "volumesnapshots.snapshot.storage.k8s.io", namespace, vsName)
 		if vs != nil {
 			log.Infof("Successfully retrieved VolumeSnapshot '%s' for class lookup", vsName)
-			if value, found, err := unstructured.NestedString(vs.Object, "spec", "volumesnapshotclass"); err == nil && found {
+			if value, found, err := unstructured.NestedString(vs.Object, "spec", "volumeSnapshotClassName"); err == nil && found {
 				vsclsName = value
 				log.Infof("Extracted VolumeSnapshotClass: '%s'", vsclsName)
 			}

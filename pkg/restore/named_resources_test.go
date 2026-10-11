@@ -144,7 +144,8 @@ func TestGetVolumeSnapshotDetailsFromExtractedBackup(t *testing.T) {
 	ctx := &restoreContext{log: logrus.New(), restoreDir: restoreDir, fileSystem: fs}
 	volumeInfo := &volume.BackupVolumeInfo{BackupMethod: volume.CSISnapshot, CSISnapshotInfo: &volume.CSISnapshotInfo{}}
 
-	vsName, _ := getVolumeSnapshotDetails(ctx, "persistentvolumeclaims", "ns-1", "pvc-csi", volumeInfo)
+	vsName, vsClassName := getVolumeSnapshotDetails(ctx, "persistentvolumeclaims", "ns-1", "pvc-csi", volumeInfo)
 
 	assert.Equal(t, "vs-1", vsName)
+	assert.Equal(t, "class-1", vsClassName)
 }
