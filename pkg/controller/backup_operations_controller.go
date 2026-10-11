@@ -96,6 +96,7 @@ func (c *backupOperationsReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Backup{}, builder.WithPredicates(kube.FalsePredicate{})).
 		WatchesRawSource(s).
 		Named(constant.ControllerBackupOperations).
@@ -117,6 +118,9 @@ func (c *backupOperationsReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting backup %s", req.String())
+	}
+	if skipForeign(log, original) {
+		return ctrl.Result{}, nil
 	}
 	backup := original.DeepCopy()
 	log.Debugf("backup: %s", backup.Name)

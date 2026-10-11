@@ -176,6 +176,7 @@ func NewBackupReconciler(
 
 func (b *backupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Backup{}, builder.WithPredicates(predicate.Funcs{
 			UpdateFunc: func(ue event.UpdateEvent) bool {
 				backup := ue.ObjectNew.(*velerov1api.Backup)
@@ -268,6 +269,9 @@ func (b *backupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		log.WithError(err).Error("error getting backup")
 		return ctrl.Result{}, err
+	}
+	if skipForeign(log, original) {
+		return ctrl.Result{}, nil
 	}
 
 	// Double-check we have the correct phase. In the unlikely event that multiple controller

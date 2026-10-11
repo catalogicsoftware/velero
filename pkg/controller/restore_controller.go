@@ -185,6 +185,9 @@ func (r *restoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		log.Errorf("Fail to get restore %s: %s", req.NamespacedName.String(), err.Error())
 		return ctrl.Result{}, err
 	}
+	if skipForeign(log, restore) {
+		return ctrl.Result{}, nil
+	}
 
 	// deal with finalizer
 	if !restore.DeletionTimestamp.IsZero() {
@@ -299,6 +302,7 @@ func (r *restoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 func (r *restoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&api.Restore{}).
 		Named(constant.ControllerRestore).
 		Complete(r)

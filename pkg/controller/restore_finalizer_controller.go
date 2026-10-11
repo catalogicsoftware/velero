@@ -91,6 +91,7 @@ func NewRestoreFinalizerReconciler(
 
 func (r *restoreFinalizerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Restore{}).
 		Named(constant.ControllerRestoreFinalizer).
 		Complete(r)
@@ -109,6 +110,9 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting restore %s", req.String())
+	}
+	if skipForeign(log, original) {
+		return ctrl.Result{}, nil
 	}
 	restore := original.DeepCopy()
 	log.Debugf("restore: %s", restore.Name)

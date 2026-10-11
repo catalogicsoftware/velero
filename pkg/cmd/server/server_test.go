@@ -18,6 +18,7 @@ package server
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -38,6 +39,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/cmd/server/config"
 	"github.com/vmware-tanzu/velero/pkg/constant"
 	discovery_mocks "github.com/vmware-tanzu/velero/pkg/discovery/mocks"
+	"github.com/vmware-tanzu/velero/pkg/instance"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 	"github.com/vmware-tanzu/velero/pkg/uploader"
 )
@@ -352,10 +354,20 @@ func Test_markInProgressBackupsFailed(t *testing.T) {
 						Phase: velerov1api.BackupPhaseCompleted,
 					},
 				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "velero",
+						Name:      "backup03",
+						Labels:    map[string]string{instance.LabelKey: "job-b"},
+					},
+					Status: velerov1api.BackupStatus{
+						Phase: velerov1api.BackupPhaseInProgress,
+					},
+				},
 			},
 		}).
 		Build()
-	markInProgressBackupsFailed(t.Context(), c, "velero", logrus.New())
+	markInProgressBackupsFailed(t.Context(), c, "velero", instance.New(""), logrus.New())
 
 	backup01 := &velerov1api.Backup{}
 	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "backup01"}, backup01))
@@ -364,6 +376,16 @@ func Test_markInProgressBackupsFailed(t *testing.T) {
 	backup02 := &velerov1api.Backup{}
 	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "backup02"}, backup02))
 	assert.Equal(t, velerov1api.BackupPhaseCompleted, backup02.Status.Phase)
+
+	// Another instance's in-progress backup is not this engine's to fail.
+	backup03 := &velerov1api.Backup{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "backup03"}, backup03))
+	assert.Equal(t, velerov1api.BackupPhaseInProgress, backup03.Status.Phase)
+
+	// An instanced engine fails only its own backups.
+	markInProgressBackupsFailed(t.Context(), c, "velero", instance.New("job-b"), logrus.New())
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "backup03"}, backup03))
+	assert.Equal(t, velerov1api.BackupPhaseFailed, backup03.Status.Phase)
 }
 
 func Test_markInProgressRestoresFailed(t *testing.T) {
@@ -395,7 +417,15 @@ func Test_markInProgressRestoresFailed(t *testing.T) {
 			},
 		}).
 		Build()
-	markInProgressRestoresFailed(t.Context(), c, "velero", logrus.New())
+	require.NoError(t, c.Create(t.Context(), &velerov1api.Restore{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "velero",
+			Name:      "restore03",
+			Labels:    map[string]string{instance.LabelKey: "job-b"},
+		},
+		Status: velerov1api.RestoreStatus{Phase: velerov1api.RestorePhaseInProgress},
+	}))
+	markInProgressRestoresFailed(t.Context(), c, "velero", instance.New(""), logrus.New())
 
 	restore01 := &velerov1api.Restore{}
 	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "restore01"}, restore01))
@@ -404,6 +434,10 @@ func Test_markInProgressRestoresFailed(t *testing.T) {
 	restore02 := &velerov1api.Restore{}
 	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "restore02"}, restore02))
 	assert.Equal(t, velerov1api.RestorePhaseCompleted, restore02.Status.Phase)
+
+	restore03 := &velerov1api.Restore{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "restore03"}, restore03))
+	assert.Equal(t, velerov1api.RestorePhaseInProgress, restore03.Status.Phase, "foreign restore must be left alone")
 }
 
 func Test_setDefaultBackupLocation(t *testing.T) {
@@ -429,7 +463,7 @@ func Test_setDefaultBackupLocation(t *testing.T) {
 			},
 		}).
 		Build()
-	setDefaultBackupLocation(t.Context(), c, "velero", "default", logrus.New())
+	setDefaultBackupLocation(t.Context(), c, "velero", "default", instance.New(""), logrus.New())
 
 	defaultLocation := &velerov1api.BackupStorageLocation{}
 	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "default"}, defaultLocation))
@@ -441,10 +475,60 @@ func Test_setDefaultBackupLocation(t *testing.T) {
 
 	// no default location specified
 	c = fake.NewClientBuilder().WithScheme(scheme).Build()
-	err := setDefaultBackupLocation(t.Context(), c, "velero", "", logrus.New())
-	require.NoError(t, err)
+	err := setDefaultBackupLocation(t.Context(), c, "velero", "", instance.New(""), logrus.New())
+	assert.NoError(t, err)
 
 	// no default location created
-	err = setDefaultBackupLocation(t.Context(), c, "velero", "default", logrus.New())
+	err = setDefaultBackupLocation(t.Context(), c, "velero", "default", instance.New(""), logrus.New())
 	assert.NoError(t, err)
+
+	// an instanced engine never manages the default location
+	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(&velerov1api.BackupStorageLocation{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "velero", Name: "default"},
+	}).Build()
+	require.NoError(t, setDefaultBackupLocation(t.Context(), c, "velero", "default", instance.New("job-a"), logrus.New()))
+	untouched := &velerov1api.BackupStorageLocation{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "default"}, untouched))
+	assert.False(t, untouched.Spec.Default)
+
+	// the shared engine does not mutate a foreign-labeled default location
+	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(&velerov1api.BackupStorageLocation{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "velero", Name: "default",
+			Labels: map[string]string{instance.LabelKey: "job-a"},
+		},
+	}).Build()
+	require.NoError(t, setDefaultBackupLocation(t.Context(), c, "velero", "default", instance.New(""), logrus.New()))
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "velero", Name: "default"}, untouched))
+	assert.False(t, untouched.Spec.Default)
+}
+
+// A kind whose controller is disabled is only read by this engine, so its cache
+// selects the shared objects; storage locations are always shared.
+func Test_kindModes(t *testing.T) {
+	modeOf := func(modes map[client.Object]instance.KindMode, kind client.Object) instance.KindMode {
+		for obj, mode := range modes {
+			if reflect.TypeOf(obj) == reflect.TypeOf(kind) {
+				return mode
+			}
+		}
+		t.Fatalf("kind %T missing from kindModes", kind)
+		return 0
+	}
+
+	all := kindModes(nil)
+	assert.Len(t, all, 7)
+	assert.Equal(t, instance.KindOwned, modeOf(all, &velerov1api.Backup{}))
+	assert.Equal(t, instance.KindOwned, modeOf(all, &velerov1api.Restore{}))
+	assert.Equal(t, instance.KindOwned, modeOf(all, &velerov1api.DeleteBackupRequest{}))
+	assert.Equal(t, instance.KindOwned, modeOf(all, &velerov1api.DownloadRequest{}))
+	assert.Equal(t, instance.KindOwned, modeOf(all, &velerov1api.Schedule{}))
+	assert.Equal(t, instance.KindShared, modeOf(all, &velerov1api.BackupStorageLocation{}))
+	assert.Equal(t, instance.KindShared, modeOf(all, &velerov1api.VolumeSnapshotLocation{}))
+
+	// The disable list a CloudCasa restore engine uses.
+	restore := kindModes([]string{"backup", "backup-operations", "backup-finalizer", "backup-deletion"})
+	assert.Equal(t, instance.KindShared, modeOf(restore, &velerov1api.Backup{}))
+	assert.Equal(t, instance.KindShared, modeOf(restore, &velerov1api.DeleteBackupRequest{}))
+	assert.Equal(t, instance.KindOwned, modeOf(restore, &velerov1api.Restore{}))
 }

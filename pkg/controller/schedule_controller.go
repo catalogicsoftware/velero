@@ -84,6 +84,7 @@ func (c *scheduleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			Predicates: []predicate.Predicate{pred},
 		})
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1.Schedule{}, bld.WithPredicates(kube.SpecChangePredicate{}, pred)).
 		WatchesRawSource(s).
 		Complete(c)
@@ -105,6 +106,9 @@ func (c *scheduleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting schedule %s", req.String())
+	}
+	if skipForeign(log, schedule) {
+		return ctrl.Result{}, nil
 	}
 	c.metrics.InitSchedule(schedule.Name)
 

@@ -104,6 +104,9 @@ func (r *backupFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		log.WithError(err).Error("Error getting Backup")
 		return ctrl.Result{}, errors.WithStack(err)
 	}
+	if skipForeign(log, backup) {
+		return ctrl.Result{}, nil
+	}
 
 	switch backup.Status.Phase {
 	case velerov1api.BackupPhaseFinalizing, velerov1api.BackupPhaseFinalizingPartiallyFailed:
@@ -238,6 +241,7 @@ func (r *backupFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 func (r *backupFinalizerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Backup{}).
 		Named(constant.ControllerBackupFinalizer).
 		Complete(r)

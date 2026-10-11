@@ -94,6 +94,9 @@ func (r *serverStatusRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 		log.WithError(err).Error("Error getting ServerStatusRequest")
 		return ctrl.Result{}, err
 	}
+	if skipForeign(log, statusRequest) {
+		return ctrl.Result{}, nil
+	}
 
 	log = r.log.WithFields(logrus.Fields{
 		"controller":          constant.ControllerServerStatusRequest,
@@ -138,6 +141,7 @@ func (r *serverStatusRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 
 func (r *serverStatusRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.ServerStatusRequest{}).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 10,

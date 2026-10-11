@@ -71,6 +71,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/controller"
 	velerodiscovery "github.com/vmware-tanzu/velero/pkg/discovery"
 	"github.com/vmware-tanzu/velero/pkg/features"
+	"github.com/vmware-tanzu/velero/pkg/instance"
 	"github.com/vmware-tanzu/velero/pkg/itemoperationmap"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/nodeagent"
@@ -148,6 +149,7 @@ type server struct {
 	// resources in the namespace where Velero is installed, or the cluster-scoped
 	// resources. The crClient doesn't have the limitation.
 	crClient              ctrlclient.Client
+	instanceScope         instance.Scope
 	ctx                   context.Context
 	cancelFunc            context.CancelFunc
 	logger                logrus.FieldLogger
@@ -161,6 +163,33 @@ type server struct {
 	mgr                   manager.Manager
 	credentialFileStore   credentials.FileStore
 	credentialSecretStore credentials.SecretStore
+}
+
+// kindModes decides, per kind, whether this engine owns the objects bound to
+// its instance or only reads the shared unlabelled ones. A kind whose
+// controller is disabled is only read here, and a storage location describes
+// a recovery point rather than a job, so several jobs share one copy.
+func kindModes(disabledControllers []string) map[ctrlclient.Object]instance.KindMode {
+	disabled := make(map[string]bool, len(disabledControllers))
+	for _, name := range disabledControllers {
+		disabled[name] = true
+	}
+	mode := func(controllerName string) instance.KindMode {
+		if disabled[controllerName] {
+			return instance.KindShared
+		}
+		return instance.KindOwned
+	}
+
+	return map[ctrlclient.Object]instance.KindMode{
+		&velerov1api.Backup{}:                 mode(constant.ControllerBackup),
+		&velerov1api.Restore{}:                mode(constant.ControllerRestore),
+		&velerov1api.DeleteBackupRequest{}:    mode(constant.ControllerBackupDeletion),
+		&velerov1api.DownloadRequest{}:        mode(constant.ControllerDownloadRequest),
+		&velerov1api.Schedule{}:               mode(constant.ControllerSchedule),
+		&velerov1api.BackupStorageLocation{}:  instance.KindShared,
+		&velerov1api.VolumeSnapshotLocation{}: instance.KindShared,
+	}
 }
 
 func newServer(f client.Factory, config *config.Config, logger *logrus.Logger) (*server, error) {
@@ -264,6 +293,12 @@ func newServer(f client.Factory, config *config.Config, logger *logrus.Logger) (
 	ctrl.SetLogger(logrusr.New(logger))
 	klog.SetLogger(logrusr.New(logger)) // klog.Logger is used by k8s.io/client-go
 
+	// Scope this engine to one job's CRs (or, for the shared engine, to CRs
+	// without an instance label) at the cache level and in every controller.
+	instanceScope := instance.FromEnv()
+	logger.Infof("Engine CR scope: %s", instanceScope)
+	controller.SetInstanceScope(instanceScope)
+
 	var mgr manager.Manager
 	retry := 10
 	for {
@@ -273,6 +308,7 @@ func newServer(f client.Factory, config *config.Config, logger *logrus.Logger) (
 				DefaultNamespaces: map[string]cache.Config{
 					f.Namespace(): {},
 				},
+				ByObject: instanceScope.ByObjectModes(f.Namespace(), kindModes(config.DisabledControllers)),
 			},
 		})
 		if err == nil {
@@ -325,6 +361,7 @@ func newServer(f client.Factory, config *config.Config, logger *logrus.Logger) (
 		discoveryClient:       discoveryClient,
 		dynamicClient:         dynamicClient,
 		crClient:              crClient,
+		instanceScope:         instanceScope,
 		ctx:                   ctx,
 		cancelFunc:            cancelFunc,
 		logger:                logger,
@@ -334,6 +371,13 @@ func newServer(f client.Factory, config *config.Config, logger *logrus.Logger) (
 		mgr:                   mgr,
 		credentialFileStore:   credentialFileStore,
 		credentialSecretStore: credentialSecretStore,
+	}
+
+	// Tell the agent this engine understands instance scoping. An image built
+	// before it never writes this, and the agent refuses to hand such an engine
+	// a job rather than let two engines process the same resources.
+	if err := instance.AnnouncePodCapability(ctx, kubeClient, f.Namespace(), instanceScope); err != nil {
+		logger.WithError(err).Warn("Could not announce the engine scope on this pod")
 	}
 
 	return s, nil
@@ -386,9 +430,9 @@ func (s *server) setupBeforeControllerRun() error {
 		return errors.WithStack(err)
 	}
 
-	markInProgressCRsFailed(s.ctx, client, s.namespace, s.logger)
+	markInProgressCRsFailed(s.ctx, client, s.namespace, s.instanceScope, s.logger)
 
-	if err := setDefaultBackupLocation(s.ctx, client, s.namespace, s.config.DefaultBackupLocation, s.logger); err != nil {
+	if err := setDefaultBackupLocation(s.ctx, client, s.namespace, s.config.DefaultBackupLocation, s.instanceScope, s.logger); err != nil {
 		return err
 	}
 
@@ -403,9 +447,16 @@ func (s *server) setupBeforeControllerRun() error {
 }
 
 // setDefaultBackupLocation set the BSL that matches the "velero server --default-backup-storage-location"
-func setDefaultBackupLocation(ctx context.Context, client ctrlclient.Client, namespace, defaultBackupLocation string, logger logrus.FieldLogger) error {
+func setDefaultBackupLocation(ctx context.Context, client ctrlclient.Client, namespace, defaultBackupLocation string, scope instance.Scope, logger logrus.FieldLogger) error {
 	if defaultBackupLocation == "" {
 		logger.Debug("No default backup storage location specified. Velero will not automatically select a backup storage location for new backups.")
+		return nil
+	}
+
+	// A per-job engine addresses its storage location by name and never
+	// manages the shared default one.
+	if scope.Instanced() {
+		logger.Debug("Instanced engine, skipping default backup storage location handling")
 		return nil
 	}
 
@@ -417,6 +468,11 @@ func setDefaultBackupLocation(ctx context.Context, client ctrlclient.Client, nam
 		} else {
 			return errors.WithStack(err)
 		}
+	}
+
+	if !scope.Owns(backupLocation) {
+		logger.WithField("backupStorageLocation", defaultBackupLocation).Debug("Default backup storage location belongs to another engine instance, skipping")
+		return nil
 	}
 
 	if !backupLocation.Spec.Default {
@@ -978,15 +1034,17 @@ func (s *server) runProfiler() {
 
 // if there is a restarting during the reconciling of backups/restores/etc, these CRs may be stuck in progress status
 // markInProgressCRsFailed tries to mark the in progress CRs as failed when starting the server to avoid the issue
-func markInProgressCRsFailed(ctx context.Context, client ctrlclient.Client, namespace string, log logrus.FieldLogger) {
-	markInProgressBackupsFailed(ctx, client, namespace, log)
+func markInProgressCRsFailed(ctx context.Context, client ctrlclient.Client, namespace string, scope instance.Scope, log logrus.FieldLogger) {
+	markInProgressBackupsFailed(ctx, client, namespace, scope, log)
 
-	markInProgressRestoresFailed(ctx, client, namespace, log)
+	markInProgressRestoresFailed(ctx, client, namespace, scope, log)
 }
 
-func markInProgressBackupsFailed(ctx context.Context, client ctrlclient.Client, namespace string, log logrus.FieldLogger) {
+func markInProgressBackupsFailed(ctx context.Context, client ctrlclient.Client, namespace string, scope instance.Scope, log logrus.FieldLogger) {
 	backups := &velerov1api.BackupList{}
-	if err := client.List(ctx, backups, &ctrlclient.ListOptions{Namespace: namespace}); err != nil {
+	// The direct client bypasses the scoped cache, so filter here: another
+	// instance's in-progress backups are its own healthy business.
+	if err := client.List(ctx, backups, &ctrlclient.ListOptions{Namespace: namespace}, scope.ListOption()); err != nil {
 		log.WithError(errors.WithStack(err)).Error("failed to list backups")
 		return
 	}
@@ -1010,9 +1068,9 @@ func markInProgressBackupsFailed(ctx context.Context, client ctrlclient.Client, 
 	}
 }
 
-func markInProgressRestoresFailed(ctx context.Context, client ctrlclient.Client, namespace string, log logrus.FieldLogger) {
+func markInProgressRestoresFailed(ctx context.Context, client ctrlclient.Client, namespace string, scope instance.Scope, log logrus.FieldLogger) {
 	restores := &velerov1api.RestoreList{}
-	if err := client.List(ctx, restores, &ctrlclient.ListOptions{Namespace: namespace}); err != nil {
+	if err := client.List(ctx, restores, &ctrlclient.ListOptions{Namespace: namespace}, scope.ListOption()); err != nil {
 		log.WithError(errors.WithStack(err)).Error("failed to list restores")
 		return
 	}

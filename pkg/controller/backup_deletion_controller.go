@@ -110,6 +110,7 @@ func (r *backupDeletionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Make sure the expired requests can be deleted eventually
 	s := kube.NewPeriodicalEnqueueSource(r.logger.WithField("controller", constant.ControllerBackupDeletion), mgr.GetClient(), &velerov1api.DeleteBackupRequestList{}, time.Hour, kube.PeriodicalEnqueueSourceOption{})
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.DeleteBackupRequest{}).
 		WatchesRawSource(s).
 		Complete(r)
@@ -133,6 +134,9 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		log.WithError(err).Error("Error getting deletebackuprequest")
 		return ctrl.Result{}, err
+	}
+	if skipForeign(log, dbr) {
+		return ctrl.Result{}, nil
 	}
 
 	// Since we use the reconciler along with the PeriodicalEnqueueSource, there may be reconciliation triggered by
