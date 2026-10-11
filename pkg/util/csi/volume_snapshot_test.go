@@ -2205,3 +2205,48 @@ func TestWaitUntilVSCHandleIsReadyReactsToLaterBinding(t *testing.T) {
 	assert.Equal(t, "vsc-1", *vs.Status.BoundVolumeSnapshotContentName, "the caller's VolumeSnapshot gets the live status")
 	assert.Less(t, elapsed, 3*time.Second, "a 5s poll would not have returned yet")
 }
+
+// recordSnapshotProgress captures the last state the wait reports to kubeagent.
+func recordSnapshotProgress(t *testing.T) *[2]string {
+	t.Helper()
+	last := &[2]string{}
+	previous := reportSnapshotProgress
+	reportSnapshotProgress = func(_ *corev1api.PersistentVolumeClaim, _ *snapshotv1api.VolumeSnapshot,
+		_ *snapshotv1api.VolumeSnapshotContent, state, message, _ string, _ logrus.FieldLogger) error {
+		last[0], last[1] = state, message
+		return nil
+	}
+	t.Cleanup(func() { reportSnapshotProgress = previous })
+	return last
+}
+
+// A snapshot that never binds must end as "error" for kubeagent, not "pending".
+func TestWaitUntilVSCHandleIsReadyReportsErrorWhenNeverBound(t *testing.T) {
+	last := recordSnapshotProgress(t)
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs)
+
+	_, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), time.Second)
+
+	require.Error(t, err)
+	assert.Equal(t, "error", last[0])
+	assert.Contains(t, last[1], "ns/vs-1")
+}
+
+// A content that never gets a handle must also end as "error".
+func TestWaitUntilVSCHandleIsReadyReportsErrorWhenNoHandle(t *testing.T) {
+	last := recordSnapshotProgress(t)
+	vscName := "vsc-1"
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).
+		Status().BoundVolumeSnapshotContentName(vscName).Result()
+	vsc := builder.ForVolumeSnapshotContent(vscName).Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs, vsc)
+
+	_, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), time.Second)
+
+	require.Error(t, err)
+	assert.Equal(t, "error", last[0])
+	assert.Contains(t, last[1], vscName)
+}

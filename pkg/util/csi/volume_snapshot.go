@@ -915,6 +915,9 @@ func nameListWatch(ctx context.Context, watchClient crclient.WithWatch, namespac
 	}
 }
 
+// reportSnapshotProgress relays a snapshot state to kubeagent; tests replace it.
+var reportSnapshotProgress = catalogic.UpdateSnapshotProgress
+
 // WaitUntilVSCHandleIsReady waits until the VolumeSnapshot is bound and its
 // VolumeSnapshotContent has a snapshot handle, and returns that content. It
 // watches both objects so it reacts as soon as they change; one deadline of
@@ -945,7 +948,7 @@ func WaitUntilVSCHandleIsReady(
 	// phases and consumed by the deferred progress-reporter.
 	var snapshotState, snapshotStateMessage string
 	defer func() {
-		uErr := catalogic.UpdateSnapshotProgress(nil, volSnap, nil, snapshotState, snapshotStateMessage, jobID, log)
+		uErr := reportSnapshotProgress(nil, volSnap, nil, snapshotState, snapshotStateMessage, jobID, log)
 		if uErr != nil {
 			log.WithError(uErr).Error("Failed to update snapshot progress")
 		}
@@ -1015,6 +1018,9 @@ func WaitUntilVSCHandleIsReady(
 			return false, nil
 		},
 	); watchErr != nil {
+		snapshotState = "error"
+		snapshotStateMessage = fmt.Sprintf("Timed out awaiting reconciliation of VolumeSnapshot %s/%s",
+			volSnap.Namespace, volSnap.Name)
 		log.WithError(watchErr).Errorf(
 			"Phase1 watch failed for VolumeSnapshot %s/%s", volSnap.Namespace, volSnap.Name)
 		return nil, errors.Wrapf(watchErr,
@@ -1030,6 +1036,8 @@ func WaitUntilVSCHandleIsReady(
 	// Annotate the VolumeSnapshotContent with its PVC once the binding is known.
 	vsc := new(snapshotv1api.VolumeSnapshotContent)
 	if annotationErr := annotateVSCWithPVC(ctx, crClient, vsc, boundVSCName, latestVS, log); annotationErr != nil {
+		snapshotState = "error"
+		snapshotStateMessage = fmt.Sprintf("Failed to annotate VolumeSnapshotContent %s: %v", boundVSCName, annotationErr)
 		log.WithError(annotationErr).Errorf(
 			"Failed to update annotations on VSC %s", boundVSCName)
 		return nil, errors.Wrapf(annotationErr, "failed to annotate VSC %s", boundVSCName)
@@ -1074,6 +1082,8 @@ func WaitUntilVSCHandleIsReady(
 			return false, nil
 		},
 	); watchErr != nil {
+		snapshotState = "error"
+		snapshotStateMessage = fmt.Sprintf("Timed out awaiting snapshot handle of VolumeSnapshotContent %s", boundVSCName)
 		log.WithError(watchErr).Errorf("Phase2 watch failed for VSC %s", boundVSCName)
 		if vsc.Status != nil && vsc.Status.Error != nil {
 			return nil, fmt.Errorf("CSI reconciliation timeout for VSC %s: %v",
