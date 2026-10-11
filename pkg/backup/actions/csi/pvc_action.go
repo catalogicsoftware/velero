@@ -447,8 +447,12 @@ func (p *pvcBackupItemAction) Execute(
 		catalogic.SetStaticAzureAnotation(&pvc, labels, storageClass, p.log)
 	}
 
-	annotations := labels
-	annotations[velerov1api.VolumeNamespaceLabel] = vs.Name
+	// The cloudcasa-* keys are read from the annotations by the CloudCasa
+	// restore plugin and movers, so annotations start as a copy of the labels.
+	annotations := make(map[string]string, len(labels)+2)
+	for k, v := range labels {
+		annotations[k] = v
+	}
 	annotations[velerov1api.MustIncludeAdditionalItemAnnotation] = "true"
 
 	var additionalItems []velero.ResourceIdentifier

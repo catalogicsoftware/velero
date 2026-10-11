@@ -206,3 +206,24 @@ func TestExecuteRelaysClassResolutionFailure(t *testing.T) {
 	assert.Equal(t, "error", reportedState)
 	assert.Equal(t, err.Error(), reportedMessage)
 }
+
+// Labels and annotations are separate sets: the cloudcasa-* keys are in both,
+// the must-include flag is only an annotation, and no stray keys appear.
+func TestExecuteKeepsLabelsAndAnnotationsApart(t *testing.T) {
+	client := velerotest.NewFakeControllerRuntimeClient(t, cloudcasaPVCFixture()...)
+	p := &pvcBackupItemAction{log: logrus.New(), crClient: client}
+	bound := bindFirstVolumeSnapshot(t, client)
+
+	pvc, err := executeOnPVC(t, p, builder.ForBackup("velero", "backup-1").CSISnapshotTimeout(time.Minute).Result())
+	require.NoError(t, err)
+	require.NoError(t, <-bound)
+
+	assert.NotContains(t, pvc.Labels, velerov1api.VolumeNamespaceLabel)
+	assert.NotContains(t, pvc.Annotations, velerov1api.VolumeNamespaceLabel)
+	assert.NotContains(t, pvc.Labels, velerov1api.MustIncludeAdditionalItemAnnotation)
+	assert.Equal(t, "true", pvc.Annotations[velerov1api.MustIncludeAdditionalItemAnnotation])
+	for _, key := range []string{"cloudcasa-initial-volume-name", "cloudcasa-storage-class-provisioner", velerov1api.VolumeSnapshotLabel} {
+		assert.Contains(t, pvc.Labels, key)
+		assert.Contains(t, pvc.Annotations, key)
+	}
+}
