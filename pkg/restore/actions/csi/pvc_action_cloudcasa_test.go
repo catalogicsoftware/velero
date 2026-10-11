@@ -18,6 +18,7 @@ package csi
 
 import (
 	"testing"
+	"time"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/sirupsen/logrus"
@@ -277,4 +278,146 @@ func TestExecuteRelaysRestoreProgress(t *testing.T) {
 		assert.Equal(t, []relayedProgress{{"error", "failed to restore PVC pvc-1/ns from the CSI snapshot", "restore-1"}}, *relayed)
 		assert.Equal(t, []string{"restore-1"}, *deleted)
 	})
+}
+
+// azureFilesFixture is an Azure Files PVC backed up with a CSI snapshot whose
+// VolumeSnapshotContent is still in the cluster, restored for the CloudCasa
+// Azure Files mover.
+func azureFilesFixture(t *testing.T, waitAnnotation string) (*velerov1api.Restore, *corev1api.PersistentVolumeClaim, []runtime.Object, *[]time.Duration) {
+	t.Helper()
+	restore, pvc, objects := csiRestoreFixture("1Gi")
+	restore.Annotations = map[string]string{azureFilesRestoreAnnotation: "true"}
+	if waitAnnotation != "" {
+		restore.Annotations[CCAzureFilesPvcRestoreWaitTimeAnnotation] = waitAnnotation
+	}
+	azureFilesClass := "azurefile"
+	pvc.Spec.StorageClassName = &azureFilesClass
+	snapshotContent := func(name string) *snapshotv1api.VolumeSnapshotContent {
+		vsc := builder.ForVolumeSnapshotContent(name).Driver(azureFilesDriver).Result()
+		vsc.Spec.VolumeSnapshotRef = corev1api.ObjectReference{Namespace: "ns", Name: "cc-pvc-1-abcde"}
+		return vsc
+	}
+	objects = append(objects,
+		builder.ForStorageClass(azureFilesClass).Provisioner(azureFilesDriver).Result(),
+		snapshotContent("restore-0-x7k2p"), // made by an earlier restore, not by the snapshot
+		snapshotContent("snapcontent-1234"),
+	)
+
+	var slept []time.Duration
+	previous := azureFilesSleep
+	azureFilesSleep = func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { azureFilesSleep = previous })
+	return restore, pvc, objects, &slept
+}
+
+// The Azure Files mover restores the PVC from the in-cluster snapshot: the PVC
+// keeps its spec, names the VolumeSnapshotContent, and brings no VolumeSnapshot.
+func TestExecuteHandsAzureFilesToTheMover(t *testing.T) {
+	relayed, _ := recordRestoreProgress(t)
+	restore, pvc, objects, slept := azureFilesFixture(t, "")
+	p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects...)}
+
+	output, restored, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+	require.NoError(t, err)
+	assert.Equal(t, azureFilesDriver, restored.Annotations["cloudcasa-csi-driver-name"])
+	assert.Equal(t, "snapcontent-1234", restored.Annotations["cloudcasa-volume-snapshot-content-name"])
+	assert.Nil(t, restored.Spec.DataSource)
+	assert.Equal(t, "pv-1", restored.Spec.VolumeName)
+	assert.Empty(t, output.AdditionalItems)
+	assert.NotContains(t, restored.Annotations, velerov1api.MustIncludeAdditionalItemRestoreAnnotation)
+	assert.Equal(t, []time.Duration{DefaultAzureFilesSleepDuration}, *slept)
+	assert.Equal(t, "completed", (*relayed)[0].state)
+}
+
+func TestExecuteWaitsBeforeEachAzureFilesRestore(t *testing.T) {
+	tests := map[string]time.Duration{"3": 3 * time.Second, "0": DefaultAzureFilesSleepDuration, "soon": DefaultAzureFilesSleepDuration}
+	for annotation, want := range tests {
+		t.Run(annotation, func(t *testing.T) {
+			restore, pvc, objects, slept := azureFilesFixture(t, annotation)
+			p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects...)}
+
+			_, _, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+			require.NoError(t, err)
+			assert.Equal(t, []time.Duration{want}, *slept)
+		})
+	}
+}
+
+func TestExecuteFailsAzureFilesWithoutItsSnapshotContent(t *testing.T) {
+	relayed, _ := recordRestoreProgress(t)
+	restore, pvc, objects, _ := azureFilesFixture(t, "")
+	p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects[:len(objects)-1]...)}
+
+	_, _, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+	require.ErrorContains(t, err, "Failed to get VolumeSnapshotContent for VolumeSnapshot ns/cc-pvc-1-abcde")
+	assert.Equal(t, "error", (*relayed)[0].state)
+}
+
+// Without the mover annotation, an Azure Files PVC is restored from its snapshot.
+func TestExecuteRestoresAzureFilesFromTheSnapshotWithoutTheMover(t *testing.T) {
+	restore, pvc, objects, slept := azureFilesFixture(t, "")
+	restore.Annotations = nil
+	p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects...)}
+
+	output, restored, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+	require.NoError(t, err)
+	require.NotNil(t, restored.Spec.DataSource)
+	assert.Equal(t, "VolumeSnapshot", restored.Spec.DataSource.Kind)
+	assert.Len(t, output.AdditionalItems, 1)
+	assert.Empty(t, *slept)
+}
+
+// The CSI restore reads the PVC's StorageClass and fails when it is missing.
+func TestExecuteFailsWithoutTheStorageClass(t *testing.T) {
+	relayed, _ := recordRestoreProgress(t)
+	restore, pvc, objects := csiRestoreFixture("1Gi")
+	p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects[:1]...)}
+
+	_, _, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+	require.ErrorContains(t, err, "Failed to get StorageClass sc-1 to check PVC ns/pvc-1 provisioner")
+	assert.Equal(t, "error", (*relayed)[0].state)
+}
+
+// For the Azure Files mover, neither the VolumeSnapshot nor its content is restored.
+func TestSnapshotRestoreLeavesAzureFilesToTheMover(t *testing.T) {
+	vscName, handle := "snapcontent-1234", "handle-1"
+	vs := builder.ForVolumeSnapshot("ns", "cc-pvc-1-abcde").
+		ObjectMeta(builder.WithAnnotations(velerov1api.DriverNameAnnotation, azureFilesDriver)).
+		Status().BoundVolumeSnapshotContentName(vscName).Result()
+	vsc := builder.ForVolumeSnapshotContent(vscName).Driver(azureFilesDriver).
+		Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}).Result()
+	vsc.Spec.VolumeSnapshotRef = corev1api.ObjectReference{Namespace: "ns", Name: "cc-pvc-1-abcde"}
+
+	for _, mover := range []bool{true, false} {
+		restore := builder.ForRestore("velero", "restore-1").ObjectMeta(builder.WithUID("restore-uid")).Result()
+		if mover {
+			restore.Annotations = map[string]string{azureFilesRestoreAnnotation: "true"}
+		}
+		client := velerotest.NewFakeControllerRuntimeClient(t)
+		for _, tc := range []struct {
+			name   string
+			action interface {
+				Execute(*velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error)
+			}
+			item runtime.Object
+		}{
+			{"VolumeSnapshot", &volumeSnapshotRestoreItemAction{log: logrus.New(), crClient: client}, vs},
+			{"VolumeSnapshotContent", &volumeSnapshotContentRestoreItemAction{log: logrus.New(), client: client}, vsc},
+		} {
+			item, err := runtime.DefaultUnstructuredConverter.ToUnstructured(tc.item)
+			require.NoError(t, err)
+			output, err := tc.action.Execute(&velero.RestoreItemActionExecuteInput{
+				Item:           &unstructured.Unstructured{Object: item},
+				ItemFromBackup: &unstructured.Unstructured{Object: item},
+				Restore:        restore,
+			})
+			require.NoError(t, err, tc.name)
+			assert.Equal(t, mover, output.SkipRestore, "%s, mover %v", tc.name, mover)
+		}
+	}
 }

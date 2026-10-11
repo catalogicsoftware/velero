@@ -257,6 +257,13 @@ func (p *volumeSnapshotRestoreItemAction) Execute(
 			errors.Wrapf(err, "failed to convert input.Item from unstructured")
 	}
 
+	if restoredByAzureFilesMover(input.Restore, vs.Annotations[velerov1api.DriverNameAnnotation]) {
+		p.log.Infof("Azure Files restore will be performed using CloudCasa Azure Files Mover. VolumeSnapshot will not be restored.")
+		return &velero.RestoreItemActionExecuteOutput{
+			SkipRestore: true,
+		}, nil
+	}
+
 	// Create stub VGSC if this snapshot was created via VolumeGroupSnapshot
 	// This must happen before VSC is created, as the CSI controller requires VGSC to exist
 	if err := p.ensureStubVGSCExists(context.Background(), &vsFromBackup, input.Restore); err != nil {
