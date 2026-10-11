@@ -35,7 +35,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
@@ -423,12 +422,9 @@ func (p *pvcBackupItemAction) Execute(
 		} else {
 			itemToUpdate = []velero.ResourceIdentifier{
 				{
-					GroupResource: schema.GroupResource{
-						Group:    "velero.io",
-						Resource: "datauploads",
-					},
-					Namespace: dataUpload.Namespace,
-					Name:      dataUpload.Name,
+					GroupResource: kuberesource.DataUploads,
+					Namespace:     dataUpload.Namespace,
+					Name:          dataUpload.Name,
 				},
 			}
 			// Set the DataUploadNameLabel, which is used for restore to

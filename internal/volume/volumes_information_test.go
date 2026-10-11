@@ -817,7 +817,7 @@ func TestGenerateVolumeInfoFromDataUpload(t *testing.T) {
 					PostOperationItems: []velero.ResourceIdentifier{
 						{
 							GroupResource: schema.GroupResource{
-								Group:    "velero.io",
+								Group:    "cloudcasa.io",
 								Resource: "datauploads",
 							},
 							Namespace: "velero",
@@ -856,7 +856,7 @@ func TestGenerateVolumeInfoFromDataUpload(t *testing.T) {
 					PostOperationItems: []velero.ResourceIdentifier{
 						{
 							GroupResource: schema.GroupResource{
-								Group:    "velero.io",
+								Group:    "cloudcasa.io",
 								Resource: "datauploads",
 							},
 							Namespace: "velero",

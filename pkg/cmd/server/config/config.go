@@ -6,6 +6,7 @@ import (
 	"time"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
@@ -117,7 +118,7 @@ var (
 			"volumesnapshotclass.snapshot.storage.k8s.io",
 			"volumesnapshotcontents.snapshot.storage.k8s.io",
 			"volumesnapshots.snapshot.storage.k8s.io",
-			"datauploads.velero.io",
+			kuberesource.DataUploads.String(),
 			"persistentvolumes",
 			"persistentvolumeclaims",
 			"clusterroles",

@@ -575,7 +575,7 @@ func (v *BackupVolumesInformation) generateVolumeInfoFromDataUpload() {
 	for _, operation := range v.BackupOperations {
 		if operation.Spec.ResourceIdentifier.GroupResource.String() == kuberesource.PersistentVolumeClaims.String() {
 			for _, identifier := range operation.Spec.PostOperationItems {
-				if identifier.GroupResource.String() == "datauploads.velero.io" {
+				if identifier.GroupResource == kuberesource.DataUploads {
 					duOperationMap[kbclient.ObjectKey{
 						Namespace: identifier.Namespace,
 						Name:      identifier.Name,

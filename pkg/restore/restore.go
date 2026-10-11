@@ -86,7 +86,7 @@ import (
 const ObjectStatusRestoreAnnotationKey = "velero.io/restore-status"
 
 var resourceMustHave = []string{
-	"datauploads.velero.io",
+	kuberesource.DataUploads.String(),
 }
 
 type VolumeSnapshotterGetter interface {

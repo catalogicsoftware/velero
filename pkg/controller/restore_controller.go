@@ -72,17 +72,17 @@ var nonRestorableResources = []string{
 
 	// Don't ever restore backups - if appropriate, they'll be synced in from object storage.
 	// https://github.com/vmware-tanzu/velero/issues/622
-	"backups.velero.io",
+	api.Resource("backups").String(),
 
 	// Restores are cluster-specific, and don't have value moving across clusters.
 	// https://github.com/vmware-tanzu/velero/issues/622
-	"restores.velero.io",
+	api.Resource("restores").String(),
 
 	// TODO: Remove this in v1.11 or v1.12
 	// Restic repositories are automatically managed by Velero and will be automatically
 	// created as needed if they don't exist.
 	// https://github.com/vmware-tanzu/velero/issues/1113
-	"resticrepositories.velero.io",
+	api.Resource("resticrepositories").String(),
 
 	// CSINode delegates cluster node for CSI operation.
 	// VolumeAttachement records PV mounts to which node.
@@ -91,7 +91,7 @@ var nonRestorableResources = []string{
 	"volumeattachments.storage.k8s.io",
 
 	// Backup repositories were renamed from Restic repositories
-	"backuprepositories.velero.io",
+	api.Resource("backuprepositories").String(),
 }
 
 var ExternalResourcesFinalizer = "restores.velero.io/external-resources-finalizer"
