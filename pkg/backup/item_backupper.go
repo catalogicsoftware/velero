@@ -76,6 +76,10 @@ type itemBackupper struct {
 	itemHookHandler          hook.ItemHookHandler
 	hookTracker              *hook.HookTracker
 	volumeHelperImpl         volumehelper.VolumeHelper
+
+	// excludedPvcs ("namespace/name") are left out of the backup with their PVs;
+	// kubeagent lists unattached PVCs here.
+	excludedPvcs map[string]bool
 }
 
 type FileForArchive struct {
@@ -218,6 +222,36 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 
 	if !ib.itemInclusionChecks(log, mustInclude, metadata, obj, groupResource) {
 		return false, itemFiles, nil
+	}
+
+	if ib.excludedPvcs != nil { // used only for the purpose of excluding unattached PVCs
+		switch groupResource {
+		case kuberesource.PersistentVolumes:
+			pv := new(corev1api.PersistentVolume)
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pv); err != nil {
+				log.Errorf("Failed to convert unstructured PV %s to PersistentVolume structure: %v", metadata.GetName(), err)
+				return false, itemFiles, err
+			}
+
+			// PV that does not have a ClaimRef is not attached to a PVC so it can't be attached to a pod either
+			if pv.Spec.ClaimRef == nil {
+				log.Infof("Excluding PV %s because it is not bound to a PVC", metadata.GetName())
+				return false, itemFiles, nil
+			}
+
+			pvcPath := pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+			if _, isExcluded := ib.excludedPvcs[pvcPath]; isExcluded {
+				log.Infof("Excluding PV %s for PVC %s because it is excluded from backup", metadata.GetName(), pvcPath)
+				return false, itemFiles, nil
+			}
+
+		case kuberesource.PersistentVolumeClaims:
+			pvcPath := metadata.GetNamespace() + "/" + metadata.GetName()
+			if _, isExcluded := ib.excludedPvcs[pvcPath]; isExcluded {
+				log.Infof("Excluding PVC %s because it is excluded from backup", pvcPath)
+				return false, itemFiles, nil
+			}
+		}
 	}
 
 	key := itemKey{

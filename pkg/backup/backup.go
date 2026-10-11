@@ -43,6 +43,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/velero/internal/hook"
@@ -127,6 +129,20 @@ type kubernetesBackupper struct {
 	pluginManager             func(logrus.FieldLogger) clientmgmt.Manager
 	backupStoreGetter         persistence.ObjectBackupStoreGetter
 }
+
+type veleroConfig struct {
+	ExcludedPvcs map[string]bool
+}
+
+const (
+	CloudCasaNamespace = "cloudcasa-io"
+
+	// VeleroConfigMapPrefix is the name prefix of the configmap used to store configuration parameters
+	VeleroConfigMapPrefix = "cloudcasa-io-velero-config-"
+)
+
+// getVeleroConfig reads the job's CloudCasa Velero ConfigMap; tests replace it.
+var getVeleroConfig = GetVeleroConfig
 
 func (i *itemKey) String() string {
 	return fmt.Sprintf("resource=%s,namespace=%s,name=%s", i.resource, i.namespace, i.name)
@@ -496,6 +512,11 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		return err
 	}
 
+	veleroConfig, err := getVeleroConfig(log, backupRequest.Backup.Name)
+	if err != nil {
+		return errors.Wrap(err, "Failed to get velero configuration")
+	}
+
 	itemBackupper := &itemBackupper{
 		backupRequest:            backupRequest,
 		tarWriter:                tw,
@@ -512,6 +533,7 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		hookTracker:         hook.NewHookTracker(),
 		volumeHelperImpl:    volumeHelperImpl,
 		kubernetesBackupper: kb,
+		excludedPvcs:        veleroConfig.ExcludedPvcs,
 	}
 
 	// helper struct to send current progress between the main
@@ -1549,4 +1571,57 @@ func parseIncludeNamedResources(includeMap map[string]string, log logrus.FieldLo
 
 	log.Infof("Completed parsing IncludeNamedResources: parsed %d identifiers", len(resourceIDs))
 	return resourceIDs
+}
+
+// GetVeleroConfig reads the job's cloudcasa-io-velero-config-<job> ConfigMap.
+// A missing ConfigMap means no configuration.
+func GetVeleroConfig(log logrus.FieldLogger, jobID string) (*veleroConfig, error) {
+	clientset, err := GetClientset(log)
+	if err != nil {
+		return nil, err
+	}
+	return getVeleroConfigFrom(clientset, log, jobID)
+}
+
+func getVeleroConfigFrom(clientset kubernetes.Interface, log logrus.FieldLogger, jobID string) (*veleroConfig, error) {
+	configmapName := VeleroConfigMapPrefix + jobID
+	configMap, err := clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Get(context.TODO(), configmapName,
+		metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Infof("Velero configuration configmap %q not found", configmapName)
+			return &veleroConfig{}, nil
+		}
+		log.Error(errors.Wrapf(err, "Failed to get %q configmap in %q namespace", configmapName, CloudCasaNamespace))
+		return nil, err
+	}
+
+	var excludedPvcs map[string]bool
+	if excludedPvcsJSON, found := configMap.BinaryData["excludedPvcs"]; found {
+		if err := json.Unmarshal(excludedPvcsJSON, &excludedPvcs); err != nil {
+			log.Error(errors.Wrapf(err, "Failed to parse excludedPvcs value %q from %q",
+				string(excludedPvcsJSON), configmapName))
+			return nil, err
+		}
+	}
+
+	return &veleroConfig{
+		ExcludedPvcs: excludedPvcs,
+	}, nil
+}
+
+func GetClientset(log logrus.FieldLogger) (*kubernetes.Clientset, error) {
+	// creates the in-cluster config
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Error(errors.Wrap(err, "Failed to create in-cluster config"))
+		return nil, err
+	}
+	// creates the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Error(errors.Wrap(err, "Failed to create in-cluster clientset"))
+		return nil, err
+	}
+	return clientset, nil
 }
