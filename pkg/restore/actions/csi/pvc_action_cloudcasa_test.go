@@ -19,11 +19,13 @@ package csi
 import (
 	"testing"
 
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1api "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,7 +34,57 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
+	"github.com/vmware-tanzu/velero/pkg/util"
 )
+
+// Unit tests run outside a cluster, where kubeagent's progress ConfigMap
+// cannot be written.
+func init() {
+	updateSnapshotProgress = func(*corev1api.PersistentVolumeClaim, *snapshotv1api.VolumeSnapshot,
+		*snapshotv1api.VolumeSnapshotContent, string, string, string, logrus.FieldLogger) error {
+		return nil
+	}
+	deleteSnapshotProgressConfigMap = func(string, logrus.FieldLogger) {}
+}
+
+type relayedProgress struct{ state, message, jobID string }
+
+// recordRestoreProgress captures what the action relays to kubeagent.
+func recordRestoreProgress(t *testing.T) (*[]relayedProgress, *[]string) {
+	t.Helper()
+	var relayed []relayedProgress
+	var deleted []string
+	previousUpdate, previousDelete := updateSnapshotProgress, deleteSnapshotProgressConfigMap
+	updateSnapshotProgress = func(_ *corev1api.PersistentVolumeClaim, _ *snapshotv1api.VolumeSnapshot,
+		_ *snapshotv1api.VolumeSnapshotContent, state, message, jobID string, _ logrus.FieldLogger) error {
+		relayed = append(relayed, relayedProgress{state, message, jobID})
+		return nil
+	}
+	deleteSnapshotProgressConfigMap = func(jobID string, _ logrus.FieldLogger) { deleted = append(deleted, jobID) }
+	t.Cleanup(func() { updateSnapshotProgress, deleteSnapshotProgressConfigMap = previousUpdate, previousDelete })
+	return &relayed, &deleted
+}
+
+// csiRestoreFixture is a PVC backed up with a CSI snapshot and the objects a
+// snapshot restore reads.
+func csiRestoreFixture(request string) (*velerov1api.Restore, *corev1api.PersistentVolumeClaim, []runtime.Object) {
+	restore := builder.ForRestore("velero", "restore-1").Backup("backup-1").ObjectMeta(builder.WithUID("restore-uid")).Result()
+	pvc := builder.ForPersistentVolumeClaim("ns", "pvc-1").VolumeName("pv-1").StorageClass("sc-1").
+		ObjectMeta(builder.WithAnnotations(velerov1api.VolumeSnapshotLabel, "cc-pvc-1-abcde")).
+		RequestResource(corev1api.ResourceList{corev1api.ResourceStorage: resource.MustParse(request)}).Result()
+	objects := []runtime.Object{
+		builder.ForBackup("velero", "backup-1").Result(),
+		builder.ForStorageClass("sc-1").Provisioner("hostpath").Result(),
+	}
+	return restore, pvc, objects
+}
+
+// restoredVolumeSnapshot is the backup's VolumeSnapshot as restored before the PVC.
+func restoredVolumeSnapshot(restore *velerov1api.Restore, restoreSize string) *snapshotv1api.VolumeSnapshot {
+	name := util.GenerateSha256FromRestoreUIDAndVsName(string(restore.UID), "cc-pvc-1-abcde")
+	return builder.ForVolumeSnapshot("ns", name).
+		ObjectMeta(builder.WithAnnotations(velerov1api.VolumeSnapshotRestoreSize, restoreSize)).Result()
+}
 
 // executeRestoreOnPVC runs the action on pvc and returns the PVC it would create.
 func executeRestoreOnPVC(t *testing.T, p *pvcRestoreItemAction, restore *velerov1api.Restore,
@@ -165,4 +217,64 @@ func TestExecuteReplacesAnExistingPVCOnARetainedVolume(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A backup from an older engine has the snapshot size only on the
+// VolumeSnapshot; the restored PVC must ask for at least that much.
+func TestExecuteRaisesTheRequestToTheSnapshotSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		vsSize      string
+		vsRestored  bool
+		wantRequest string
+	}{
+		{name: "snapshot larger than the request", vsSize: "2Gi", vsRestored: true, wantRequest: "2Gi"},
+		{name: "snapshot smaller than the request", vsSize: "512Mi", vsRestored: true, wantRequest: "1Gi"},
+		{name: "snapshot not restored yet", wantRequest: "1Gi"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			restore, pvc, objects := csiRestoreFixture("1Gi")
+			if tc.vsRestored {
+				objects = append(objects, restoredVolumeSnapshot(restore, tc.vsSize))
+			}
+			p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects...)}
+
+			_, restored, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+			require.NoError(t, err)
+			request := restored.Spec.Resources.Requests[corev1api.ResourceStorage]
+			assert.Equal(t, tc.wantRequest, request.String())
+			require.NotNil(t, restored.Spec.DataSource)
+			assert.Equal(t, util.GenerateSha256FromRestoreUIDAndVsName("restore-uid", "cc-pvc-1-abcde"), restored.Spec.DataSource.Name)
+		})
+	}
+}
+
+// kubeagent learns each PVC's restore outcome, and the progress ConfigMap is
+// removed afterwards.
+func TestExecuteRelaysRestoreProgress(t *testing.T) {
+	t.Run("restored", func(t *testing.T) {
+		relayed, deleted := recordRestoreProgress(t)
+		restore, pvc, objects := csiRestoreFixture("1Gi")
+		p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects...)}
+
+		_, _, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+		require.NoError(t, err)
+		assert.Equal(t, []relayedProgress{{"completed", "Successfully created PVC pvc-1/ns from the CSI snapshot", "restore-1"}}, *relayed)
+		assert.Equal(t, []string{"restore-1"}, *deleted)
+	})
+	t.Run("failed", func(t *testing.T) {
+		relayed, deleted := recordRestoreProgress(t)
+		restore, pvc, objects := csiRestoreFixture("1Gi")
+		objects = append(objects, restoredVolumeSnapshot(restore, "not-a-size"))
+		p := &pvcRestoreItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t, objects...)}
+
+		_, _, err := executeRestoreOnPVC(t, p, restore, pvc)
+
+		require.Error(t, err)
+		assert.Equal(t, []relayedProgress{{"error", "failed to restore PVC pvc-1/ns from the CSI snapshot", "restore-1"}}, *relayed)
+		assert.Equal(t, []string{"restore-1"}, *deleted)
+	})
 }

@@ -28,6 +28,8 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/sirupsen/logrus"
 	corev1api "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -35,6 +37,7 @@ import (
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/vmware-tanzu/velero/internal/catalogic"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	velerov2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	"github.com/vmware-tanzu/velero/pkg/client"
@@ -53,6 +56,13 @@ const (
 	GenerateNameRandomLength = 5
 	HarvesterhCiIoOwnedBy    = "harvesterhci.io/owned-by"
 	pvcDeleteTimeoutSeconds  = 2 * 60
+)
+
+// updateSnapshotProgress and deleteSnapshotProgressConfigMap relay restore
+// progress to kubeagent; tests replace them.
+var (
+	updateSnapshotProgress          = catalogic.UpdateSnapshotProgress
+	deleteSnapshotProgressConfigMap = catalogic.DeleteSnapshotProgressConfigMap
 )
 
 // pvcRestoreItemAction is a restore item action plugin for Velero
@@ -188,12 +198,25 @@ func (p *pvcRestoreItemAction) Execute(
 				}, nil
 			}
 
+			defer func() {
+				time.Sleep(200 * time.Millisecond) // give some time for the update to be processed
+				deleteSnapshotProgressConfigMap(input.Restore.Name, logger)
+			}()
+
 			//To avoid confilcs, vs and vsc get a new uniq name based in restore UID
 			// and vs name old name
 			newVSName := util.GenerateSha256FromRestoreUIDAndVsName(string(input.Restore.UID), vsName)
 
-			p.log.Debugf("Setting PVC source to VolumeSnapshot new name: %s", newVSName)
-			resetPVCSourceToVolumeSnapshot(&pvc, newVSName)
+			if err := p.restoreFromVolumeSnapshot(&pvc, newNamespace, newVSName, logger); err != nil {
+				logger.Errorf("Failed to restore PVC from VolumeSnapshot.")
+				relayRestoreProgress(&pvc, "error",
+					fmt.Sprintf("failed to restore PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
+					input.Restore.Name, logger)
+				return nil, errors.WithStack(err)
+			}
+			relayRestoreProgress(&pvc, "completed",
+				fmt.Sprintf("Successfully created PVC %s/%s from the CSI snapshot", pvc.Name, pvc.Namespace),
+				input.Restore.Name, logger)
 
 			additionalItems = append(additionalItems, velero.ResourceIdentifier{
 				GroupResource: kuberesource.VolumeSnapshots,
@@ -223,6 +246,68 @@ func (p *pvcRestoreItemAction) Execute(
 		OperationID:     operationID,
 		AdditionalItems: additionalItems,
 	}, nil
+}
+
+// restoreFromVolumeSnapshot points the PVC at the VolumeSnapshot restored as
+// newVSName. Backups from older engines carry the snapshot size only on the
+// VolumeSnapshot, so the PVC request is raised to it when that is restored.
+func (p *pvcRestoreItemAction) restoreFromVolumeSnapshot(
+	pvc *corev1api.PersistentVolumeClaim,
+	newNamespace, newVSName string,
+	logger logrus.FieldLogger,
+) error {
+	vs := new(snapshotv1api.VolumeSnapshot)
+	err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Namespace: newNamespace, Name: newVSName}, vs)
+	switch {
+	case apierrors.IsNotFound(err):
+		logger.Debugf("VolumeSnapshot %s/%s is restored later as an additional item", newNamespace, newVSName)
+	case err != nil:
+		return errors.Wrapf(err, "Failed to get Volumesnapshot %s/%s to restore PVC %s/%s",
+			newNamespace, newVSName, newNamespace, pvc.Name)
+	default:
+		if size, exists := vs.Annotations[velerov1api.VolumeSnapshotRestoreSize]; exists {
+			restoreSize, err := resource.ParseQuantity(size)
+			if err != nil {
+				return errors.Wrapf(err, "Failed to parse %s from annotation on Volumesnapshot %s/%s into restore size",
+					size, vs.Namespace, vs.Name)
+			}
+			setPVCStorageResourceRequest(pvc, restoreSize, logger)
+		}
+	}
+
+	logger.Debugf("Setting PVC source to VolumeSnapshot new name: %s", newVSName)
+	resetPVCSourceToVolumeSnapshot(pvc, newVSName)
+	return nil
+}
+
+// setPVCStorageResourceRequest raises the PVC's storage request to restoreSize.
+func setPVCStorageResourceRequest(
+	pvc *corev1api.PersistentVolumeClaim,
+	restoreSize resource.Quantity,
+	log logrus.FieldLogger,
+) {
+	if pvc.Spec.Resources.Requests == nil {
+		pvc.Spec.Resources.Requests = corev1api.ResourceList{}
+	}
+
+	storageReq, exists := pvc.Spec.Resources.Requests[corev1api.ResourceStorage]
+	if !exists || storageReq.Cmp(restoreSize) < 0 {
+		pvc.Spec.Resources.Requests[corev1api.ResourceStorage] = restoreSize
+		rs := pvc.Spec.Resources.Requests[corev1api.ResourceStorage]
+		log.Infof("Resetting storage requests for PVC %s/%s to %s",
+			pvc.Namespace, pvc.Name, rs.String())
+	}
+}
+
+// relayRestoreProgress reports the PVC's restore state to kubeagent.
+func relayRestoreProgress(pvc *corev1api.PersistentVolumeClaim, state, message, restoreName string, logger logrus.FieldLogger) {
+	if uErr := updateSnapshotProgress(pvc, nil, nil, state, message, restoreName, logger); uErr != nil {
+		logger.WithError(uErr).Error("<SNAPSHOT PROGRESS UPDATE> Failed to update progress for restoring PVC from CSI snapshot. Continuing...")
+		return
+	}
+	if state == "completed" {
+		logger.Info("< CSI SNAPSHOT PROGRESS UPDATE> Successfully updated progress for restoring PVC from CSI snapshot.")
+	}
 }
 
 func resetPVCSourceToVolumeSnapshot(pvc *corev1api.PersistentVolumeClaim, vsName string) {
