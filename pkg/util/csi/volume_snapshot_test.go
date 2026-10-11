@@ -2250,3 +2250,30 @@ func TestWaitUntilVSCHandleIsReadyReportsErrorWhenNoHandle(t *testing.T) {
 	assert.Equal(t, "error", last[0])
 	assert.Contains(t, last[1], vscName)
 }
+
+// A driver error that appears while waiting is what the timeout must report.
+func TestWaitUntilVSCHandleIsReadyReportsLateDriverError(t *testing.T) {
+	last := recordSnapshotProgress(t)
+	vscName := "vsc-1"
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).
+		Status().BoundVolumeSnapshotContentName(vscName).Result()
+	vsc := builder.ForVolumeSnapshotContent(vscName).Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs, vsc)
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		failed := &snapshotv1api.VolumeSnapshotContent{}
+		require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: vscName}, failed))
+		message := "driver refused the snapshot"
+		failed.Status = &snapshotv1api.VolumeSnapshotContentStatus{Error: &snapshotv1api.VolumeSnapshotError{Message: &message}}
+		require.NoError(t, client.Update(t.Context(), failed))
+	}()
+
+	_, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), 1500*time.Millisecond)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "driver refused the snapshot")
+	assert.Equal(t, "error", last[0])
+	assert.Contains(t, last[1], "driver refused the snapshot")
+}

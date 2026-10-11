@@ -1048,6 +1048,8 @@ func WaitUntilVSCHandleIsReady(
 
 	vscListWatch := nameListWatch(ctx, watchClient, "", boundVSCName,
 		func() crclient.ObjectList { return &snapshotv1api.VolumeSnapshotContentList{} })
+	// The last VolumeSnapshotContent seen, so a timeout reports its latest error.
+	lastSeenVSC := vsc
 
 	if _, watchErr := watchtools.UntilWithSync(
 		ctx,
@@ -1064,6 +1066,7 @@ func WaitUntilVSCHandleIsReady(
 				return false, fmt.Errorf(
 					"VSC %s was deleted while waiting for SnapshotHandle", boundVSCName)
 			case k8swatch.Added, k8swatch.Modified:
+				lastSeenVSC = updatedVSC
 				if updatedVSC.Status == nil || updatedVSC.Status.SnapshotHandle == nil {
 					snapshotState = "pending"
 					snapshotStateMessage = fmt.Sprintf(
@@ -1085,9 +1088,10 @@ func WaitUntilVSCHandleIsReady(
 		snapshotState = "error"
 		snapshotStateMessage = fmt.Sprintf("Timed out awaiting snapshot handle of VolumeSnapshotContent %s", boundVSCName)
 		log.WithError(watchErr).Errorf("Phase2 watch failed for VSC %s", boundVSCName)
-		if vsc.Status != nil && vsc.Status.Error != nil {
+		if lastSeenVSC.Status != nil && lastSeenVSC.Status.Error != nil && lastSeenVSC.Status.Error.Message != nil {
+			snapshotStateMessage = fmt.Sprintf("%s: %s", snapshotStateMessage, *lastSeenVSC.Status.Error.Message)
 			return nil, fmt.Errorf("CSI reconciliation timeout for VSC %s: %v",
-				boundVSCName, *vsc.Status.Error.Message)
+				boundVSCName, *lastSeenVSC.Status.Error.Message)
 		}
 		return nil, errors.Wrapf(watchErr,
 			"timed out or failed watching VSC %s for SnapshotHandle", boundVSCName)
