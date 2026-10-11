@@ -2277,3 +2277,61 @@ func TestWaitUntilVSCHandleIsReadyReportsLateDriverError(t *testing.T) {
 	assert.Equal(t, "error", last[0])
 	assert.Contains(t, last[1], "driver refused the snapshot")
 }
+
+// CloudCasa keeps the backup's VolumeSnapshotContent in the cluster (D1): its
+// snapshot gate and its failed-backup cleanup find it by the backup label.
+func TestDeleteVolumeSnapshotKeepsContent(t *testing.T) {
+	handle := "snap-handle-1"
+	newVS := func(bound bool) *snapshotv1api.VolumeSnapshot {
+		b := builder.ForVolumeSnapshot("ns", "vs-1").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1"))
+		if bound {
+			b = b.Status().BoundVolumeSnapshotContentName("vsc-1")
+		}
+		return b.Result()
+	}
+	newVSC := func(policy snapshotv1api.DeletionPolicy) *snapshotv1api.VolumeSnapshotContent {
+		return builder.ForVolumeSnapshotContent("vsc-1").
+			ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1"),
+				builder.WithAnnotations("cc-pvc-name", "pvc-1", "cc-pvc-namespace", "ns")).
+			DeletionPolicy(policy).
+			VolumeSnapshotRef("ns", "vs-1", "uid-1").
+			Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}).Result()
+	}
+
+	tests := []struct {
+		name        string
+		vs          *snapshotv1api.VolumeSnapshot
+		vsc         *snapshotv1api.VolumeSnapshotContent
+		vsDeleted   bool
+		recreated   bool
+		finalPolicy snapshotv1api.DeletionPolicy
+	}{
+		{"bound VS with Delete content: VS deleted, content re-created as Retain", newVS(true), newVSC(snapshotv1api.VolumeSnapshotContentDelete), true, true, snapshotv1api.VolumeSnapshotContentRetain},
+		{"unbound VS with Delete content: nothing deleted", newVS(false), newVSC(snapshotv1api.VolumeSnapshotContentDelete), false, false, snapshotv1api.VolumeSnapshotContentDelete},
+		{"unbound VS with Retain content: VS deleted, content untouched", newVS(false), newVSC(snapshotv1api.VolumeSnapshotContentRetain), true, false, snapshotv1api.VolumeSnapshotContentRetain},
+		{"bound VS with Retain content: VS deleted, content untouched", newVS(true), newVSC(snapshotv1api.VolumeSnapshotContentRetain), true, false, snapshotv1api.VolumeSnapshotContentRetain},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := velerotest.NewFakeControllerRuntimeClient(t, tc.vs, tc.vsc)
+
+			DeleteVolumeSnapshot(*tc.vs, *tc.vsc, builder.ForBackup("velero", "backup-1").Result(), client, logrus.New())
+
+			err := client.Get(t.Context(), crclient.ObjectKeyFromObject(tc.vs), &snapshotv1api.VolumeSnapshot{})
+			assert.Equal(t, tc.vsDeleted, apierrors.IsNotFound(err), "VolumeSnapshot deleted")
+
+			vsc := &snapshotv1api.VolumeSnapshotContent{}
+			require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: "vsc-1"}, vsc), "content must stay in the cluster")
+			assert.Equal(t, tc.finalPolicy, vsc.Spec.DeletionPolicy)
+			assert.Equal(t, "backup-1", vsc.Labels[velerov1api.BackupNameLabel])
+			assert.Equal(t, "pvc-1", vsc.Annotations["cc-pvc-name"])
+			if tc.recreated {
+				require.NotNil(t, vsc.Spec.Source.SnapshotHandle)
+				assert.Equal(t, handle, *vsc.Spec.Source.SnapshotHandle, "static content keeps the snapshot handle")
+				assert.NotEqual(t, "vs-1", vsc.Spec.VolumeSnapshotRef.Name, "static content no longer points at the deleted VS")
+			} else {
+				assert.Equal(t, "vs-1", vsc.Spec.VolumeSnapshotRef.Name)
+			}
+		})
+	}
+}

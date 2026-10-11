@@ -88,9 +88,20 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 		backup.Status.Phase == velerov1api.BackupPhaseFinalizingPartiallyFailed {
 		p.log.
 			WithField("Backup", fmt.Sprintf("%s/%s", backup.Namespace, backup.Name)).
-			WithField("BackupPhase", backup.Status.Phase).Debugf("Cleaning VolumeSnapshots.")
+			WithField("BackupPhase", backup.Status.Phase).Debugf("Cleaning up VolumeSnapshot during finalize")
 
-		csi.DeleteReadyVolumeSnapshot(*vs, p.crClient, p.log)
+		// CloudCasa keeps the VolumeSnapshotContent in the cluster (Retain) for its
+		// snapshot tracking and cleanup. Without the bound content, deleting the
+		// VolumeSnapshot could cascade-delete the snapshot, so leave it in place.
+		vsc, err := csi.GetVSCForVS(context.TODO(), vs, p.crClient)
+		if err != nil {
+			p.log.Warnf(
+				"Skipping finalize cleanup of VolumeSnapshot %s/%s; could not get bound VolumeSnapshotContent: %v",
+				vs.Namespace, vs.Name, err)
+			return item, nil, "", nil, nil
+		}
+
+		csi.DeleteVolumeSnapshot(*vs, *vsc, backup, p.crClient, p.log)
 		return item, nil, "", nil, nil
 	}
 
