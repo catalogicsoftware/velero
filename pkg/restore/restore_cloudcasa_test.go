@@ -18,6 +18,7 @@ package restore
 
 import (
 	"io"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,11 +26,14 @@ import (
 	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
+	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
+	riav2 "github.com/vmware-tanzu/velero/pkg/plugin/velero/restoreitemaction/v2"
 	"github.com/vmware-tanzu/velero/pkg/test"
 	"github.com/vmware-tanzu/velero/pkg/types"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
@@ -235,4 +239,75 @@ func TestRestoreReprovisionsRetainVolumesAcrossClusters(t *testing.T) {
 			assert.Equal(t, tc.wantVolume, volumeName)
 		})
 	}
+}
+
+// podRecordingAction is a pod restore item action that records the pods it sees.
+type podRecordingAction struct {
+	name string
+	pods []corev1api.Pod
+}
+
+func (a *podRecordingAction) Name() string { return a.name }
+
+func (a *podRecordingAction) AppliesTo() (velero.ResourceSelector, error) {
+	return velero.ResourceSelector{IncludedResources: []string{"pods"}}, nil
+}
+
+func (a *podRecordingAction) Execute(input *velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error) {
+	pod := corev1api.Pod{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(input.Item.UnstructuredContent(), &pod); err != nil {
+		return nil, err
+	}
+	a.pods = append(a.pods, pod)
+	return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
+}
+
+func (a *podRecordingAction) Progress(string, *velerov1api.Restore) (velero.OperationProgress, error) {
+	return velero.OperationProgress{}, nil
+}
+
+func (a *podRecordingAction) Cancel(string, *velerov1api.Restore) error { return nil }
+
+func (a *podRecordingAction) AreAdditionalItemsReady([]velero.ResourceIdentifier, *velerov1api.Restore) (bool, error) {
+	return true, nil
+}
+
+// After the restore, CloudCasa's pod plugin gets one pod per namespace whose
+// volumes are that namespace's restored PVCs; other pod actions do not.
+func TestRestorePassesRestoredPVCsToTheCloudCasaPodPlugin(t *testing.T) {
+	h := newHarness(t)
+	cloudcasa := &podRecordingAction{name: "catalogicsoftware.com/offload-restore-pod-action-plugin"}
+	other := &podRecordingAction{name: "velero.io/other-pod-action"}
+	tarball := test.NewTarWriter(t).
+		AddItems("persistentvolumeclaims",
+			builder.ForPersistentVolumeClaim("ns-1", "data").Result(),
+			builder.ForPersistentVolumeClaim("ns-1", "logs").Result(),
+			builder.ForPersistentVolumeClaim("ns-2", "data").Result(),
+		).
+		Done()
+	for _, r := range []*test.APIResource{test.PVCs(), test.Pods()} {
+		h.DiscoveryClient.WithAPIResource(r)
+	}
+	require.NoError(t, h.restorer.discoveryHelper.Refresh())
+
+	_, errs := h.restorer.Restore(&Request{
+		Log:          h.log,
+		Restore:      defaultRestore().Result(),
+		Backup:       defaultBackup().Result(),
+		BackupReader: tarball,
+	}, []riav2.RestoreItemAction{cloudcasa, other}, nil)
+
+	assertEmptyResults(t, errs)
+	assert.Empty(t, other.pods)
+	claims := map[string][]string{}
+	for _, pod := range cloudcasa.pods {
+		assert.Equal(t, "cloudcasa-pvc-restore", pod.Name)
+		for i, v := range pod.Spec.Volumes {
+			assert.Equal(t, "volume"+strconv.Itoa(i), v.Name)
+			claims[pod.Namespace] = append(claims[pod.Namespace], v.PersistentVolumeClaim.ClaimName)
+		}
+	}
+	assert.ElementsMatch(t, []string{"data", "logs"}, claims["ns-1"])
+	assert.Equal(t, []string{"data"}, claims["ns-2"])
+	assert.Len(t, cloudcasa.pods, 2)
 }

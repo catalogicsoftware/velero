@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -359,6 +360,7 @@ func (kr *kubernetesRestorer) RestoreWithResolvers(
 		resourceTimeout:                kr.resourceTimeout,
 		resourceClients:                make(map[resourceClientKey]client.Dynamic),
 		restoredItems:                  req.RestoredItems,
+		pvcTree:                        map[string][]string{},
 		renamedPVs:                     make(map[string]string),
 		pvRenamer:                      kr.pvRenamer,
 		discoveryHelper:                kr.discoveryHelper,
@@ -445,8 +447,9 @@ type restoreContext struct {
 
 	includeNamedResourcesSpecified bool
 	pvListCache                    *corev1api.PersistentVolumeList
-	storageClassMapping            map[string]string // cached old→new SC mapping from configmap
-	isCrossClusterRestore          bool              // Restore CR has cloudcasa-cross-cluster-restore annotation
+	storageClassMapping            map[string]string   // cached old→new SC mapping from configmap
+	isCrossClusterRestore          bool                // Restore CR has cloudcasa-cross-cluster-restore annotation
+	pvcTree                        map[string][]string // PVCs restored in each namespace
 }
 
 type resolvedResourceFilter struct {
@@ -970,6 +973,8 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 		errs.Merge(&e)
 	}
 
+	errs.Merge(ctx.passRestoredPVCsToCloudCasa())
+
 	// Close the progress update channel.
 	quit <- struct{}{}
 
@@ -1147,6 +1152,64 @@ func (ctx *restoreContext) processSelectedResource(
 	}
 
 	return processedItems, warnings, errs
+}
+
+// passRestoredPVCsToCloudCasa calls the CloudCasa pod plugin for each namespace
+// containing PVCs that Velero created. It supplies all PVCs in the namespace as
+// volumes of a dummy pod, so that the plugin can restore the PVCs that were not
+// already restored as part of a pod.
+func (ctx *restoreContext) passRestoredPVCsToCloudCasa() *results.Result {
+	errs := &results.Result{}
+	cloudcasaRestorePodName := "cloudcasa-pvc-restore"
+	for pvcNamespace, pvcNames := range ctx.pvcTree {
+		volumes := []corev1api.Volume{}
+		for pvcNum, pvcName := range pvcNames {
+			volumes = append(volumes, corev1api.Volume{
+				Name: "volume" + strconv.Itoa(pvcNum),
+				VolumeSource: corev1api.VolumeSource{
+					PersistentVolumeClaim: &corev1api.PersistentVolumeClaimVolumeSource{
+						ClaimName: pvcName,
+					},
+				},
+			})
+		}
+
+		// dummy pod spec
+		pod := &corev1api.Pod{
+			TypeMeta: metav1.TypeMeta{
+				Kind: "Pod",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: pvcNamespace,
+				Name:      cloudcasaRestorePodName,
+			},
+			Spec: corev1api.PodSpec{
+				Volumes: volumes,
+			},
+		}
+
+		unstructuredPod, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
+		if err != nil {
+			errs.Add(pvcNamespace, fmt.Errorf("Failed to convert %s pod to unstructured: %v", cloudcasaRestorePodName, err))
+			continue
+		}
+		obj := &unstructured.Unstructured{Object: unstructuredPod}
+		for _, action := range ctx.getApplicableActions(kuberesource.Pods, pvcNamespace) {
+			if action.Name() != "catalogicsoftware.com/offload-restore-pod-action-plugin" {
+				continue
+			}
+			_, err := action.RestoreItemAction.Execute(&velero.RestoreItemActionExecuteInput{
+				Item:           obj,
+				ItemFromBackup: obj,
+				Restore:        ctx.restore,
+			})
+			if err != nil {
+				errs.Add(pvcNamespace, fmt.Errorf("Failed to execute restore item action for %s pod: %v",
+					cloudcasaRestorePodName, err))
+			}
+		}
+	}
+	return errs
 }
 
 // updateExistingNamespace applies the backed-up labels and annotations of a
@@ -1895,6 +1958,8 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			errs.Add(namespace, err)
 			return warnings, errs, itemExists
 		}
+
+		ctx.pvcTree[namespace] = append(ctx.pvcTree[namespace], pvc.Name)
 
 		if pvc.Spec.VolumeName != "" {
 			// This used to only happen with PVB volumes, but now always remove this binding metadata
