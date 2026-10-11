@@ -6217,3 +6217,91 @@ func TestGetNamespaceFilter_CacheBypass(t *testing.T) {
 	// but the cache should return our cachedFilter.
 	assert.Same(t, cachedFilter, req.GetNamespaceFilter("cached-ns"))
 }
+
+func TestParseIncludeNamedResources(t *testing.T) {
+	ids := parseIncludeNamedResources(map[string]string{
+		"pods":              "ns-1/pod-a, ns-2/pod-b",
+		"deployments.apps":  "ns-1/web",
+		"persistentvolumes": "pv-1",
+	}, logrus.New())
+
+	assert.ElementsMatch(t, []velero.ResourceIdentifier{
+		{GroupResource: schema.GroupResource{Resource: "pods"}, Namespace: "ns-1", Name: "pod-a"},
+		{GroupResource: schema.GroupResource{Resource: "pods"}, Namespace: "ns-2", Name: "pod-b"},
+		{GroupResource: schema.GroupResource{Group: "apps", Resource: "deployments"}, Namespace: "ns-1", Name: "web"},
+		{GroupResource: schema.GroupResource{Resource: "persistentvolumes"}, Name: "pv-1"},
+	}, ids)
+}
+
+// A backup scoped by IncludeNamedResources holds exactly the named objects.
+func TestBackupIncludeNamedResources(t *testing.T) {
+	tests := []struct {
+		name         string
+		backup       *velerov1.Backup
+		apiResources []*test.APIResource
+		want         []string
+	}{
+		{
+			name: "only the named namespaced objects are backed up",
+			backup: defaultBackup().
+				IncludeNamedResources(map[string]string{"pods": "foo/bar", "deployments.apps": "zoo/raz"}).
+				Result(),
+			apiResources: []*test.APIResource{
+				test.Pods(
+					builder.ForPod("foo", "bar").Result(),
+					builder.ForPod("zoo", "raz").Result(),
+				),
+				test.Deployments(
+					builder.ForDeployment("foo", "bar").Result(),
+					builder.ForDeployment("zoo", "raz").Result(),
+				),
+			},
+			want: []string{
+				"resources/pods/namespaces/foo/bar.json",
+				"resources/pods/v1-preferredversion/namespaces/foo/bar.json",
+				"resources/deployments.apps/namespaces/zoo/raz.json",
+				"resources/deployments.apps/v1-preferredversion/namespaces/zoo/raz.json",
+			},
+		},
+		{
+			name: "a named cluster-scoped object is backed up",
+			backup: defaultBackup().
+				IncludeNamedResources(map[string]string{"persistentvolumes": "pv-1"}).
+				Result(),
+			apiResources: []*test.APIResource{
+				test.PVs(
+					builder.ForPersistentVolume("pv-1").Result(),
+					builder.ForPersistentVolume("pv-2").Result(),
+				),
+			},
+			want: []string{
+				"resources/persistentvolumes/cluster/pv-1.json",
+				"resources/persistentvolumes/v1-preferredversion/cluster/pv-1.json",
+			},
+		},
+	}
+
+	itemBlockPool := StartItemBlockWorkerPool(t.Context(), 1, logrus.StandardLogger())
+	defer itemBlockPool.Stop()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				h   = newHarness(t, itemBlockPool)
+				req = &Request{
+					Backup:           tc.backup,
+					SkippedPVTracker: NewSkipPVTracker(),
+					BackedUpItems:    NewBackedUpItemsMap(),
+					WorkerPool:       itemBlockPool,
+				}
+				backupFile = bytes.NewBuffer([]byte{})
+			)
+			for _, resource := range tc.apiResources {
+				h.addItems(t, resource)
+			}
+
+			h.backupper.Backup(h.log, req, backupFile, nil, nil, nil)
+
+			assertTarballContents(t, backupFile, append(tc.want, "metadata/version")...)
+		})
+	}
+}

@@ -90,6 +90,12 @@ func (b *RestoreBuilder) IncludedResources(resources ...string) *RestoreBuilder 
 	return b
 }
 
+// IncludeNamedResources sets the Restore's named resources, keyed by resource type.
+func (b *RestoreBuilder) IncludeNamedResources(named map[string]string) *RestoreBuilder {
+	b.object.Spec.IncludeNamedResources = named
+	return b
+}
+
 // ExcludedResources appends to the Restore's excluded resources.
 func (b *RestoreBuilder) ExcludedResources(resources ...string) *RestoreBuilder {
 	b.object.Spec.ExcludedResources = append(b.object.Spec.ExcludedResources, resources...)

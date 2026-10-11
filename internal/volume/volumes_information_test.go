@@ -481,6 +481,8 @@ func TestGenerateVolumeInfoForCSIVolumeSnapshot(t *testing.T) {
 						SnapshotHandle: "testSnapshotHandle",
 						Size:           107374182400,
 						VSCName:        "testContent",
+						VSName:         "testVS",
+						VSCLSName:      "testClass",
 						OperationID:    "testID",
 						ReadyToUse:     &readyToUse,
 					},

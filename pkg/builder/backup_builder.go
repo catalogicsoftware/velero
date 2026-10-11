@@ -150,6 +150,12 @@ func (b *BackupBuilder) IncludedResources(resources ...string) *BackupBuilder {
 	return b
 }
 
+// IncludeNamedResources sets the Backup's named resources, keyed by resource type.
+func (b *BackupBuilder) IncludeNamedResources(named map[string]string) *BackupBuilder {
+	b.object.Spec.IncludeNamedResources = named
+	return b
+}
+
 // ExcludedResources sets the Backup's excluded resources.
 func (b *BackupBuilder) ExcludedResources(resources ...string) *BackupBuilder {
 	b.object.Spec.ExcludedResources = resources

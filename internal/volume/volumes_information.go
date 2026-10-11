@@ -142,6 +142,12 @@ type CSISnapshotInfo struct {
 	// The name of the VolumeSnapshotContent.
 	VSCName string `json:"vscName"`
 
+	// The name of the VolumeSnapshot.
+	VSName string `json:"vsName"`
+
+	// The name of the VolumeSnapshotClass.
+	VSCLSName string `json:"vsclsName"`
+
 	// The Async Operation's ID.
 	OperationID string `json:"operationID,omitempty"`
 
@@ -480,6 +486,8 @@ func (v *BackupVolumesInformation) generateVolumeInfoForCSIVolumeSnapshot() {
 					Driver:                    volumeSnapshotContent.Spec.Driver,
 					SnapshotHandle:            snapshotHandle,
 					OperationID:               operation.Spec.OperationID,
+					VSName:                    volumeSnapshot.Name,
+					VSCLSName:                 *volumeSnapshot.Spec.VolumeSnapshotClassName,
 					ReadyToUse:                volumeSnapshot.Status.ReadyToUse,
 					VolumeGroupSnapshotHandle: volumeGroupSnapshotHandle,
 				},

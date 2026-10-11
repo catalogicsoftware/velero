@@ -444,7 +444,23 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		pageSize:              kb.clientPageSize,
 	}
 
-	items := collector.getAllItems()
+	// A backup scoped by IncludeNamedResources collects exactly the named objects
+	// instead of applying the namespace, resource and label filters.
+	var items []*kubernetesResource
+	if len(backupRequest.Backup.Spec.IncludeNamedResources) > 0 {
+		log.Infof("IncludeNamedResources: IncludeNamedResources specified in Backup spec: %v", backupRequest.Backup.Spec.IncludeNamedResources)
+		resourceIDs := parseIncludeNamedResources(backupRequest.Backup.Spec.IncludeNamedResources, log)
+		log.Infof("IncludeNamedResources: Parsed %d resource identifiers", len(resourceIDs))
+		for i, rid := range resourceIDs {
+			log.Infof("ResourceIdentifier[%d]: GroupResource=%s, Namespace='%s', Name='%s'",
+				i, rid.GroupResource.String(), rid.Namespace, rid.Name)
+		}
+		items = collector.getItemsFromResourceIdentifiers(resourceIDs)
+		log.Infof("IncludeNamedResources: Collected %d items using getItemsFromResourceIdentifiers", len(items))
+	} else {
+		log.Infof("No IncludeNamedResources specified; using default item collection with getAllItems")
+		items = collector.getAllItems()
+	}
 	log.WithField("progress", "").Infof("Collected %d items matching the backup spec from the Kubernetes API (actual number of items backed up may be more or less depending on velero.io/exclude-from-backup annotation, plugins returning additional related items to back up, etc.)", len(items))
 
 	updated := backupRequest.Backup.DeepCopy()
@@ -1497,4 +1513,37 @@ func resolveNamespacedFilterPolicies(
 		}
 	}
 	return result, patternOrder, nil
+}
+
+// parseIncludeNamedResources turns {"<resource>": "ns/name,name"} into resource
+// identifiers: "ns/name" is a namespaced object, a bare "name" is cluster-scoped.
+func parseIncludeNamedResources(includeMap map[string]string, log logrus.FieldLogger) []velero.ResourceIdentifier {
+	var resourceIDs []velero.ResourceIdentifier
+	log.Infof("Starting to parse IncludeNamedResources: %v", includeMap)
+
+	for resourceType, namesStr := range includeMap {
+		log.Infof("Parsing resource type '%s' with names string: '%s'", resourceType, namesStr)
+		for _, n := range strings.Split(namesStr, ",") {
+			n = strings.TrimSpace(n)
+			var ns, name string
+			if strings.Contains(n, "/") {
+				parts := strings.SplitN(n, "/", 2)
+				ns, name = parts[0], parts[1]
+				log.Infof("Parsed namespaced resource identifier: namespace='%s', name='%s'", ns, name)
+			} else {
+				name = n
+				log.Infof("Parsed cluster-scoped resource identifier: name='%s'", name)
+			}
+			resourceID := velero.ResourceIdentifier{
+				GroupResource: schema.ParseGroupResource(resourceType),
+				Namespace:     ns,
+				Name:          name,
+			}
+			resourceIDs = append(resourceIDs, resourceID)
+			log.Debugf("Appended ResourceIdentifier: %+v", resourceID)
+		}
+	}
+
+	log.Infof("Completed parsing IncludeNamedResources: parsed %d identifiers", len(resourceIDs))
+	return resourceIDs
 }

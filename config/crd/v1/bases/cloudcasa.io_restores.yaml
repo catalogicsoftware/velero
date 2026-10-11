@@ -239,6 +239,14 @@ spec:
                   to true.
                 nullable: true
                 type: boolean
+              includeNamedResources:
+                additionalProperties:
+                  type: string
+                description: |-
+                  IncludeNamedResources specifies the specific resources by name to include in the restore.
+                  The key is the plural resource name and the value is a comma-separated list of resource identifiers.
+                  For namespaced resources, use "namespace/objectname"; for cluster-scoped resources, simply "objectname".
+                type: object
               includedNamespaces:
                 description: |-
                   IncludedNamespaces is a slice of namespace names to include objects
