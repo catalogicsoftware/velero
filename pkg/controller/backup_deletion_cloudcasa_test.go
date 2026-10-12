@@ -18,11 +18,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -30,6 +33,10 @@ import (
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
+	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
+	pluginmocks "github.com/vmware-tanzu/velero/pkg/plugin/mocks"
+	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
+	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 )
 
 // The reconciler's retries of missing objects would add seconds to every
@@ -78,4 +85,89 @@ func TestBackupDeletionRetriesObjectsThatAppearLate(t *testing.T) {
 	assert.Contains(t, res.Status.Errors[0], "is currently in Unavailable state", "both objects were found")
 	assert.Equal(t, 4, late.gets["*v1.Backup"])
 	assert.Equal(t, 4, late.gets["*v1.BackupStorageLocation"])
+}
+
+func TestIsObjectLockError(t *testing.T) {
+	assert.False(t, isObjectLockError(nil))
+	assert.True(t, isObjectLockError(errors.New("PUT failed: BlobImmutableDueToPolicy: This operation is not permitted")))
+	assert.True(t, isObjectLockError(errors.New("AccessDenied: Access Denied because object protected by Object Lock")))
+	assert.False(t, isObjectLockError(errors.New("AccessDenied: missing permission")))
+	assert.False(t, isObjectLockError(errors.New("connection reset")))
+}
+
+// On a storage location marked immutable the backup data is left in place, and
+// an object lock error from the store does not fail the delete request.
+func TestBackupDeletionOnAnImmutableStore(t *testing.T) {
+	tests := []struct {
+		name       string
+		objectLock bool
+		deleteErr  error
+		wantDelete bool
+		wantErrors bool
+	}{
+		{name: "store marked immutable", objectLock: true},
+		{name: "object lock error from the store", deleteErr: errors.New("BlobImmutableDueToPolicy"), wantDelete: true},
+		{name: "other error from the store", deleteErr: errors.New("connection reset"), wantDelete: true, wantErrors: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			backup := builder.ForBackup(velerov1api.DefaultNamespace, "foo").StorageLocation("primary").Result()
+			backup.UID = "uid"
+			location := builder.ForBackupStorageLocation(velerov1api.DefaultNamespace, "primary").
+				Provider("objStoreProvider").Bucket("bucket").Phase(velerov1api.BackupStorageLocationPhaseAvailable).Result()
+			if tc.objectLock {
+				location.Annotations = map[string]string{velerov1api.ObjectLockAnnotation: "true"}
+			}
+			td := setupBackupDeletionControllerTest(t, defaultTestDbr(), backup, location)
+			pluginManager := &pluginmocks.Manager{}
+			pluginManager.On("GetDeleteItemActions").Return([]velero.DeleteItemAction{}, nil)
+			pluginManager.On("CleanupClients")
+			td.controller.newPluginManager = func(logrus.FieldLogger) clientmgmt.Manager { return pluginManager }
+			td.backupStore.On("GetBackupVolumeSnapshots", "foo").Return(nil, nil)
+			td.backupStore.On("DeleteBackup", "foo").Return(tc.deleteErr)
+
+			_, err := td.controller.Reconcile(t.Context(), td.req)
+			require.NoError(t, err)
+
+			if tc.wantDelete {
+				td.backupStore.AssertCalled(t, "DeleteBackup", "foo")
+			} else {
+				td.backupStore.AssertNotCalled(t, "DeleteBackup", mock.Anything)
+			}
+			res := &velerov1api.DeleteBackupRequest{}
+			getErr := td.fakeClient.Get(t.Context(), td.req.NamespacedName, res)
+			if tc.wantErrors {
+				require.NoError(t, getErr)
+				assert.NotEmpty(t, res.Status.Errors)
+			} else {
+				assert.True(t, apierrors.IsNotFound(getErr), "the request completed and was removed: %v", res.Status.Errors)
+			}
+		})
+	}
+}
+
+// Restore files on an immutable storage location are not deleted, even when
+// the location is unavailable.
+func TestRestoreFilesOnAnImmutableStoreAreKept(t *testing.T) {
+	backup := builder.ForBackup(velerov1api.DefaultNamespace, "foo").StorageLocation("primary").Result()
+	for _, objectLock := range []bool{true, false} {
+		location := builder.ForBackupStorageLocation(velerov1api.DefaultNamespace, "primary").
+			Provider("objStoreProvider").Bucket("bucket").Phase(velerov1api.BackupStorageLocationPhaseUnavailable).Result()
+		if objectLock {
+			location.Annotations = map[string]string{velerov1api.ObjectLockAnnotation: "true"}
+		}
+		r := &restoreReconciler{
+			namespace: velerov1api.DefaultNamespace,
+			kbClient:  velerotest.NewFakeControllerRuntimeClient(t, backup, location),
+			logger:    velerotest.NewLogger(),
+		}
+
+		err := r.deleteExternalResources(builder.ForRestore(velerov1api.DefaultNamespace, "restore-1").Backup("foo").Result())
+
+		if objectLock {
+			require.NoError(t, err)
+		} else {
+			require.ErrorContains(t, err, "is unavailable")
+		}
+	}
 }

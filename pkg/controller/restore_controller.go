@@ -755,6 +755,13 @@ func (r *restoreReconciler) deleteExternalResources(restore *api.Restore) error 
 		return errors.Wrap(err, fmt.Sprintf("can't get backup info, backup: %s", restore.Spec.BackupName))
 	}
 
+	// The objectstore is immutable, so deleting the restore files is bound
+	// to fail. Skip the delete calls altogether.
+	if backupInfo.location.GetAnnotations()[api.ObjectLockAnnotation] == "true" {
+		r.logger.Info("Immutable policy is enabled for this objectstore, skipping deletion of restore files in object storage")
+		return nil
+	}
+
 	if !veleroutil.BSLIsAvailable(*backupInfo.location) {
 		return fmt.Errorf("bsl %s is unavailable, cannot get the backup info", backupInfo.location.Name)
 	}
@@ -769,6 +776,10 @@ func (r *restoreReconciler) deleteExternalResources(restore *api.Restore) error 
 	}
 
 	if err = backupStore.DeleteRestore(restore.Name); err != nil {
+		if isObjectLockError(err) {
+			r.logger.WithError(err).Warn("Restore files are protected by an immutability policy. Skipping delete and not retrying.")
+			return nil
+		}
 		return errors.Wrap(err, fmt.Sprintf("can't delete restore files in object storage, backup: %s", restore.Spec.BackupName))
 	}
 
