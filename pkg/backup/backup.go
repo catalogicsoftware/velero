@@ -834,11 +834,13 @@ func (kb *kubernetesBackupper) executeItemBlockActions(
 
 			item, err := client.Get(relatedItem.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
+				// Info, not a warning: the item's own action reports the missing
+				// object ("Additional item was not found"), as in v1.14.0.x.
 				log.WithFields(logrus.Fields{
 					"groupResource": relatedItem.GroupResource,
 					"namespace":     relatedItem.Namespace,
 					"name":          relatedItem.Name,
-				}).Warnf("Related item was not found in Kubernetes API, can't add to item block")
+				}).Infof("Related item was not found in Kubernetes API, can't add to item block")
 				continue
 			}
 			if err != nil {

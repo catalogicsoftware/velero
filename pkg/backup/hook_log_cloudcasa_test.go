@@ -18,15 +18,22 @@ package backup
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	velerov1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
+	"github.com/vmware-tanzu/velero/pkg/kuberesource"
+	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
+	biav2 "github.com/vmware-tanzu/velero/pkg/plugin/velero/backupitemaction/v2"
+	ibav1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/itemblockaction/v1"
 	"github.com/vmware-tanzu/velero/pkg/test"
 )
 
@@ -60,4 +67,45 @@ func TestBackupHookLogLinesNameThePod(t *testing.T) {
 	assert.Equal(t, "ns-1", hookLog.Data["namespace"])
 	assert.Equal(t, "pods", hookLog.Data["resource"])
 	assert.EqualValues(t, "pre", hookLog.Data["hookPhase"])
+}
+
+// A missing related object is reported once, by the backup item action's
+// "Additional item was not found" warning, as v1.14.0.x did; KAS's catalog
+// counts every warning line.
+func TestMissingRelatedItemIsWarnedOnce(t *testing.T) {
+	itemBlockPool := StartItemBlockWorkerPool(t.Context(), 1, logrus.StandardLogger())
+	defer itemBlockPool.Stop()
+	h := newHarness(t, itemBlockPool)
+	req := &Request{
+		Backup:           defaultBackup().Result(),
+		SkippedPVTracker: NewSkipPVTracker(),
+		BackedUpItems:    NewBackedUpItemsMap(),
+		WorkerPool:       itemBlockPool,
+	}
+	h.addItems(t, test.Pods(builder.ForPod("ns-1", "pod-1").Result()))
+	h.addItems(t, test.PVCs())
+	missing := []velero.ResourceIdentifier{{GroupResource: kuberesource.PersistentVolumeClaims, Namespace: "ns-1", Name: "missing"}}
+	ibActions := []ibav1.ItemBlockAction{&pluggableIBA{
+		selector: velero.ResourceSelector{IncludedResources: []string{"pods"}},
+		getRelatedItemsFunc: func(runtime.Unstructured, *velerov1.Backup) ([]velero.ResourceIdentifier, error) {
+			return missing, nil
+		},
+	}}
+	actions := []biav2.BackupItemAction{&pluggableAction{
+		selector: velero.ResourceSelector{IncludedResources: []string{"pods"}},
+		executeFunc: func(item runtime.Unstructured, _ *velerov1.Backup) (runtime.Unstructured, []velero.ResourceIdentifier, string, []velero.ResourceIdentifier, error) {
+			return item, missing, "", nil, nil
+		},
+	}}
+	logger, hook := logrustest.NewNullLogger()
+
+	require.NoError(t, h.backupper.Backup(logger, req, bytes.NewBuffer([]byte{}), actions, ibActions, nil))
+
+	var warnings []string
+	for _, e := range hook.AllEntries() {
+		if e.Level <= logrus.WarnLevel && strings.Contains(e.Message, "not found in Kubernetes API") {
+			warnings = append(warnings, e.Message)
+		}
+	}
+	assert.Equal(t, []string{"Additional item was not found in Kubernetes API, can't back it up"}, warnings)
 }
