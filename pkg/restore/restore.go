@@ -1828,6 +1828,26 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 
 	restoreLogger.Infof("restore status includes excludes: %+v", ctx.resourceStatusIncludesExcludes)
 
+	// notRestored is why the item, ending with only warnings, is not in the
+	// cluster as backed up.
+	var notRestored error
+
+	// A KubeVirt VM whose restore started reports its result on every return.
+	var startedVM *kubevirtutil.ItemKey
+	if kubevirtutil.IsKubeVirtVMResource(groupResource) {
+		defer func() {
+			if startedVM == nil {
+				return
+			}
+			vmErr := kubevirtutil.ToError(errs)
+			if vmErr == nil {
+				vmErr = notRestored
+			}
+			kubevirtutil.KubeVirtVMOpResult(restoreLogger, groupResource, startedVM.Name, startedVM.Namespace,
+				ctx.restore, vmErr == nil, vmErr, ctx.kbClient)
+		}()
+	}
+
 	for _, action := range ctx.getApplicableActions(groupResource, namespace) {
 		if !action.Selector.Matches(labels.Set(obj.GetLabels())) {
 			continue
@@ -1864,6 +1884,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			// Save the VM's name and namespace for tracking additional items
 			vmName := obj.GetName()
 			vmNamespace := namespace
+			startedVM = &kubevirtutil.ItemKey{Resource: groupResource.String(), Namespace: vmNamespace, Name: vmName}
 
 			// Store additional items in the context's tracking map
 			for _, additionalItem := range executeOutput.AdditionalItems {
@@ -2072,7 +2093,8 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 	}
 	resourceClient, err := ctx.getResourceClient(newGR, obj, obj.GetNamespace())
 	if err != nil {
-		warnings.Add(namespace, fmt.Errorf("error getting updated resource client for namespace %q, resource %q: %v", namespace, &newGR, err))
+		notRestored = fmt.Errorf("error getting updated resource client for namespace %q, resource %q: %v", namespace, &newGR, err)
+		warnings.Add(namespace, notRestored)
 		return warnings, errs, itemExists
 	}
 
@@ -2128,6 +2150,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		if err != nil && isAlreadyExistsError {
 			restoreLogger.Warnf("Unable to retrieve in-cluster version of %s: %s, object won't be restored by velero or have restore labels, and existing resource policy is not applied", kube.NamespaceAndName(obj), err.Error())
 			warnings.Add(namespace, err)
+			notRestored = err
 			return warnings, errs, itemExists
 		}
 	}
@@ -2142,6 +2165,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		if err != nil {
 			restoreLogger.Infof("Error trying to reset metadata for %s: %s", kube.NamespaceAndName(obj), err.Error())
 			warnings.Add(namespace, err)
+			notRestored = err
 			return warnings, errs, itemExists
 		}
 
@@ -2204,6 +2228,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 						e := errors.Errorf("could not restore, %s %q already exists. Warning: the in-cluster version is different than the backed-up version",
 							obj.GetKind(), obj.GetName())
 						warnings.Add(namespace, e)
+						notRestored = e
 						// existingResourcePolicy is set as update, attempt patch on the resource and add warning if it fails
 					} else if resourcePolicy == velerov1api.PolicyTypeUpdate {
 						// processing update as existingResourcePolicy
@@ -2211,6 +2236,9 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 						if warningsFromUpdateRP.IsEmpty() && errsFromUpdateRP.IsEmpty() {
 							itemStatus.action = ItemRestoreResultUpdated
 							ctx.restoredItems[itemKey] = itemStatus
+						} else if !warningsFromUpdateRP.IsEmpty() {
+							notRestored = fmt.Errorf("could not update the existing %s %q: %w",
+								obj.GetKind(), obj.GetName(), kubevirtutil.ToError(warningsFromUpdateRP))
 						}
 						warnings.Merge(&warningsFromUpdateRP)
 						errs.Merge(&errsFromUpdateRP)
@@ -2220,6 +2248,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 					e := errors.Errorf("could not restore, %s:%s already exists. Warning: the in-cluster version is different than the backed-up version",
 						obj.GetKind(), obj.GetName())
 					warnings.Add(namespace, e)
+					notRestored = e
 				}
 			}
 			return warnings, errs, itemExists
@@ -2354,22 +2383,6 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		}
 	}
 
-	// Call kubeVirtVMOpResult only if this is the primary KubeVirt VM resource
-	if kubevirtutil.IsKubeVirtVMResource(groupResource) {
-		// Determine success status based on the presence of errors
-		success := errs.IsEmpty()
-
-		kubevirtutil.KubeVirtVMOpResult(
-			restoreLogger,
-			groupResource,
-			obj.GetName(),
-			namespace,
-			ctx.restore,
-			success,                    // Success status based on error presence
-			kubevirtutil.ToError(errs), // Convert errs to an error if applicable
-			ctx.kbClient,
-		)
-	}
 	return warnings, errs, itemExists
 }
 

@@ -24,7 +24,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1api "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
@@ -35,6 +38,8 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/test"
 	kubevirtutil "github.com/vmware-tanzu/velero/pkg/util/kubevirt"
 )
+
+var vmsGVR = (&test.APIResource{Group: "kubevirt.io", Version: "v1", Name: "virtualmachines"}).GVR()
 
 func newVirtualMachine(namespace, name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
@@ -152,4 +157,96 @@ func TestRestoreReportsKubeVirtVMProgress(t *testing.T) {
 			}},
 		},
 	}, data.VMs)
+}
+
+// vmRestoreResult restores a VirtualMachine and returns its reported result.
+func vmRestoreResult(t *testing.T, h *harness, policy velerov1api.PolicyType) kubevirtutil.VMStatus {
+	t.Helper()
+	backedUp := newVirtualMachine("ns-1", "vm-1")
+	backedUp.Object["spec"] = map[string]any{"running": false}
+	tarball := test.NewTarWriter(t).AddItems("virtualmachines.kubevirt.io", backedUp).Done()
+	h.DiscoveryClient.WithAPIResource(&test.APIResource{Group: "kubevirt.io", Version: "v1", Name: "virtualmachines", Kind: "VirtualMachine", Namespaced: true})
+	require.NoError(t, h.restorer.discoveryHelper.Refresh())
+
+	restore := defaultRestore().ExistingResourcePolicy(string(policy)).Result()
+	h.restorer.Restore(&Request{
+		Log:                  h.log,
+		Restore:              restore,
+		Backup:               defaultBackup().Result(),
+		BackupReader:         tarball,
+		DisableInformerCache: true,
+	}, []riav2.RestoreItemAction{&vmRestoreAction{}}, nil)
+
+	configMap := &corev1api.ConfigMap{}
+	require.NoError(t, h.restorer.kbClient.Get(t.Context(),
+		crclient.ObjectKey{Namespace: restore.Namespace, Name: "restore-1-cc-vm-progress"}, configMap))
+	var data struct {
+		VMs map[string]kubevirtutil.VMStatus `json:"vms"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(configMap.Data["vmStatusData"]), &data))
+	require.Contains(t, data.VMs, "ns-1/vm-1")
+	return data.VMs["ns-1/vm-1"]
+}
+
+// A VM whose restore started always gets a final result: COMPLETED when the
+// cluster has it as backed up, FAILED with the reason otherwise.
+func TestRestoreReportsAFinalKubeVirtVMResult(t *testing.T) {
+	inCluster := func(running bool) *unstructured.Unstructured {
+		vm := newVirtualMachine("ns-1", "vm-1")
+		vm.Object["spec"] = map[string]any{"running": running}
+		return vm
+	}
+	failFirst := func(verb string, err error) func(h *harness) {
+		return func(h *harness) {
+			failed := false
+			h.DynamicClient.PrependReactor(verb, "virtualmachines", func(k8stesting.Action) (bool, runtime.Object, error) {
+				if failed {
+					return false, nil, nil
+				}
+				failed = true
+				return true, nil, err
+			})
+		}
+	}
+	tests := []struct {
+		name        string
+		policy      velerov1api.PolicyType
+		existing    *unstructured.Unstructured
+		setup       func(h *harness)
+		wantStatus  string
+		wantMessage string
+	}{
+		{name: "created", wantStatus: "COMPLETED", wantMessage: "Restore completed successfully"},
+		{name: "creation rejected", setup: failFirst("create", errors.New("admission webhook denied the request")),
+			wantStatus:  "FAILED",
+			wantMessage: "Restore failed: namespace ns-1: error restoring virtualmachines.kubevirt.io/ns-1/vm-1: admission webhook denied the request"},
+		{name: "exists unchanged", existing: inCluster(false), wantStatus: "COMPLETED", wantMessage: "Restore completed successfully"},
+		{name: "exists changed", existing: inCluster(true), wantStatus: "FAILED",
+			wantMessage: "Restore failed: could not restore, VirtualMachine:vm-1 already exists. Warning: the in-cluster version is different than the backed-up version"},
+		{name: "exists changed, policy none", policy: velerov1api.PolicyTypeNone, existing: inCluster(true), wantStatus: "FAILED",
+			wantMessage: `Restore failed: could not restore, VirtualMachine "vm-1" already exists. Warning: the in-cluster version is different than the backed-up version`},
+		{name: "exists changed, overwritten", policy: velerov1api.PolicyTypeUpdate, existing: inCluster(true),
+			wantStatus: "COMPLETED", wantMessage: "Restore completed successfully"},
+		{name: "exists changed, overwrite rejected", policy: velerov1api.PolicyTypeUpdate, existing: inCluster(true),
+			setup:       failFirst("patch", errors.New("admission webhook denied the patch")),
+			wantStatus:  "FAILED",
+			wantMessage: `Restore failed: could not update the existing VirtualMachine "vm-1": namespace ns-1: admission webhook denied the patch`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			if tc.existing != nil {
+				_, err := h.DynamicClient.Resource(vmsGVR).Namespace("ns-1").Create(t.Context(), tc.existing, metav1.CreateOptions{})
+				require.NoError(t, err)
+			}
+			if tc.setup != nil {
+				tc.setup(h)
+			}
+
+			result := vmRestoreResult(t, h, tc.policy)
+
+			assert.Equal(t, tc.wantStatus, result.Status)
+			assert.Equal(t, tc.wantMessage, result.Message)
+		})
+	}
 }
