@@ -175,9 +175,9 @@ func (v *volumeHelperImpl) ShouldPerformSnapshot(obj runtime.Unstructured, group
 		}
 	}
 
-	// If resource is PVC, and PV is nil (e.g., Pending/Lost PVC with no matching policy), return the original error
+	// If resource is PVC, and PV is nil (e.g., Pending/Lost PVC with no matching policy), return the original error.
+	// It is not logged here: the caller logs it, and each logged error counts once.
 	if groupResource == kuberesource.PersistentVolumeClaims && pv == nil && pvNotFoundErr != nil {
-		v.logger.WithError(pvNotFoundErr).Errorf("fail to get PV for PVC %s", pvc.Namespace+"/"+pvc.Name)
 		return false, pvNotFoundErr
 	}
 
