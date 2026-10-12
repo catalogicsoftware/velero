@@ -190,7 +190,7 @@ func (r *backupStorageLocationReconciler) Reconcile(ctx context.Context, req ctr
 
 	locationList, err := storage.ListBackupStorageLocations(r.ctx, r.client, req.Namespace)
 	if err != nil {
-		log.WithError(err).Error("No BackupStorageLocations found, at least one is required")
+		log.Infof("No BackupStorageLocations found")
 		return ctrl.Result{}, nil
 	}
 
@@ -205,7 +205,8 @@ func (r *backupStorageLocationReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	if location.Name == "" || location.Namespace == "" {
-		log.WithError(err).Error("BackupStorageLocation is not found")
+		log.WithError(err).Errorf("BackupStorageLocation %s/%s is not found", req.Namespace, req.Name)
+		log.Infof("Found BSLs: %+v", locationList.Items)
 		return ctrl.Result{}, nil
 	}
 	if skipForeign(log, &location) {
@@ -289,18 +290,14 @@ func (r *backupStorageLocationReconciler) logReconciledPhase(defaultFound bool, 
 	numUnavailable := len(unAvailableBSLs)
 	numUnknown := len(unknownBSLs)
 
+	// Engines started by kubeagent have no default location and do not validate
+	// locations periodically, so only real failures are logged here.
 	if numUnavailable+numUnknown == len(locationList.Items) { // no available BSL
 		if len(errs) > 0 {
 			log.Errorf("Current BackupStorageLocations available/unavailable/unknown: %v/%v/%v, %s)", numAvailable, numUnavailable, numUnknown, strings.Join(errs, "; "))
-		} else {
-			log.Errorf("Current BackupStorageLocations available/unavailable/unknown: %v/%v/%v)", numAvailable, numUnavailable, numUnknown)
 		}
 	} else if numUnavailable > 0 { // some but not all BSL unavailable
 		log.Warnf("Unavailable BackupStorageLocations detected: available/unavailable/unknown: %v/%v/%v, %s)", numAvailable, numUnavailable, numUnknown, strings.Join(errs, "; "))
-	}
-
-	if !defaultFound {
-		log.Warn("There is no existing BackupStorageLocation set as default. Please see `velero backup-location -h` for options.")
 	}
 }
 
