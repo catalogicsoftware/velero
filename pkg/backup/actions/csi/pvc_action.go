@@ -98,8 +98,6 @@ type cbtVmPvcsCacheEntry struct {
 	created time.Time
 }
 
-// AppliesTo returns information indicating that the PVCBackupItemAction
-// should be invoked to backup PVCs.
 // liveCopyDrivers is a list of drivers for which we will skip creating the snapshot and will copy data live
 // Must match liveCopyDrivers in amdslib/utils/utils.go
 var liveCopyDrivers = []string{"nfs.csi.k8s.io", "efs.csi.aws.com", "linodebs.csi.linode.com",
@@ -121,6 +119,8 @@ type snapshotProgressError struct {
 func (e *snapshotProgressError) Error() string { return e.err.Error() }
 func (e *snapshotProgressError) Unwrap() error { return e.err }
 
+// AppliesTo returns information indicating that the PVCBackupItemAction
+// should be invoked to backup PVCs.
 func (p *pvcBackupItemAction) AppliesTo() (velero.ResourceSelector, error) {
 	return velero.ResourceSelector{
 		IncludedResources: []string{"persistentvolumeclaims"},
