@@ -894,7 +894,7 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 		serverMetrics.SetBackupTarballSizeBytesGauge(backupScheduleName, backupSizeBytes)
 	}
 
-	if backup.Status.CompletionTimestamp != nil {
+	if backup.Status.CompletionTimestamp != nil && backup.Status.StartTimestamp != nil {
 		backupDuration := backup.Status.CompletionTimestamp.Time.Sub(backup.Status.StartTimestamp.Time)
 		backupDurationSeconds := float64(backupDuration / time.Second)
 		serverMetrics.RegisterBackupDuration(backupScheduleName, backupDurationSeconds)
@@ -903,7 +903,11 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 	if !finalize {
 		serverMetrics.RegisterVolumeSnapshotAttempts(backupScheduleName, backup.Status.VolumeSnapshotsAttempted)
 		serverMetrics.RegisterVolumeSnapshotSuccesses(backupScheduleName, backup.Status.VolumeSnapshotsCompleted)
-		serverMetrics.RegisterVolumeSnapshotFailures(backupScheduleName, backup.Status.VolumeSnapshotsAttempted-backup.Status.VolumeSnapshotsCompleted)
+		nativeSnapshotFailures := backup.Status.VolumeSnapshotsAttempted - backup.Status.VolumeSnapshotsCompleted
+		if nativeSnapshotFailures < 0 {
+			nativeSnapshotFailures = 0
+		}
+		serverMetrics.RegisterVolumeSnapshotFailures(backupScheduleName, nativeSnapshotFailures)
 
 		if features.IsEnabled(velerov1api.CSIFeatureFlag) {
 			serverMetrics.RegisterCSISnapshotAttempts(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsAttempted)
@@ -919,7 +923,11 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 		}
 	} else if features.IsEnabled(velerov1api.CSIFeatureFlag) {
 		serverMetrics.RegisterCSISnapshotSuccesses(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsCompleted)
-		serverMetrics.RegisterCSISnapshotFailures(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsAttempted-backup.Status.CSIVolumeSnapshotsCompleted)
+		csiSnapshotFailures := backup.Status.CSIVolumeSnapshotsAttempted - backup.Status.CSIVolumeSnapshotsCompleted
+		if csiSnapshotFailures < 0 {
+			csiSnapshotFailures = 0
+		}
+		serverMetrics.RegisterCSISnapshotFailures(backupScheduleName, backup.Name, csiSnapshotFailures)
 	}
 }
 
