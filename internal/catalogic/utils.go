@@ -236,18 +236,18 @@ func SetStaticAzureAnotation(pvc *corev1api.PersistentVolumeClaim, vals map[stri
 		log.Infof("Found %s PVC %s/%s. Getting %s PV details", storageClass.Provisioner, pvc.Namespace, pvc.Name, pvc.Spec.VolumeName)
 		config, err := rest.InClusterConfig()
 		if err != nil {
-			log.Errorf("Failed to get in-cluster Kubernetes config: %w", err)
+			log.Errorf("Failed to get in-cluster Kubernetes config: %v", err)
 			return errors.WithStack(err)
 		}
 
 		clientset, err := kubernetes.NewForConfig(config)
 		if err != nil {
-			log.Errorf("Failed to get Kubernetes clientset for in-cluster config: %w", err)
+			log.Errorf("Failed to get Kubernetes clientset for in-cluster config: %v", err)
 			return errors.WithStack(err)
 		}
 		pv, err := clientset.CoreV1().PersistentVolumes().Get(context.TODO(), pvc.Spec.VolumeName, v1.GetOptions{})
 		if err != nil {
-			log.Errorf("Failed to get PV %s for PVC %s/%s: %w", pvc.Spec.VolumeName, pvc.Namespace, pvc.Name, err)
+			log.Errorf("Failed to get PV %s for PVC %s/%s: %v", pvc.Spec.VolumeName, pvc.Namespace, pvc.Name, err)
 			return errors.WithStack(err)
 		}
 		if pv.Spec.CSI != nil {
@@ -280,7 +280,7 @@ func SetStaticAzureAnotation(pvc *corev1api.PersistentVolumeClaim, vals map[stri
 			if err != nil {
 				log.Errorf(
 					"Could not find secret namespace for %s PV %s bounded with PVC %s/%s",
-					storageClass.Provisioner, pv.Name, pvc.Namespace, pvc.Namespace,
+					storageClass.Provisioner, pv.Name, pvc.Namespace, pvc.Name,
 				)
 				return errors.WithStack(err)
 			}
