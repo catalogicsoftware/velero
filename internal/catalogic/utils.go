@@ -35,7 +35,7 @@ func UpdateSnapshotProgress(
 		return nil
 	}
 	var err error
-	// Fill in the PVC realted information
+	// Fill in the PVC related information
 	var pvcProgressObject = PvcInfo{}
 	if pvc != nil {
 		pvcProgressObject.Name = pvc.GetName()
@@ -279,7 +279,7 @@ func SetStaticAzureAnotation(pvc *corev1api.PersistentVolumeClaim, vals map[stri
 			secretNamespace, err = GetAzureFileSecretNamespace(*pvc, pv, storageClass, log, isDynamicallyProvisioned)
 			if err != nil {
 				log.Errorf(
-					"Could not find secret namesapce for %s PV %s bounded with PVC %s/%s",
+					"Could not find secret namespace for %s PV %s bounded with PVC %s/%s",
 					storageClass.Provisioner, pv.Name, pvc.Namespace, pvc.Namespace,
 				)
 				return errors.WithStack(err)
@@ -412,7 +412,7 @@ func GetAzureFileSecretName(pvc corev1api.PersistentVolumeClaim, pv *corev1api.P
 					sc.Provisioner, pv.Name, pvc.Namespace, pvc.Name,
 				)
 				// If secret name is not present in the attributes, it means the storage Account
-				// was created the CSI drvier. In such case, get the Storage account name from
+				// was created the CSI driver. In such case, get the Storage account name from
 				// volumeHandle.
 				// Example:
 				// volumeHandle: <resource-group>#<storage-account-name>#<share-name>###<namespace>
