@@ -226,6 +226,7 @@ func KubeVirtVMStartOp(
 	}
 
 	// Retry loop to create or update the ConfigMap, handling conflicts with exponential backoff
+	var retryReason error
 	err = wait.ExponentialBackoff(wait.Backoff{
 		Steps:    5,
 		Duration: configMapRetryInterval,
@@ -249,15 +250,21 @@ func KubeVirtVMStartOp(
 					},
 				}
 				if err := kubeClient.Create(context.TODO(), newConfigMap); err != nil {
+					if apierrors.IsAlreadyExists(err) {
+						// The read came from a cache that has not seen the ConfigMap yet.
+						log.Infof("ConfigMap %s already exists, retrying", configMapName)
+						retryReason = err
+						return false, nil
+					}
 					log.Warnf("Failed to create ConfigMap %s: %v", configMapName, err)
-					return false, err // Retry on other errors
+					return false, err
 				}
 				log.Infof("Created ConfigMap %s for KubeVirt VM %s status", configMapName, jobType)
 				printConfigMapData(log, newConfigMap)
 				return true, nil
 			}
 			log.Warnf("Error retrieving ConfigMap %s: %v", configMapName, err)
-			return false, err // Retry on transient errors
+			return false, err
 		}
 
 		// ConfigMap exists, attempt to update it with the latest VM status
@@ -293,15 +300,21 @@ func KubeVirtVMStartOp(
 		if err := kubeClient.Update(context.TODO(), configMap); err != nil {
 			if apierrors.IsConflict(err) {
 				log.Warnf("Conflict updating ConfigMap %s, retrying", configMapName)
+				retryReason = err
 				return false, nil // Retry on conflicts
 			}
 			log.Warnf("Failed to update ConfigMap %s: %v", configMapName, err)
-			return false, err // Retry on other errors
+			return false, err
 		}
 		log.Infof("Updated ConfigMap %s for KubeVirt VM %s status", configMapName, jobType)
 		printConfigMapData(log, configMap)
 		return true, nil
 	})
+
+	// Name the last reason to retry instead of the bare timeout
+	if wait.Interrupted(err) && retryReason != nil {
+		err = retryReason
+	}
 
 	// Log final error if all retries failed
 	if err != nil {
@@ -343,6 +356,7 @@ func KubeVirtVMOpResult(
 	}
 
 	// Retry loop to update the ConfigMap with the result of the backup
+	var retryReason error
 	err = wait.ExponentialBackoff(wait.Backoff{
 		Steps:    5,
 		Duration: configMapRetryInterval,
@@ -351,8 +365,14 @@ func KubeVirtVMOpResult(
 	}, func() (bool, error) {
 		configMap := &corev1.ConfigMap{}
 		if err := kubeClient.Get(context.TODO(), kbClient.ObjectKey{Name: configMapName, Namespace: configMapNamespace}, configMap); err != nil {
+			if apierrors.IsNotFound(err) {
+				// A cached read may not see the ConfigMap yet.
+				log.Infof("ConfigMap %s not found, retrying", configMapName)
+				retryReason = err
+				return false, nil
+			}
 			log.Warnf("Error retrieving ConfigMap %s: %v", configMapName, err)
-			return false, err // Retry on transient errors
+			return false, err
 		}
 
 		// Fetch the existing data from the ConfigMap and update the VM status
@@ -377,8 +397,10 @@ func KubeVirtVMOpResult(
 
 		vmEntry, ok := vmsData[vmKey].(map[string]interface{})
 		if !ok {
-			log.Warnf("VM entry %s missing in ConfigMap %s, cannot update VM status", vmKey, configMapName)
-			return false, fmt.Errorf("VM entry %s missing in ConfigMap %s", vmKey, configMapName)
+			// A cached read may return a copy older than the VM's start.
+			log.Infof("VM entry %s missing in ConfigMap %s, retrying", vmKey, configMapName)
+			retryReason = fmt.Errorf("VM entry %s missing in ConfigMap %s", vmKey, configMapName)
+			return false, nil
 		}
 
 		// Set the VM backup result
@@ -397,16 +419,22 @@ func KubeVirtVMOpResult(
 		if err := kubeClient.Update(context.TODO(), configMap); err != nil {
 			if apierrors.IsConflict(err) {
 				log.Warnf("Conflict updating ConfigMap %s, retrying", configMapName)
+				retryReason = err
 				return false, nil // Retry on conflicts
 			}
 			log.Warnf("Failed to update ConfigMap %s: %v", configMapName, err)
-			return false, err // Retry on other errors
+			return false, err
 		}
 
 		log.Infof("Updated ConfigMap %s with %s result for KubeVirt VM %s: %s", configMapName, jobType, vmKey, status)
 		printConfigMapData(log, configMap)
 		return true, nil
 	})
+
+	// Name the last reason to retry instead of the bare timeout
+	if wait.Interrupted(err) && retryReason != nil {
+		err = retryReason
+	}
 
 	// Log final error if all retries failed
 	if err != nil {
@@ -449,6 +477,7 @@ func KubeVirtVMAdditionalResourceOpResult(
 	}
 
 	// Retry loop to update the ConfigMap with the result of the additional resource backup
+	var retryReason error
 	updateErr := wait.ExponentialBackoff(wait.Backoff{
 		Steps:    5,
 		Duration: configMapRetryInterval,
@@ -458,8 +487,14 @@ func KubeVirtVMAdditionalResourceOpResult(
 		// Retrieve the ConfigMap
 		configMap := &corev1.ConfigMap{}
 		if err := kubeClient.Get(context.TODO(), kbClient.ObjectKey{Name: configMapName, Namespace: configMapNamespace}, configMap); err != nil {
+			if apierrors.IsNotFound(err) {
+				// A cached read may not see the ConfigMap yet.
+				log.Infof("ConfigMap %s not found, retrying", configMapName)
+				retryReason = err
+				return false, nil
+			}
 			log.Warnf("Error retrieving ConfigMap %s: %v", configMapName, err)
-			return false, err // Retry on transient errors
+			return false, err
 		}
 
 		// Fetch and parse existing data from the ConfigMap
@@ -484,8 +519,10 @@ func KubeVirtVMAdditionalResourceOpResult(
 
 		vmEntry, ok := vmsData[vmKey].(map[string]interface{})
 		if !ok {
-			log.Warnf("VM entry %s missing in ConfigMap %s, cannot update additional resource status", vmKey, configMapName)
-			return false, fmt.Errorf("VM entry %s missing in ConfigMap %s", vmKey, configMapName)
+			// A cached read may return a copy older than the VM's start.
+			log.Infof("VM entry %s missing in ConfigMap %s, retrying", vmKey, configMapName)
+			retryReason = fmt.Errorf("VM entry %s missing in ConfigMap %s", vmKey, configMapName)
+			return false, nil
 		}
 
 		// Check if the specific additional resource already exists
@@ -533,16 +570,22 @@ func KubeVirtVMAdditionalResourceOpResult(
 		if err := kubeClient.Update(context.TODO(), configMap); err != nil {
 			if apierrors.IsConflict(err) {
 				log.Warnf("Conflict updating ConfigMap %s, retrying", configMapName)
+				retryReason = err
 				return false, nil // Retry on conflicts
 			}
 			log.Warnf("Failed to update ConfigMap %s: %v", configMapName, err)
-			return false, err // Retry on other errors
+			return false, err
 		}
 
 		log.Infof("Updated ConfigMap %s with %s result for additional KubeVirt VM resource %s/%s: %s", configMapName, jobType, groupResource.String(), resName, status)
 		printConfigMapData(log, configMap)
 		return true, nil
 	})
+
+	// Name the last reason to retry instead of the bare timeout
+	if wait.Interrupted(updateErr) && retryReason != nil {
+		updateErr = retryReason
+	}
 
 	// Log final error if all retries failed
 	if updateErr != nil {

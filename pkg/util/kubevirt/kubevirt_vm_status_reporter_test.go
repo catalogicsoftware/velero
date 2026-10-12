@@ -138,6 +138,73 @@ func TestKubeVirtVMResultsNeedAStartedVM(t *testing.T) {
 	KubeVirtVMStartOp(log, "vm-a", "ns-1", "not-a-job", client)
 }
 
+// laggingClient plays a cached client: after each write, the next `lag` reads
+// still see the ConfigMap as it was before that write.
+type laggingClient struct {
+	kbClient.Client
+	lag     int
+	pending int
+	before  *corev1.ConfigMap // nil: the ConfigMap did not exist yet
+}
+
+func (c *laggingClient) Create(ctx context.Context, obj kbClient.Object, opts ...kbClient.CreateOption) error {
+	err := c.Client.Create(ctx, obj, opts...)
+	if err == nil {
+		c.before, c.pending = nil, c.lag
+	}
+	return err
+}
+
+func (c *laggingClient) Update(ctx context.Context, obj kbClient.Object, opts ...kbClient.UpdateOption) error {
+	before := &corev1.ConfigMap{}
+	if err := c.Client.Get(ctx, kbClient.ObjectKeyFromObject(obj), before); err != nil {
+		return err
+	}
+	err := c.Client.Update(ctx, obj, opts...)
+	if err == nil {
+		c.before, c.pending = before, c.lag
+	}
+	return err
+}
+
+func (c *laggingClient) Get(ctx context.Context, key kbClient.ObjectKey, obj kbClient.Object, opts ...kbClient.GetOption) error {
+	if c.pending > 0 {
+		c.pending--
+		if c.before == nil {
+			return apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, key.Name)
+		}
+		c.before.DeepCopyInto(obj.(*corev1.ConfigMap))
+		return nil
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// The restore reads through a cache: a read right after a write may not see
+// it. Every result must still reach the ConfigMap.
+func TestKubeVirtVMProgressSurvivesALaggingCache(t *testing.T) {
+	log := velerotest.NewLogger()
+	client := &laggingClient{Client: fake.NewClientBuilder().Build(), lag: 2}
+	restore := builder.ForRestore("cloudcasa-io", "rs-1").Result()
+	pvcs := schema.GroupResource{Resource: "persistentvolumeclaims"}
+
+	KubeVirtVMStartOp(log, "vm-a", "ns-1", restore, client)
+	KubeVirtVMStartOp(log, "vm-b", "ns-1", restore, client)
+	KubeVirtVMAdditionalResourceOpResult(log, pvcs, "vm-a", "ns-1", "disk-a", "ns-1", restore, true, nil, client)
+	KubeVirtVMOpResult(log, kubeVirtVMGroupResource, "vm-a", "ns-1", restore, true, nil, client)
+	KubeVirtVMAdditionalResourceOpResult(log, pvcs, "vm-b", "ns-1", "disk-b", "ns-1", restore, true, nil, client)
+	KubeVirtVMOpResult(log, kubeVirtVMGroupResource, "vm-b", "ns-1", restore, false, errors.New("boom"), client)
+
+	client.pending = 0
+	assert.JSONEq(t, `{"jobID":"rs-1","jobType":"Restore","vms":{
+		"ns-1/vm-a":{"vmName":"ns-1/vm-a","status":"COMPLETED","message":"Restore completed successfully",
+			"additionalResources":[{"resourceType":"persistentvolumeclaims","resourceName":"ns-1/disk-a",
+				"status":"COMPLETED","message":"Restore of additional resource completed successfully"}]},
+		"ns-1/vm-b":{"vmName":"ns-1/vm-b","status":"FAILED","message":"Restore failed: boom",
+			"additionalResources":[{"resourceType":"persistentvolumeclaims","resourceName":"ns-1/disk-b",
+				"status":"COMPLETED","message":"Restore of additional resource completed successfully"}]}}}`,
+		vmStatusData(t, client, "cloudcasa-io", "rs-1-cc-vm-progress", "rs-1"))
+}
+
 func virtualMachine(namespace, name string, status map[string]any, volumes ...any) *unstructured.Unstructured {
 	vm := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "kubevirt.io/v1",
