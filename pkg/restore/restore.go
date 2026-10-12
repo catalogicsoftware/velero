@@ -2245,7 +2245,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 					}
 				} else if !ignoreWarning {
 					// Preserved Velero behavior when existingResourcePolicy is not specified by the user
-					e := errors.Errorf("could not restore, %s:%s already exists. Warning: the in-cluster version is different than the backed-up version",
+					e := errors.Errorf("could not restore, %s %q already exists. Warning: the in-cluster version is different than the backed-up version",
 						obj.GetKind(), obj.GetName())
 					warnings.Add(namespace, e)
 					notRestored = e

@@ -222,7 +222,7 @@ func TestRestoreReportsAFinalKubeVirtVMResult(t *testing.T) {
 			wantMessage: "Restore failed: namespace ns-1: error restoring virtualmachines.kubevirt.io/ns-1/vm-1: admission webhook denied the request"},
 		{name: "exists unchanged", existing: inCluster(false), wantStatus: "COMPLETED", wantMessage: "Restore completed successfully"},
 		{name: "exists changed", existing: inCluster(true), wantStatus: "FAILED",
-			wantMessage: "Restore failed: could not restore, VirtualMachine:vm-1 already exists. Warning: the in-cluster version is different than the backed-up version"},
+			wantMessage: `Restore failed: could not restore, VirtualMachine "vm-1" already exists. Warning: the in-cluster version is different than the backed-up version`},
 		{name: "exists changed, policy none", policy: velerov1api.PolicyTypeNone, existing: inCluster(true), wantStatus: "FAILED",
 			wantMessage: `Restore failed: could not restore, VirtualMachine "vm-1" already exists. Warning: the in-cluster version is different than the backed-up version`},
 		{name: "exists changed, overwritten", policy: velerov1api.PolicyTypeUpdate, existing: inCluster(true),
