@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	hcplugin "github.com/hashicorp/go-plugin"
 	"github.com/sirupsen/logrus"
@@ -72,4 +73,20 @@ func TestClientConfig(t *testing.T) {
 	assert.Equal(t, expected.HandshakeConfig, cc.HandshakeConfig)
 	assert.Equal(t, expected.AllowedProtocols, cc.AllowedProtocols)
 	assert.Equal(t, expected.Plugins, cc.Plugins)
+}
+
+// Plugins get 5 minutes to start unless PLUGIN_START_TIMEOUT sets a positive
+// number of minutes.
+func TestPluginStartTimeout(t *testing.T) {
+	tests := map[string]time.Duration{"": 5 * time.Minute, "2": 2 * time.Minute, "0": 5 * time.Minute, "soon": 5 * time.Minute}
+	for value, want := range tests {
+		t.Run("value "+value, func(t *testing.T) {
+			if value != "" {
+				t.Setenv("PLUGIN_START_TIMEOUT", value)
+			}
+			assert.Equal(t, want, pluginStartTimeout())
+			cb := newClientBuilder(os.Args[0], logrus.New(), logrus.InfoLevel)
+			assert.Equal(t, want, cb.clientConfig().StartTimeout)
+		})
+	}
 }
