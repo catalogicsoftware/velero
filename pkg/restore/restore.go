@@ -81,6 +81,7 @@ import (
 	csiutil "github.com/vmware-tanzu/velero/pkg/util/csi"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
+	kubevirtutil "github.com/vmware-tanzu/velero/pkg/util/kubevirt"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
 	"github.com/vmware-tanzu/velero/pkg/util/wildcard"
 )
@@ -361,6 +362,7 @@ func (kr *kubernetesRestorer) RestoreWithResolvers(
 		resourceClients:                make(map[resourceClientKey]client.Dynamic),
 		restoredItems:                  req.RestoredItems,
 		pvcTree:                        map[string][]string{},
+		vmRelatedAdditionalItems:       make(map[kubevirtutil.ItemKey]kubevirtutil.ItemKey),
 		renamedPVs:                     make(map[string]string),
 		pvRenamer:                      kr.pvRenamer,
 		discoveryHelper:                kr.discoveryHelper,
@@ -450,6 +452,8 @@ type restoreContext struct {
 	storageClassMapping            map[string]string   // cached old→new SC mapping from configmap
 	isCrossClusterRestore          bool                // Restore CR has cloudcasa-cross-cluster-restore annotation
 	pvcTree                        map[string][]string // PVCs restored in each namespace
+	// Map to track VM's additional items
+	vmRelatedAdditionalItems map[kubevirtutil.ItemKey]kubevirtutil.ItemKey
 }
 
 type resolvedResourceFilter struct {
@@ -1847,6 +1851,36 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			return warnings, errs, itemExists
 		}
 
+		// After restore actions, check if it's a KubeVirt VM and track additional items
+		if kubevirtutil.IsKubeVirtVMResource(groupResource) {
+			restoreLogger.Infof("Handling VM Restore. Name='%s'. SourceNamespace='%s'. TargetNamespace='%s'",
+				obj.GetName(),
+				obj.GetNamespace(),
+				namespace)
+
+			// Log the start of the VM restore
+			kubevirtutil.KubeVirtVMStartOp(restoreLogger, obj.GetName(), namespace, ctx.restore, ctx.kbClient)
+
+			// Save the VM's name and namespace for tracking additional items
+			vmName := obj.GetName()
+			vmNamespace := namespace
+
+			// Store additional items in the context's tracking map
+			for _, additionalItem := range executeOutput.AdditionalItems {
+				vmKey := kubevirtutil.ItemKey{
+					Resource:  groupResource.String(),
+					Namespace: vmNamespace,
+					Name:      vmName,
+				}
+				additionalKey := kubevirtutil.ItemKey{
+					Resource:  additionalItem.GroupResource.String(),
+					Namespace: additionalItem.Namespace,
+					Name:      additionalItem.Name,
+				}
+				ctx.vmRelatedAdditionalItems[additionalKey] = vmKey
+			}
+		}
+
 		// If async plugin started async operation, add it to the ItemOperations list
 		if executeOutput.OperationID != "" {
 			resourceIdentifier := velero.ResourceIdentifier{
@@ -1930,6 +1964,22 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			w, e, additionalItemExists := ctx.restoreItem(additionalObj, additionalItem.GroupResource, additionalItemNamespace, mustIncludeAdditionalItems)
 			if additionalItemExists {
 				filteredAdditionalItems = append(filteredAdditionalItems, additionalItem)
+			}
+
+			additionalKey := kubevirtutil.ItemKey{Resource: additionalItem.GroupResource.String(), Namespace: additionalItem.Namespace, Name: additionalItem.Name}
+			if vmKey, ok := ctx.vmRelatedAdditionalItems[additionalKey]; ok {
+				kubevirtutil.KubeVirtVMAdditionalResourceOpResult(
+					restoreLogger,
+					additionalItem.GroupResource,
+					vmKey.Name,
+					vmKey.Namespace,
+					additionalItem.Name,
+					additionalItem.Namespace,
+					ctx.restore,
+					additionalItemExists,
+					nil,
+					ctx.kbClient,
+				)
 			}
 
 			warnings.Merge(&w)
@@ -2304,6 +2354,22 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		}
 	}
 
+	// Call kubeVirtVMOpResult only if this is the primary KubeVirt VM resource
+	if kubevirtutil.IsKubeVirtVMResource(groupResource) {
+		// Determine success status based on the presence of errors
+		success := errs.IsEmpty()
+
+		kubevirtutil.KubeVirtVMOpResult(
+			restoreLogger,
+			groupResource,
+			obj.GetName(),
+			namespace,
+			ctx.restore,
+			success,                    // Success status based on error presence
+			kubevirtutil.ToError(errs), // Convert errs to an error if applicable
+			ctx.kbClient,
+		)
+	}
 	return warnings, errs, itemExists
 }
 
