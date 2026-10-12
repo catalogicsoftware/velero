@@ -935,7 +935,7 @@ func (kb *kubernetesBackupper) handleItemBlockPreHooks(itemBlock *BackupItemBloc
 	var failedPods []itemblock.ItemBlockItem
 	var errs []error
 	for _, pod := range hookPods {
-		err := itemBlock.itemBackupper.itemHookHandler.HandleHooks(itemBlock.Log, pod.Gr, pod.Item, itemBlock.itemBackupper.backupRequest.ResourceHooks, hook.PhasePre, itemBlock.itemBackupper.hookTracker)
+		err := itemBlock.itemBackupper.itemHookHandler.HandleHooks(podHookLog(itemBlock.Log, pod), pod.Gr, pod.Item, itemBlock.itemBackupper.backupRequest.ResourceHooks, hook.PhasePre, itemBlock.itemBackupper.hookTracker)
 		if err == nil {
 			successPods = append(successPods, pod)
 		} else {
@@ -944,6 +944,16 @@ func (kb *kubernetesBackupper) handleItemBlockPreHooks(itemBlock *BackupItemBloc
 		}
 	}
 	return successPods, failedPods, errs
+}
+
+// podHookLog names the pod on its hook lines, as v1.14.0.x's per-item logger
+// did; CloudCasa's catalog reads name, namespace and resource from them.
+func podHookLog(log logrus.FieldLogger, pod itemblock.ItemBlockItem) logrus.FieldLogger {
+	return log.WithFields(logrus.Fields{
+		"name":      pod.Item.GetName(),
+		"resource":  pod.Gr.String(),
+		"namespace": pod.Item.GetNamespace(),
+	})
 }
 
 // The hooks cannot execute until the PVBs to be processed
@@ -957,7 +967,7 @@ func (kb *kubernetesBackupper) handleItemBlockPostHooks(itemBlock *BackupItemBlo
 	}
 
 	for _, pod := range hookPods {
-		if err := itemBlock.itemBackupper.itemHookHandler.HandleHooks(itemBlock.Log, pod.Gr, pod.Item, itemBlock.itemBackupper.backupRequest.ResourceHooks,
+		if err := itemBlock.itemBackupper.itemHookHandler.HandleHooks(podHookLog(itemBlock.Log, pod), pod.Gr, pod.Item, itemBlock.itemBackupper.backupRequest.ResourceHooks,
 			hook.PhasePost, itemBlock.itemBackupper.hookTracker); err != nil {
 			log.WithError(err).WithField("name", pod.Item.GetName()).Error("Error running post hooks for pod")
 		}
