@@ -311,3 +311,39 @@ func TestRestorePassesRestoredPVCsToTheCloudCasaPodPlugin(t *testing.T) {
 	assert.Equal(t, []string{"data"}, claims["ns-2"])
 	assert.Len(t, cloudcasa.pods, 2)
 }
+
+// Every namespace has its own kube-root-ca.crt, so restoring it would always
+// warn that it already exists; that one warning is dropped.
+func TestRestoreDoesNotWarnAboutAnExistingKubeRootCA(t *testing.T) {
+	for _, policy := range []string{"", string(velerov1api.PolicyTypeNone)} {
+		t.Run("policy "+policy, func(t *testing.T) {
+			h := newHarness(t)
+			existing := []metav1.Object{
+				builder.ForConfigMap("ns-1", "kube-root-ca.crt").Data("ca.crt", "cluster").Result(),
+				builder.ForConfigMap("ns-1", "app-config").Data("k", "cluster").Result(),
+			}
+			h.AddItems(t, test.ConfigMaps(existing...))
+			tarball := test.NewTarWriter(t).
+				AddItems("configmaps",
+					builder.ForConfigMap("ns-1", "kube-root-ca.crt").Data("ca.crt", "backup").Result(),
+					builder.ForConfigMap("ns-1", "app-config").Data("k", "backup").Result(),
+				).
+				Done()
+
+			h.DiscoveryClient.WithAPIResource(test.ConfigMaps())
+			require.NoError(t, h.restorer.discoveryHelper.Refresh())
+			// The fake dynamic client cannot list ConfigMaps for the informer cache.
+			warnings, errs := h.restorer.Restore(&Request{
+				Log:                  h.log,
+				Restore:              defaultRestore().ExistingResourcePolicy(policy).Result(),
+				Backup:               defaultBackup().Result(),
+				BackupReader:         tarball,
+				DisableInformerCache: true,
+			}, nil, nil)
+
+			assertEmptyResults(t, errs)
+			require.Len(t, warnings.Namespaces["ns-1"], 1)
+			assert.Contains(t, warnings.Namespaces["ns-1"][0], "app-config")
+		})
+	}
+}

@@ -2142,13 +2142,15 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 					restoreLogger.Infof("ServiceAccount %s successfully updated", kube.NamespaceAndName(obj))
 				}
 			default:
+				// Ignore the warning that kube-root-ca.crt already exists
+				ignoreWarning := obj.GetKind() == "ConfigMap" && obj.GetName() == "kube-root-ca.crt"
 				// check for the presence of existingResourcePolicy
 				if len(ctx.restore.Spec.ExistingResourcePolicy) > 0 {
 					resourcePolicy := ctx.restore.Spec.ExistingResourcePolicy
 					restoreLogger.Infof("restore API has resource policy defined %s, executing restore workflow accordingly for changed resource %s %s", resourcePolicy, fromCluster.GroupVersionKind().Kind, kube.NamespaceAndName(fromCluster))
 
 					// existingResourcePolicy is set as none, add warning
-					if resourcePolicy == velerov1api.PolicyTypeNone {
+					if resourcePolicy == velerov1api.PolicyTypeNone && !ignoreWarning {
 						e := errors.Errorf("could not restore, %s %q already exists. Warning: the in-cluster version is different than the backed-up version",
 							obj.GetKind(), obj.GetName())
 						warnings.Add(namespace, e)
@@ -2163,7 +2165,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 						warnings.Merge(&warningsFromUpdateRP)
 						errs.Merge(&errsFromUpdateRP)
 					}
-				} else {
+				} else if !ignoreWarning {
 					// Preserved Velero behavior when existingResourcePolicy is not specified by the user
 					e := errors.Errorf("could not restore, %s:%s already exists. Warning: the in-cluster version is different than the backed-up version",
 						obj.GetKind(), obj.GetName())
