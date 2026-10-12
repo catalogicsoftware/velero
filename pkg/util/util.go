@@ -42,17 +42,22 @@ func GenerateSha256FromRestoreUIDAndVsName(restoreUID string, vsName string) str
 }
 
 // RetryOnError calls the retryFunc after specified retryInterval until it won't return an error
-// or then the max number of attempts has been reached.
+// or then the max number of attempts has been reached. It returns the context's error if the
+// context ends while waiting.
 func RetryOnError(ctx context.Context, maxRetries int, retryInterval time.Duration, logger logrus.FieldLogger, retryFunc func() error) error {
 	var err error
 	for retries := 0; retries < maxRetries; retries++ {
 		err = retryFunc()
-		if err == nil {
-			return nil
+		if err == nil || retries == maxRetries-1 {
+			return err
 		}
 
 		logger.Infof("Error occurred: %v. Retrying (%d/%d)...", err, retries+1, maxRetries)
-		time.Sleep(retryInterval)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
 	}
 	return err
 }
