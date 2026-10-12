@@ -30,6 +30,7 @@ import (
 
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
+	"github.com/vmware-tanzu/velero/pkg/util/collections"
 )
 
 // Unit tests run outside a cluster, where the CloudCasa Velero ConfigMap
@@ -97,6 +98,29 @@ func TestBackupItemInternalSkipsExcludedPvcs(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.selected, selected)
+		})
+	}
+}
+
+// A Namespace object is not backed up when its name is excluded from the backup.
+func TestBackupItemInternalSkipsAnExcludedNamespaceObject(t *testing.T) {
+	req := baseRequest()
+	req.BackedUpItems = NewBackedUpItemsMap()
+	req.NamespaceIncludesExcludes = collections.NewNamespaceIncludesExcludes().Includes("*").Excludes("ns-excluded")
+	ib := newTestItemBackupper(req)
+	for name, selected := range map[string]bool{"ns-excluded": false, "ns-kept": true} {
+		t.Run(name, func(t *testing.T) {
+			m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(builder.ForNamespace(name).Result())
+			require.NoError(t, err)
+			item := &unstructured.Unstructured{Object: m}
+			// An already backed-up item stops before any I/O, which is enough to
+			// tell a skipped item (false) from a selected one (true).
+			req.BackedUpItems.AddItem(itemKey{resource: resourceKey(item), name: name})
+
+			got, _, err := ib.backupItemInternal(logrus.New(), item, kuberesource.Namespaces, kuberesource.Namespaces.WithVersion("v1"), false, false, nil)
+
+			require.NoError(t, err)
+			assert.Equal(t, selected, got)
 		})
 	}
 }

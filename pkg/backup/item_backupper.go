@@ -160,6 +160,11 @@ func (ib *itemBackupper) itemInclusionChecks(log logrus.FieldLogger, mustInclude
 			return false
 		}
 
+		if namespace == "" && groupResource == kuberesource.Namespaces && !ib.backupRequest.NamespaceIncludesExcludes.ShouldInclude(metadata.GetName()) {
+			log.Infof("Excluding namespace %s because it is excluded", metadata.GetName())
+			return false
+		}
+
 		// Per-kind name filter from ResourcePolicy namespace filter.
 		if namespace != "" {
 			if nsFilter := ib.backupRequest.GetNamespaceFilter(namespace); nsFilter != nil {

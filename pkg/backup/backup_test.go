@@ -5407,9 +5407,8 @@ func TestBackupNamespaces(t *testing.T) {
 					builder.ForDeployment("ns-1", "deploy-1").ObjectMeta(builder.WithLabels("a", "b")).Result(),
 				),
 			},
+			// CloudCasa: an excluded namespace's own object is not backed up either.
 			want: []string{
-				"resources/namespaces/cluster/ns-1.json",
-				"resources/namespaces/v1-preferredversion/cluster/ns-1.json",
 				"resources/namespaces/cluster/ns-3.json",
 				"resources/namespaces/v1-preferredversion/cluster/ns-3.json",
 			},
