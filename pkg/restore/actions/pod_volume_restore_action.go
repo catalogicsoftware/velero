@@ -60,11 +60,15 @@ type PodVolumeRestoreAction struct {
 }
 
 func NewPodVolumeRestoreAction(logger logrus.FieldLogger, client corev1client.ConfigMapInterface, crClient ctrlclient.Client, namespace string) (*PodVolumeRestoreAction, error) {
+	// A CloudCasa engine runs as a bare pod, with no "velero" Deployment; every
+	// restore builds this action, so a missing Deployment must not fail it.
+	image := veleroimage.DefaultVeleroImage()
 	deployment := &appsv1api.Deployment{}
 	if err := crClient.Get(context.TODO(), types.NamespacedName{Name: "velero", Namespace: namespace}, deployment); err != nil {
-		return nil, err
+		logger.WithError(err).Debugf("No Velero server deployment; the restore helper image defaults to %q", image)
+	} else {
+		image = veleroutil.GetVeleroServerImage(deployment)
 	}
-	image := veleroutil.GetVeleroServerImage(deployment)
 	return &PodVolumeRestoreAction{
 		logger:      logger,
 		client:      client,
