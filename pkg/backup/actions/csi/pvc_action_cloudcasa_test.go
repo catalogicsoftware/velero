@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1api "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -117,9 +118,7 @@ func executeOnPVC(t *testing.T, p *pvcBackupItemAction, backup *velerov1api.Back
 }
 
 // bindFirstVolumeSnapshot plays the CSI snapshot controller for the first
-// VolumeSnapshot created in the namespace. The fake client's watch does not
-// replay what happened between the wait's list and watch, so the bound
-// snapshot is written again once the wait is surely watching.
+// VolumeSnapshot created in the namespace.
 func bindFirstVolumeSnapshot(t *testing.T, client crclient.Client) <-chan error {
 	t.Helper()
 	done := make(chan error, 1)
@@ -146,15 +145,38 @@ func bindFirstVolumeSnapshot(t *testing.T, client crclient.Client) <-chan error 
 			done <- err
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
-		vs := &snapshotv1api.VolumeSnapshot{}
-		if err := client.Get(t.Context(), crclient.ObjectKeyFromObject(&vsList.Items[0]), vs); err != nil {
-			done <- err
-			return
-		}
-		done <- client.Update(t.Context(), vs)
+		done <- rewriteUntilObserved(t.Context(), client, crclient.ObjectKeyFromObject(&vsList.Items[0]), vscName)
 	}()
 	return done
+}
+
+// rewriteUntilObserved writes a bound VolumeSnapshot again every 200ms until
+// the wait has seen the binding (it then annotates the content with
+// cc-pvc-namespace), the snapshot or its content is gone, or 10 seconds pass.
+// The fake client's watch does not replay an update made between the wait's
+// List and its Watch; a real API server does.
+func rewriteUntilObserved(ctx context.Context, client crclient.Client, vsKey crclient.ObjectKey, vscName string) error {
+	err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 10*time.Second, false, func(ctx context.Context) (bool, error) {
+		vsc := &snapshotv1api.VolumeSnapshotContent{}
+		if err := client.Get(ctx, crclient.ObjectKey{Name: vscName}, vsc); err != nil {
+			return apierrors.IsNotFound(err), crclient.IgnoreNotFound(err)
+		}
+		if _, observed := vsc.Annotations["cc-pvc-namespace"]; observed {
+			return true, nil
+		}
+		vs := &snapshotv1api.VolumeSnapshot{}
+		if err := client.Get(ctx, vsKey, vs); err != nil {
+			return apierrors.IsNotFound(err), crclient.IgnoreNotFound(err)
+		}
+		if err := client.Update(ctx, vs); err != nil && !apierrors.IsConflict(err) && !apierrors.IsNotFound(err) {
+			return false, err
+		}
+		return false, nil
+	})
+	if wait.Interrupted(err) {
+		return nil // the action never waited for this snapshot
+	}
+	return err
 }
 
 // The backed-up PVC carries what CloudCasa's restore and movers read.

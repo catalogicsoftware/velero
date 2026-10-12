@@ -293,7 +293,11 @@ func TestExecute(t *testing.T) {
 						ReadyToUse:                     &readyToUse,
 					}
 					err = pvcBIA.crClient.Update(t.Context(), &vsList.Items[0])
-					reconcileErrCh <- err
+					if err != nil {
+						reconcileErrCh <- err
+						return
+					}
+					reconcileErrCh <- rewriteUntilObserved(t.Context(), pvcBIA.crClient, crclient.ObjectKeyFromObject(&vsList.Items[0]), vscName)
 				}()
 			}
 
