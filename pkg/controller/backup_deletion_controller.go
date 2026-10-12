@@ -59,7 +59,6 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/util/csi"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
-	veleroutil "github.com/vmware-tanzu/velero/pkg/util/velero"
 )
 
 const (
@@ -277,10 +276,8 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	if !veleroutil.BSLIsAvailable(*location) {
-		err := r.patchDeleteBackupRequestWithError(ctx, dbr, fmt.Errorf("cannot delete backup because backup storage location %s is currently in Unavailable state", location.Name))
-		return ctrl.Result{}, err
-	}
+	// The location's phase is not checked: a per-job engine never validates
+	// the shared, unlabeled location, so it has no phase.
 
 	// if the request object has no labels defined, initialize an empty map since
 	// we will be updating labels

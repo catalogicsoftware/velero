@@ -270,22 +270,34 @@ func TestBackupDeletionControllerReconcile(t *testing.T) {
 		assert.Equal(t, "backup deletion failed: cannot delete backup because backup storage location default is currently in read-only mode", res.Status.Errors[0])
 	})
 
-	t.Run("backup storage location is in unavailable state", func(t *testing.T) {
-		backup := builder.ForBackup(velerov1api.DefaultNamespace, "foo").StorageLocation("default").Result()
-		location := builder.ForBackupStorageLocation("velero", "default").Phase(velerov1api.BackupStorageLocationPhaseUnavailable).Result()
+	// CloudCasa: a per-job engine never validates the shared location, so the
+	// delete does not depend on the location's phase.
+	for _, phase := range []velerov1api.BackupStorageLocationPhase{"", velerov1api.BackupStorageLocationPhaseUnavailable} {
+		t.Run("backup storage location with phase "+phaseName(phase)+" does not stop the delete", func(t *testing.T) {
+			backup := builder.ForBackup(velerov1api.DefaultNamespace, "foo").StorageLocation("default").Result()
+			location := builder.ForBackupStorageLocation("velero", "default").Provider("objStoreProvider").Bucket("bucket").Phase(phase).Result()
 
-		td := setupBackupDeletionControllerTest(t, defaultTestDbr(), location, backup)
+			td := setupBackupDeletionControllerTest(t, defaultTestDbr(), location, backup)
+			pluginManager := &pluginmocks.Manager{}
+			pluginManager.On("GetDeleteItemActions").Return(nil, nil)
+			pluginManager.On("CleanupClients")
+			td.controller.newPluginManager = func(logrus.FieldLogger) clientmgmt.Manager { return pluginManager }
+			td.backupStore.On("GetBackupVolumeSnapshots", "foo").Return(nil, nil)
+			td.backupStore.On("GetBackupContents", "foo").Return(io.NopCloser(bytes.NewReader([]byte("hello world"))), nil).Maybe()
+			td.backupStore.On("DeleteBackup", "foo").Return(nil)
 
-		_, err := td.controller.Reconcile(t.Context(), td.req)
-		require.NoError(t, err)
+			_, err := td.controller.Reconcile(t.Context(), td.req)
+			require.NoError(t, err)
 
-		res := &velerov1api.DeleteBackupRequest{}
-		err = td.fakeClient.Get(ctx, td.req.NamespacedName, res)
-		require.NoError(t, err)
-		assert.Equal(t, "Processed", string(res.Status.Phase))
-		assert.Len(t, res.Status.Errors, 1)
-		assert.Equal(t, "backup deletion failed: cannot delete backup because backup storage location default is currently in Unavailable state", res.Status.Errors[0])
-	})
+			res := &velerov1api.DeleteBackupRequest{}
+			require.NoError(t, td.fakeClient.Get(ctx, td.req.NamespacedName, res))
+			assert.Equal(t, velerov1api.DeleteBackupRequestPhaseProcessed, res.Status.Phase)
+			assert.Empty(t, res.Status.Errors)
+			err = td.fakeClient.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: backup.Name}, &velerov1api.Backup{})
+			assert.True(t, apierrors.IsNotFound(err), "the backup is gone: %v", err)
+			td.backupStore.AssertCalled(t, "DeleteBackup", "foo")
+		})
+	}
 
 	t.Run("full delete, no errors", func(t *testing.T) {
 		input := defaultTestDbr()

@@ -482,20 +482,25 @@ func TestRestoreReconcile(t *testing.T) {
 			expectedRestorerCall:  NewRestore("foo", "bar", "backup-1", "ns-1", "", velerov1api.RestorePhaseInProgress).Result(),
 		},
 		{
-			name:                     "Restore creation is rejected when BSL is unavailable",
-			location:                 builder.ForBackupStorageLocation("velero", "default").Provider("myCloud").Bucket("bucket").Phase(velerov1api.BackupStorageLocationPhaseUnavailable).Result(),
-			restore:                  NewRestore("foo", "bar", "backup-1", "ns-1", "", velerov1api.RestorePhaseNew).Result(),
-			backup:                   defaultBackup().StorageLocation("default").Result(),
-			expectedErr:              false,
-			expectedPhase:            string(velerov1api.RestorePhaseNew),
-			expectedValidationErrors: []string{"The BSL default is unavailable, cannot retrieve the backup"},
+			// CloudCasa: a per-job engine never validates the shared location.
+			name:                  "a restore is not refused for its location's phase",
+			location:              builder.ForBackupStorageLocation("velero", "default").Provider("myCloud").Bucket("bucket").Phase(velerov1api.BackupStorageLocationPhaseUnavailable).Result(),
+			restore:               NewRestore("foo", "bar", "backup-1", "ns-1", "", velerov1api.RestorePhaseNew).Result(),
+			backup:                defaultBackup().StorageLocation("default").Result(),
+			expectedErr:           false,
+			expectedPhase:         string(velerov1api.RestorePhaseInProgress),
+			expectedStartTime:     &timestamp,
+			expectedCompletedTime: &timestamp,
+			expectedRestorerCall:  NewRestore("foo", "bar", "backup-1", "ns-1", "", velerov1api.RestorePhaseInProgress).Result(),
 		},
 		{
-			name:        "Restore deletion is rejected when BSL is unavailable.",
-			location:    builder.ForBackupStorageLocation("velero", "default").Provider("myCloud").Bucket("bucket").Phase(velerov1api.BackupStorageLocationPhaseUnavailable).Result(),
-			restore:     NewRestore("foo", "bar", "backup-1", "ns-1", "", velerov1api.RestorePhaseCompleted).ObjectMeta(builder.WithFinalizers(ExternalResourcesFinalizer), builder.WithDeletionTimestamp(timestamp.Time)).Result(),
-			backup:      defaultBackup().StorageLocation("default").Result(),
-			expectedErr: true,
+			// CloudCasa: a per-job engine never validates the shared location.
+			name:              "a restore's files are cleaned up whatever its location's phase",
+			location:          builder.ForBackupStorageLocation("velero", "default").Provider("myCloud").Bucket("bucket").Result(),
+			restore:           NewRestore("foo", "bar", "backup-1", "ns-1", "", velerov1api.RestorePhaseCompleted).ObjectMeta(builder.WithFinalizers(ExternalResourcesFinalizer), builder.WithDeletionTimestamp(timestamp.Time)).Result(),
+			backup:            defaultBackup().StorageLocation("default").Result(),
+			expectedErr:       false,
+			addValidFinalizer: true,
 		},
 	}
 

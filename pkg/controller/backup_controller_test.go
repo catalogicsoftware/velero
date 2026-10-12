@@ -217,12 +217,6 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 			backupLocation: defaultBackupLocation,
 			expectedErrs:   []string{"include-resources, exclude-resources and include-cluster-resources are old filter parameters.\ninclude-cluster-scoped-resources, exclude-cluster-scoped-resources, include-namespace-scoped-resources and exclude-namespace-scoped-resources are new filter parameters.\nThey cannot be used together"},
 		},
-		{
-			name:           "BSL in unavailable state",
-			backup:         defaultBackup().StorageLocation("unavailable").Result(),
-			backupLocation: builder.ForBackupStorageLocation("velero", "unavailable").Phase(velerov1api.BackupStorageLocationPhaseUnavailable).Result(),
-			expectedErrs:   []string{"backup can't be created because BackupStorageLocation unavailable is in Unavailable status."},
-		},
 	}
 
 	for _, test := range tests {

@@ -62,7 +62,6 @@ import (
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
-	veleroutil "github.com/vmware-tanzu/velero/pkg/util/velero"
 )
 
 const (
@@ -475,12 +474,8 @@ func (b *backupReconciler) prepareBackupRequest(ctx context.Context, backup *vel
 				fmt.Sprintf("backup can't be created because backup storage location %s is currently in read-only mode", request.StorageLocation.Name))
 		}
 
-		if !veleroutil.BSLIsAvailable(*request.StorageLocation) {
-			request.Status.ValidationErrors = append(
-				request.Status.ValidationErrors,
-				fmt.Sprintf("backup can't be created because BackupStorageLocation %s is in Unavailable status.", request.StorageLocation.Name),
-			)
-		}
+		// The location's phase is not checked: a per-job engine never
+		// validates the shared, unlabeled location, so it has no phase.
 	}
 
 	// add the storage location as a label for easy filtering later.

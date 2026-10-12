@@ -35,6 +35,7 @@ import (
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/persistence/bundlecrypt"
+	persistencemocks "github.com/vmware-tanzu/velero/pkg/persistence/mocks"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	pluginmocks "github.com/vmware-tanzu/velero/pkg/plugin/mocks"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
@@ -70,7 +71,8 @@ func (c *lateClient) Get(ctx context.Context, key client.ObjectKey, obj client.O
 // still found, instead of failing the delete request as not found.
 func TestBackupDeletionRetriesObjectsThatAppearLate(t *testing.T) {
 	backup := builder.ForBackup(velerov1api.DefaultNamespace, "foo").StorageLocation("default").Result()
-	location := builder.ForBackupStorageLocation(velerov1api.DefaultNamespace, "default").Result()
+	location := builder.ForBackupStorageLocation(velerov1api.DefaultNamespace, "default").
+		AccessMode(velerov1api.BackupStorageLocationAccessModeReadOnly).Result()
 	td := setupBackupDeletionControllerTest(t, defaultTestDbr(), backup, location)
 	late := &lateClient{
 		Client: td.fakeClient,
@@ -85,7 +87,7 @@ func TestBackupDeletionRetriesObjectsThatAppearLate(t *testing.T) {
 	res := &velerov1api.DeleteBackupRequest{}
 	require.NoError(t, td.fakeClient.Get(t.Context(), td.req.NamespacedName, res))
 	require.Len(t, res.Status.Errors, 1)
-	assert.Contains(t, res.Status.Errors[0], "is currently in Unavailable state", "both objects were found")
+	assert.Contains(t, res.Status.Errors[0], "is currently in read-only mode", "both objects were found")
 	assert.Equal(t, 4, late.gets["*v1.Backup"])
 	assert.Equal(t, 4, late.gets["*v1.BackupStorageLocation"])
 }
@@ -159,18 +161,25 @@ func TestRestoreFilesOnAnImmutableStoreAreKept(t *testing.T) {
 		if objectLock {
 			location.Annotations = map[string]string{velerov1api.ObjectLockAnnotation: "true"}
 		}
+		backupStore := &persistencemocks.BackupStore{}
+		backupStore.On("DeleteRestore", "restore-1").Return(nil).Maybe()
+		pluginManager := &pluginmocks.Manager{}
+		pluginManager.On("CleanupClients").Maybe()
 		r := &restoreReconciler{
-			namespace: velerov1api.DefaultNamespace,
-			kbClient:  velerotest.NewFakeControllerRuntimeClient(t, backup, location),
-			logger:    velerotest.NewLogger(),
+			namespace:         velerov1api.DefaultNamespace,
+			kbClient:          velerotest.NewFakeControllerRuntimeClient(t, backup, location),
+			logger:            velerotest.NewLogger(),
+			newPluginManager:  func(logrus.FieldLogger) clientmgmt.Manager { return pluginManager },
+			backupStoreGetter: NewFakeSingleObjectBackupStoreGetter(backupStore),
 		}
 
 		err := r.deleteExternalResources(builder.ForRestore(velerov1api.DefaultNamespace, "restore-1").Backup("foo").Result())
 
+		require.NoError(t, err)
 		if objectLock {
-			require.NoError(t, err)
+			backupStore.AssertNotCalled(t, "DeleteRestore", "restore-1")
 		} else {
-			require.ErrorContains(t, err, "is unavailable")
+			backupStore.AssertCalled(t, "DeleteRestore", "restore-1")
 		}
 	}
 }

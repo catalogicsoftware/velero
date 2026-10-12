@@ -60,7 +60,6 @@ import (
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
-	veleroutil "github.com/vmware-tanzu/velero/pkg/util/velero"
 	pkgrestoreUtil "github.com/vmware-tanzu/velero/pkg/util/velero/restore"
 )
 
@@ -400,10 +399,8 @@ func (r *restoreReconciler) validateAndComplete(ctx context.Context, restore *ap
 		return backupInfo{}, nil, nil
 	}
 
-	if !veleroutil.BSLIsAvailable(*info.location) {
-		restore.Status.ValidationErrors = append(restore.Status.ValidationErrors, fmt.Sprintf("The BSL %s is unavailable, cannot retrieve the backup", info.location.Name))
-		return backupInfo{}, nil, nil
-	}
+	// The location's phase is not checked: a per-job engine never validates
+	// the shared, unlabeled location, so it has no phase.
 
 	// Fill in the ScheduleName so it's easier to consume for metrics.
 	if restore.Spec.ScheduleName == "" {
@@ -775,10 +772,6 @@ func (r *restoreReconciler) deleteExternalResources(restore *api.Restore) error 
 	if backupInfo.location.GetAnnotations()[api.ObjectLockAnnotation] == "true" {
 		r.logger.Info("Immutable policy is enabled for this objectstore, skipping deletion of restore files in object storage")
 		return nil
-	}
-
-	if !veleroutil.BSLIsAvailable(*backupInfo.location) {
-		return fmt.Errorf("bsl %s is unavailable, cannot get the backup info", backupInfo.location.Name)
 	}
 
 	// delete restore files in object storage
