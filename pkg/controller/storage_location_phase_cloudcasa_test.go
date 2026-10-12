@@ -65,3 +65,32 @@ func phaseName(phase velerov1api.BackupStorageLocationPhase) string {
 	}
 	return string(phase)
 }
+
+// kubeagent recreates a backup whose validation error contains this text
+// (VeleroKnownValidationErrors), so it must stay as in v1.14.0.x.
+func TestMissingStorageLocationErrorKeepsTheTextKubeagentMatches(t *testing.T) {
+	const kubeagentMatch = "an existing backup storage location wasn't specified at backup creation time"
+	logger := logging.DefaultLogger(logrus.DebugLevel, logging.FormatText)
+	apiServer := velerotest.NewAPIServer(t)
+	discoveryHelper, err := discovery.NewHelper(apiServer.DiscoveryClient, logger)
+	require.NoError(t, err)
+	for _, serverDefault := range []bool{false, true} {
+		c := &backupReconciler{
+			discoveryHelper: discoveryHelper,
+			kbClient:        velerotest.NewFakeControllerRuntimeClient(t),
+			clock:           &clock.RealClock{},
+			formatFlag:      logging.FormatText,
+		}
+		backup := defaultBackup().StorageLocation("job-bsl").Result()
+		if serverDefault {
+			c.defaultBackupLocation = "job-bsl"
+			backup.Spec.StorageLocation = ""
+		}
+
+		res := c.prepareBackupRequest(t.Context(), backup, logger)
+		res.WorkerPool.Stop()
+
+		require.Len(t, res.Status.ValidationErrors, 1)
+		assert.Contains(t, res.Status.ValidationErrors[0], kubeagentMatch)
+	}
+}
