@@ -150,6 +150,16 @@ func TestIsValid(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		{
+			name:   "backup store with CloudCasa's logs and offloads directories is valid",
+			prefix: "cluster-1",
+			storageData: map[string][]byte{
+				"cluster-1/backups/backup-1/velero-backup.json": {},
+				"cluster-1/logs/job-1.log":                      {},
+				"cluster-1/offloads/job-2/data":                 {},
+			},
+			expectErr: false,
+		},
 	}
 
 	for _, tc := range tests {

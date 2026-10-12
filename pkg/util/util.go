@@ -17,8 +17,12 @@ limitations under the License.
 package util
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 func Contains(slice []string, key string) bool {
@@ -35,4 +39,20 @@ func Contains(slice []string, key string) bool {
 func GenerateSha256FromRestoreUIDAndVsName(restoreUID string, vsName string) string {
 	sha256Bytes := sha256.Sum256([]byte(restoreUID + "/" + vsName))
 	return hex.EncodeToString(sha256Bytes[:])
+}
+
+// RetryOnError calls the retryFunc after specified retryInterval until it won't return an error
+// or then the max number of attempts has been reached.
+func RetryOnError(ctx context.Context, maxRetries int, retryInterval time.Duration, logger logrus.FieldLogger, retryFunc func() error) error {
+	var err error
+	for retries := 0; retries < maxRetries; retries++ {
+		err = retryFunc()
+		if err == nil {
+			return nil
+		}
+
+		logger.Infof("Error occurred: %v. Retrying (%d/%d)...", err, retries+1, maxRetries)
+		time.Sleep(retryInterval)
+	}
+	return err
 }

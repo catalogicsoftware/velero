@@ -235,7 +235,7 @@ func TestBackupDeletionControllerReconcile(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "Processed", string(res.Status.Phase))
 		assert.Len(t, res.Status.Errors, 1)
-		assert.Equal(t, "backup deletion failed: backup not found", res.Status.Errors[0])
+		assert.Equal(t, `backup "foo" not found in the "velero" namespace`, res.Status.Errors[0])
 	})
 	t.Run("unable to find backup storage location", func(t *testing.T) {
 		backup := builder.ForBackup(velerov1api.DefaultNamespace, "foo").StorageLocation("default").Result()
@@ -250,7 +250,7 @@ func TestBackupDeletionControllerReconcile(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "Processed", string(res.Status.Phase))
 		assert.Len(t, res.Status.Errors, 1)
-		assert.Equal(t, "backup deletion failed: backup storage location default not found", res.Status.Errors[0])
+		assert.Equal(t, "backup storage location default not found after 10 retries", res.Status.Errors[0])
 	})
 
 	t.Run("backup storage location is in read-only mode", func(t *testing.T) {
@@ -877,7 +877,7 @@ func TestBackupDeletionControllerReconcile(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "Processed", string(res.Status.Phase))
 		assert.Len(t, res.Status.Errors, 1)
-		assert.Equal(t, "backup deletion failed: backup not found", res.Status.Errors[0])
+		assert.Equal(t, `backup "foo" not found in the "velero" namespace`, res.Status.Errors[0])
 	})
 }
 
