@@ -202,10 +202,19 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if warningCnt > 0 || errCnt > 0 {
-		err := r.updateResults(backupStore, restore, &warnings, &errs)
-		if err != nil {
-			log.WithError(err).Error("error updating results")
-			return ctrl.Result{}, errors.Wrap(err, "error updating results")
+		if isBackupStorageLocationReadOnly(info.location) {
+			// The restore controller wrote the results to the local file system.
+			log.WithFields(logrus.Fields{
+				"AccessMode":   "ReadOnly",
+				"WarningCount": warningCnt,
+				"ErrorCount":   errCnt,
+			}).Info("Results are already written to local filesystem for ReadOnly BackupStorageLocation")
+		} else {
+			err := r.updateResults(backupStore, restore, &warnings, &errs)
+			if err != nil {
+				log.WithError(err).Error("error updating results")
+				return ctrl.Result{}, errors.Wrap(err, "error updating results")
+			}
 		}
 	}
 
