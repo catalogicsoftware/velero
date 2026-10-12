@@ -31,11 +31,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
+	"github.com/vmware-tanzu/velero/pkg/persistence/bundlecrypt"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	pluginmocks "github.com/vmware-tanzu/velero/pkg/plugin/mocks"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
+	deleteitemactionmocks "github.com/vmware-tanzu/velero/pkg/plugin/velero/mocks"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 )
 
@@ -170,4 +173,40 @@ func TestRestoreFilesOnAnImmutableStoreAreKept(t *testing.T) {
 			require.ErrorContains(t, err, "is unavailable")
 		}
 	}
+}
+
+// A tarball that cannot be decrypted stops the deletion before anything is
+// removed: the backup's snapshots, its CR and its data all stay.
+func TestBackupDeletionStopsOnAnUndecryptableTarball(t *testing.T) {
+	backup := builder.ForBackup(velerov1api.DefaultNamespace, "foo").StorageLocation("primary").Result()
+	backup.UID = "uid"
+	location := builder.ForBackupStorageLocation(velerov1api.DefaultNamespace, "primary").
+		Provider("objStoreProvider").Bucket("bucket").Phase(velerov1api.BackupStorageLocationPhaseAvailable).Result()
+	snapshotLocation := builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "vsl-1").Provider("provider-1").Result()
+	csiSnapshot := builder.ForVolumeSnapshot("user-ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "foo")).SourcePVC("some-pvc").Result()
+	td := setupBackupDeletionControllerTest(t, defaultTestDbr(), backup, location, snapshotLocation, csiSnapshot)
+	td.volumeSnapshotter.SnapshotsTaken.Insert("snap-1")
+	pluginManager := &pluginmocks.Manager{}
+	pluginManager.On("GetVolumeSnapshotter", "provider-1").Return(td.volumeSnapshotter, nil)
+	pluginManager.On("GetDeleteItemActions").Return([]velero.DeleteItemAction{new(deleteitemactionmocks.DeleteItemAction)}, nil)
+	pluginManager.On("CleanupClients")
+	td.controller.newPluginManager = func(logrus.FieldLogger) clientmgmt.Manager { return pluginManager }
+	td.backupStore.On("GetBackupVolumeSnapshots", "foo").Return([]*volume.Snapshot{{
+		Spec: volume.SnapshotSpec{Location: "vsl-1"}, Status: volume.SnapshotStatus{ProviderSnapshotID: "snap-1"},
+	}}, nil)
+	td.backupStore.On("GetBackupContents", "foo").Return(nil, bundlecrypt.ErrWrongKey)
+
+	_, err := td.controller.Reconcile(t.Context(), td.req)
+	require.NoError(t, err)
+
+	res := &velerov1api.DeleteBackupRequest{}
+	require.NoError(t, td.fakeClient.Get(t.Context(), td.req.NamespacedName, res))
+	assert.Equal(t, velerov1api.DeleteBackupRequestPhaseProcessed, res.Status.Phase)
+	require.Len(t, res.Status.Errors, 1)
+	assert.Contains(t, res.Status.Errors[0], "unable to read the encrypted tarball of backup foo")
+	td.backupStore.AssertNotCalled(t, "DeleteBackup", mock.Anything)
+	assert.Equal(t, 1, td.volumeSnapshotter.SnapshotsTaken.Len(), "the native snapshot is kept")
+	require.NoError(t, td.fakeClient.Get(t.Context(), client.ObjectKeyFromObject(csiSnapshot), csiSnapshot), "the CSI snapshot is kept")
+	require.NoError(t, td.fakeClient.Get(t.Context(), client.ObjectKeyFromObject(backup), &velerov1api.Backup{}), "the backup CR is kept")
 }

@@ -34,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	"github.com/vmware-tanzu/velero/pkg/persistence/bundlecrypt"
 )
 
 const (
@@ -178,12 +180,16 @@ const (
 	// built before it existed. An image without this code never writes it, and
 	// that absence is the whole signal — no version string to parse.
 	//
-	// The agent mirrors these two strings in amdslib/types, which is a
+	// The agent mirrors these annotation names in amdslib/types, which is a
 	// separate module. Keep them identical.
 	CapabilityAnnotation = "cloudcasa.io/engine-instance-scope"
 
 	// InstanceAnnotation records the scope this engine resolved, for support.
 	InstanceAnnotation = "cloudcasa.io/engine-instance-id"
+
+	// BundleEncryptionAnnotation tells the agent which bundle encryption
+	// format this engine writes when a storage location carries a key.
+	BundleEncryptionAnnotation = "cloudcasa.io/engine-bundle-encryption"
 
 	// PodNameEnv names the pod this engine runs in.
 	PodNameEnv = "MY_POD_NAME"
@@ -209,8 +215,8 @@ func AnnouncePodCapability(ctx context.Context, client kubernetes.Interface, nam
 	}
 
 	patch := fmt.Sprintf(
-		`{"metadata":{"annotations":{%q:"true",%q:%q}}}`,
-		CapabilityAnnotation, InstanceAnnotation, scope.ID())
+		`{"metadata":{"annotations":{%q:"true",%q:%q,%q:%q}}}`,
+		CapabilityAnnotation, InstanceAnnotation, scope.ID(), BundleEncryptionAnnotation, bundlecrypt.FormatV1)
 	_, err := client.CoreV1().Pods(namespace).Patch(
 		ctx, podName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
 	if err != nil {

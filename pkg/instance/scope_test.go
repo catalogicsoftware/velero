@@ -201,6 +201,9 @@ func TestAnnouncePodCapabilityStampsThePod(t *testing.T) {
 	if got := pod.Annotations[InstanceAnnotation]; got != "job-1" {
 		t.Fatalf("instance annotation %q, want \"job-1\"", got)
 	}
+	if got := pod.Annotations[BundleEncryptionAnnotation]; got != "V1" {
+		t.Fatalf("bundle encryption annotation %q, want \"V1\"", got)
+	}
 }
 
 func TestAnnouncePodCapabilityNeedsThePodName(t *testing.T) {
