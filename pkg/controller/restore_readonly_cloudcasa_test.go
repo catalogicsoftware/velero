@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/vmware-tanzu/velero/internal/hook"
+	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/itemoperation"
@@ -109,4 +111,31 @@ func TestRestoreFinalizerKeepsResultsLocalForAReadOnlyLocation(t *testing.T) {
 		require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{Namespace: restore.Namespace, Name: restore.Name}, after))
 		assert.Equal(t, velerov1api.RestorePhasePartiallyFailed, after.Status.Phase, "readOnly=%v", readOnly)
 	}
+}
+
+// When a restored PVC cannot be found for its PV patch, the finalizer logs the
+// PVCs it can see and where it expected this one.
+func TestPVPatchLogsThePVCsItCanSee(t *testing.T) {
+	logger, hook := logrustest.NewNullLogger()
+	ctx := &finalizerContext{
+		logger:          logger,
+		crClient:        velerotest.NewFakeControllerRuntimeClient(t, builder.ForPersistentVolumeClaim("other-ns", "other").Result()),
+		restore:         builder.ForRestore(velerov1api.DefaultNamespace, "restore-1").Result(),
+		restoredPVCList: map[string]struct{}{"ns1/pvc1": {}},
+		volumeInfo: []*volume.BackupVolumeInfo{{
+			BackupMethod: "PodVolumeBackup", PVCName: "pvc1", PVName: "pv1", PVCNamespace: "ns1",
+			PVInfo: &volume.PVInfo{ReclaimPolicy: "Delete"},
+		}},
+		resourceTimeout: time.Second,
+	}
+
+	errs := ctx.patchDynamicPVWithVolumeInfo()
+
+	assert.NotEmpty(t, errs.Namespaces["ns1"])
+	var messages []string
+	for _, e := range hook.AllEntries() {
+		messages = append(messages, e.Message)
+	}
+	assert.Contains(t, messages, "Found PVC: other in Namespace: other-ns")
+	assert.Contains(t, messages, "Expected PVC pvc1 to be in namespace ns1, but it was not found.")
 }
