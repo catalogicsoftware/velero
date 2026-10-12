@@ -49,6 +49,8 @@ type BackupInfo struct {
 	VolumeSnapshots,
 	BackupItemOperations,
 	BackupResourceList,
+	CSIVolumeSnapshots,
+	CSIVolumeSnapshotContents,
 	CSIVolumeSnapshotClasses,
 	BackupVolumeInfo io.Reader
 }
@@ -493,13 +495,17 @@ func (s *objectBackupStore) PutBackup(info BackupInfo) error {
 	// Stage 4: extra backup artifacts (hard-stop on any failure; rolls back contents and metadata).
 	// Since the logic for all of these files is the exact same except for the name and the contents,
 	// use a map literal to iterate through them and write them to the bucket.
+	// CloudCasa's catalog reads the CSI snapshot, content and class lists.
 	var backupObjs = map[string]io.Reader{
-		s.layout.getPodVolumeBackupsKey(info.Name):      info.PodVolumeBackups,
-		s.layout.getBackupVolumeSnapshotsKey(info.Name): info.VolumeSnapshots,
-		s.layout.getBackupItemOperationsKey(info.Name):  info.BackupItemOperations,
-		s.layout.getBackupResourceListKey(info.Name):    info.BackupResourceList,
-		s.layout.getBackupResultsKey(info.Name):         info.BackupResults,
-		s.layout.getBackupVolumeInfoKey(info.Name):      info.BackupVolumeInfo,
+		s.layout.getPodVolumeBackupsKey(info.Name):          info.PodVolumeBackups,
+		s.layout.getBackupVolumeSnapshotsKey(info.Name):     info.VolumeSnapshots,
+		s.layout.getBackupItemOperationsKey(info.Name):      info.BackupItemOperations,
+		s.layout.getBackupResourceListKey(info.Name):        info.BackupResourceList,
+		s.layout.getCSIVolumeSnapshotKey(info.Name):         info.CSIVolumeSnapshots,
+		s.layout.getCSIVolumeSnapshotContentsKey(info.Name): info.CSIVolumeSnapshotContents,
+		s.layout.getCSIVolumeSnapshotClassesKey(info.Name):  info.CSIVolumeSnapshotClasses,
+		s.layout.getBackupResultsKey(info.Name):             info.BackupResults,
+		s.layout.getBackupVolumeInfoKey(info.Name):          info.BackupVolumeInfo,
 	}
 
 	for key, reader := range backupObjs {
