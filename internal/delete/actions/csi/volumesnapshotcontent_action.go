@@ -18,6 +18,8 @@ package csi
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	plugincommon "github.com/vmware-tanzu/velero/pkg/plugin/framework/common"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
@@ -82,6 +85,10 @@ func (p *volumeSnapshotContentDeleteItemAction) Execute(
 		return nil
 	}
 
+	if snapCont.Status != nil && snapCont.Status.VolumeGroupSnapshotHandle != nil {
+		return p.deleteGroupMember(snapCont, input.Backup.Name)
+	}
+
 	p.log.Infof("Deleting VolumeSnapshotContent %s", snapCont.Name)
 
 	if _, err := csi.SetVolumeSnapshotContentDeletionPolicy(
@@ -105,6 +112,53 @@ func (p *volumeSnapshotContentDeleteItemAction) Execute(
 		return err
 	}
 
+	return nil
+}
+
+// deleteGroupMember leaves the storage snapshot of a group member to a stub
+// group content, as a member can only be deleted with its whole group, and
+// removes the member's content object as Retain.
+func (p *volumeSnapshotContentDeleteItemAction) deleteGroupMember(
+	snapCont snapshotv1api.VolumeSnapshotContent,
+	backupName string,
+) error {
+	groupHandle := *snapCont.Status.VolumeGroupSnapshotHandle
+	p.log.Infof("VolumeSnapshotContent %s is a member of group snapshot %s, which is deleted as a whole", snapCont.Name, groupHandle)
+
+	var members []string
+	if recorded, ok := snapCont.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation]; ok {
+		if err := json.Unmarshal([]byte(recorded), &members); err != nil {
+			p.log.Warnf("VolumeSnapshotContent %s has unreadable group member handles %q: %v", snapCont.Name, recorded, err)
+			members = nil
+		}
+	}
+	if members == nil {
+		inCluster, err := csi.GroupMemberSnapshotHandles(context.TODO(), p.crClient, groupHandle)
+		if err != nil {
+			return errors.Wrapf(err, "failed to find the members of group snapshot %s", groupHandle)
+		}
+		members = inCluster
+	}
+	if snapCont.Status.SnapshotHandle != nil && !slices.Contains(members, *snapCont.Status.SnapshotHandle) {
+		members = append(members, *snapCont.Status.SnapshotHandle)
+	}
+	if err := csi.EnsureGroupSnapshotDeleteStub(context.TODO(), p.crClient, backupName, &snapCont, members); err != nil {
+		return err
+	}
+
+	if _, err := csi.SetVolumeSnapshotContentDeletionPolicy(
+		snapCont.Name,
+		p.crClient,
+		snapshotv1api.VolumeSnapshotContentRetain,
+	); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return errors.Wrapf(err, "failed to set DeletionPolicy on volumesnapshotcontent %s", snapCont.Name)
+	}
+	if err := p.crClient.Delete(context.TODO(), &snapCont); err != nil && !apierrors.IsNotFound(err) {
+		return errors.Wrapf(err, "failed to delete volumesnapshotcontent %s", snapCont.Name)
+	}
 	return nil
 }
 

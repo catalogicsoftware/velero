@@ -73,6 +73,11 @@ func TestVSExecuteRecordsGroupMemberHandles(t *testing.T) {
 	inCluster := new(snapshotv1api.VolumeSnapshot)
 	require.NoError(t, client.Get(t.Context(), crclient.ObjectKeyFromObject(vs), inCluster))
 	assert.Equal(t, want, inCluster.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation])
+	// The content carries them too: a backup deletion sees only the content.
+	content := new(snapshotv1api.VolumeSnapshotContent)
+	require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: "vsc-a"}, content))
+	assert.Equal(t, want, content.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation])
+	assert.Equal(t, "backup", content.Labels[velerov1api.BackupNameLabel])
 }
 
 func TestVSExecuteNoGroupMemberHandlesOutsideAGroup(t *testing.T) {

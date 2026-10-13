@@ -384,6 +384,11 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
+	// The delete actions leave each group snapshot to a stub group content.
+	for _, err := range csi.DeleteGroupSnapshotStubs(ctx, r.Client, backup, log) {
+		errs = append(errs, err.Error())
+	}
+
 	if backupStore != nil {
 		log.Info("Removing PV snapshots")
 

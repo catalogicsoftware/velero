@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -137,6 +136,7 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 	}
 
 	annotations := make(map[string]string)
+	vscAnnotations := make(map[string]string)
 
 	if vsc != nil {
 		// when we are backing up VolumeSnapshots created outside of velero, we
@@ -174,6 +174,7 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 					p.log.Warnf("Failed to list the members of group snapshot %s: %v", *vsc.Status.VolumeGroupSnapshotHandle, err)
 				} else {
 					annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation] = members
+					vscAnnotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation] = members
 				}
 			}
 		}
@@ -204,6 +205,7 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 				velerov1api.BackupNameLabel: label.GetValidName(backup.Name),
 			},
 		)
+		kubeutil.AddAnnotations(&vsc.ObjectMeta, vscAnnotations)
 
 		if vscPatchError := p.crClient.Patch(
 			context.TODO(),
@@ -392,27 +394,10 @@ func NewVolumeSnapshotBackupItemAction(
 // groupMemberSnapshotHandles returns, as a JSON array, the snapshot handles of
 // the contents in the cluster that belong to group snapshot groupHandle.
 func groupMemberSnapshotHandles(ctx context.Context, client crclient.Client, groupHandle string) (string, error) {
-	vscList := new(snapshotv1api.VolumeSnapshotContentList)
-	if err := client.List(ctx, vscList); err != nil {
-		return "", errors.Wrap(err, "error listing VolumeSnapshotContents")
+	handles, err := csi.GroupMemberSnapshotHandles(ctx, client, groupHandle)
+	if err != nil {
+		return "", err
 	}
-
-	handles := []string{}
-	for _, vsc := range vscList.Items {
-		if vsc.Status == nil || vsc.Status.VolumeGroupSnapshotHandle == nil ||
-			*vsc.Status.VolumeGroupSnapshotHandle != groupHandle {
-			continue
-		}
-		handle := vsc.Status.SnapshotHandle
-		if handle == nil {
-			handle = vsc.Spec.Source.SnapshotHandle
-		}
-		if handle != nil && !slices.Contains(handles, *handle) {
-			handles = append(handles, *handle)
-		}
-	}
-	slices.Sort(handles)
-
 	members, err := json.Marshal(handles)
 	if err != nil {
 		return "", errors.WithStack(err)
