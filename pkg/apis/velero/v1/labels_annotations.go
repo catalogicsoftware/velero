@@ -168,6 +168,10 @@ const (
 	VolumeSnapshotClassDriverPVCAnnotation                = "cloudcasa.io/csi-volumesnapshot-class"
 	VolumeSnapshotClassStorageClassBackupAnnotationPrefix = "cloudcasa.io/csi-sc-vsc-mapping-"
 
+	// VolumeGroupSnapshotMemberHandlesAnnotation lists, as a JSON array, the
+	// snapshot handles of every member of the VolumeSnapshot's group snapshot.
+	VolumeGroupSnapshotMemberHandlesAnnotation = "cloudcasa.io/csi-volumegroupsnapshot-member-handles"
+
 	// CloudCasaVGSLabelKey is the label key a CloudCasa engine groups PVCs
 	// under a VolumeGroupSnapshot by, unless the Backup names another.
 	CloudCasaVGSLabelKey = "cloudcasa.io/volume-group"

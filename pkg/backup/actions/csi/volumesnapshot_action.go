@@ -18,7 +18,9 @@ package csi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -167,6 +169,12 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 			// for CSI drivers that populate this field (e.g., Ceph RBD).
 			if vsc.Status.VolumeGroupSnapshotHandle != nil {
 				annotations[velerov1api.VolumeGroupSnapshotHandleAnnotation] = *vsc.Status.VolumeGroupSnapshotHandle
+				members, err := groupMemberSnapshotHandles(ctx, p.crClient, *vsc.Status.VolumeGroupSnapshotHandle)
+				if err != nil {
+					p.log.Warnf("Failed to list the members of group snapshot %s: %v", *vsc.Status.VolumeGroupSnapshotHandle, err)
+				} else {
+					annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation] = members
+				}
 			}
 		}
 
@@ -379,4 +387,35 @@ func NewVolumeSnapshotBackupItemAction(
 			crClient: crClient,
 		}, nil
 	}
+}
+
+// groupMemberSnapshotHandles returns, as a JSON array, the snapshot handles of
+// the contents in the cluster that belong to group snapshot groupHandle.
+func groupMemberSnapshotHandles(ctx context.Context, client crclient.Client, groupHandle string) (string, error) {
+	vscList := new(snapshotv1api.VolumeSnapshotContentList)
+	if err := client.List(ctx, vscList); err != nil {
+		return "", errors.Wrap(err, "error listing VolumeSnapshotContents")
+	}
+
+	handles := []string{}
+	for _, vsc := range vscList.Items {
+		if vsc.Status == nil || vsc.Status.VolumeGroupSnapshotHandle == nil ||
+			*vsc.Status.VolumeGroupSnapshotHandle != groupHandle {
+			continue
+		}
+		handle := vsc.Status.SnapshotHandle
+		if handle == nil {
+			handle = vsc.Spec.Source.SnapshotHandle
+		}
+		if handle != nil && !slices.Contains(handles, *handle) {
+			handles = append(handles, *handle)
+		}
+	}
+	slices.Sort(handles)
+
+	members, err := json.Marshal(handles)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+	return string(members), nil
 }
