@@ -21,12 +21,17 @@ import (
 
 	volumegroupsnapshotv1beta2 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumegroupsnapshot/v1beta2"
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	"github.com/vmware-tanzu/velero/internal/catalogic"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 )
@@ -76,4 +81,30 @@ func TestUpdateVGSCreatedVSKeepsTheUpdatedSnapshotInTheMap(t *testing.T) {
 
 	assert.Equal(t, backup.Name, vsMap["group-pvc-a"].Labels[velerov1api.BackupNameLabel])
 	assert.Empty(t, vsMap["group-pvc-a"].OwnerReferences)
+}
+
+// A grouped PVC that CloudCasa backs up without a snapshot (LIVE, SKIP) is
+// snapshotted anyway: the group selects its PVCs by label. That is a
+// misconfiguration the backup warns of, naming the PVC.
+func TestGroupWarnsOfAGroupedPVCBackedUpWithoutASnapshot(t *testing.T) {
+	withPluginConfig(t, &catalogic.PluginConfig{SnapshotWherePossible: true})
+	logger, hook := logrustest.NewNullLogger()
+	p := &pvcBackupItemAction{log: logger, crClient: velerotest.NewFakeControllerRuntimeClient(t)}
+	pvcs := []corev1api.PersistentVolumeClaim{
+		*builder.ForPersistentVolumeClaim("ns", "pvc-a").StorageClass("sc").Result(),
+		*builder.ForPersistentVolumeClaim("ns", "pvc-b").StorageClass("sc").
+			ObjectMeta(builder.WithAnnotations("cloudcasa.io/backup-method", "LIVE")).Result(),
+	}
+
+	p.warnOfGroupedPVCsNotSnapshotted(pvcs, "hostpath.csi.k8s.io", "cloudcasa.io/volume-group", "demo", "backup-1")
+
+	var warnings []string
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == logrus.WarnLevel {
+			warnings = append(warnings, entry.Message)
+		}
+	}
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "ns/pvc-b")
+	assert.Contains(t, warnings[0], "cloudcasa.io/volume-group=demo")
 }

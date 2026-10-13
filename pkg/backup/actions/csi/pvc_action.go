@@ -841,6 +841,7 @@ func (p *pvcBackupItemAction) getVolumeSnapshotReference(
 		if driver == "" {
 			return nil, errors.New("no csi driver found, failing the backup")
 		}
+		p.warnOfGroupedPVCsNotSnapshotted(groupedPVCs, driver, vgsLabelKey, group, backup.Name)
 
 		// Determine the VGSClass to be used for the VGS object to be created
 		vgsClass, err := p.determineVGSClass(ctx, driver, backup, &pvc)
@@ -999,6 +1000,24 @@ func (p *pvcBackupItemAction) determineCSIDriver(
 		}
 	}
 	return driver, nil
+}
+
+// warnOfGroupedPVCsNotSnapshotted warns of grouped PVCs that CloudCasa backs
+// up without a snapshot: the group selects its PVCs by label, so they are
+// snapshotted with it anyway, and only the group can delete that snapshot.
+func (p *pvcBackupItemAction) warnOfGroupedPVCsNotSnapshotted(
+	pvcs []corev1api.PersistentVolumeClaim,
+	driver, labelKey, group, jobID string,
+) {
+	for i := range pvcs {
+		skip, err := p.shouldSkipSnapshot(&pvcs[i], pvcs[i].Spec.VolumeName, driver, jobID)
+		if err != nil || !skip {
+			continue
+		}
+		p.log.Warnf("PVC %s/%s has the VolumeGroupSnapshot label %s=%s but its backup method takes no snapshot; "+
+			"the group snapshot includes it anyway. Remove the label from it, or back it up with a snapshot",
+			pvcs[i].Namespace, pvcs[i].Name, labelKey, group)
+	}
 }
 
 func (p *pvcBackupItemAction) determineVGSClass(
