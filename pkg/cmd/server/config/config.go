@@ -198,7 +198,7 @@ func GetDefaultConfig() *Config {
 		DefaultVolumeSnapshotLocations: flag.NewMap().WithKeyValueDelimiter(':'),
 		BackupSyncPeriod:               defaultBackupSyncPeriod,
 		DefaultBackupTTL:               defaultBackupTTL,
-		DefaultVGSLabelKey:             velerov1api.DefaultVGSLabelKey,
+		DefaultVGSLabelKey:             velerov1api.CloudCasaVGSLabelKey,
 		DefaultCSISnapshotTimeout:      defaultCSISnapshotTimeout,
 		DefaultItemOperationTimeout:    defaultItemOperationTimeout,
 		ResourceTimeout:                resourceTimeout,
@@ -244,7 +244,7 @@ func (c *Config) BindFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&c.ProfilerAddress, "profiler-address", c.ProfilerAddress, "The address to expose the pprof profiler.")
 	flags.DurationVar(&c.ResourceTerminatingTimeout, "terminating-resource-timeout", c.ResourceTerminatingTimeout, "How long to wait on persistent volumes and namespaces to terminate during a restore before timing out.")
 	flags.DurationVar(&c.DefaultBackupTTL, "default-backup-ttl", c.DefaultBackupTTL, "How long to wait by default before backups can be garbage collected.")
-	flags.StringVar(&c.DefaultVGSLabelKey, "volume-group-snapshot-label-key", c.DefaultVGSLabelKey, "Label key for grouping PVCs into VolumeGroupSnapshot. Default value is 'velero.io/volume-group'")
+	flags.StringVar(&c.DefaultVGSLabelKey, "volume-group-snapshot-label-key", c.DefaultVGSLabelKey, "Label key for grouping PVCs into VolumeGroupSnapshot. Default value is 'cloudcasa.io/volume-group'")
 	flags.DurationVar(&c.RepoMaintenanceFrequency, "default-repo-maintain-frequency", c.RepoMaintenanceFrequency, "How often 'maintain' is run for backup repositories by default.")
 	flags.DurationVar(&c.GarbageCollectionFrequency, "garbage-collection-frequency", c.GarbageCollectionFrequency, "How often garbage collection is run for expired backups.")
 	flags.DurationVar(&c.ItemOperationSyncFrequency, "item-operation-sync-frequency", c.ItemOperationSyncFrequency, "How often to check status on backup/restore operations after backup/restore processing. Default is 10 seconds")

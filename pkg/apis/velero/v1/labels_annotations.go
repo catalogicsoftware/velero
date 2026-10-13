@@ -168,6 +168,10 @@ const (
 	VolumeSnapshotClassDriverPVCAnnotation                = "cloudcasa.io/csi-volumesnapshot-class"
 	VolumeSnapshotClassStorageClassBackupAnnotationPrefix = "cloudcasa.io/csi-sc-vsc-mapping-"
 
+	// CloudCasaVGSLabelKey is the label key a CloudCasa engine groups PVCs
+	// under a VolumeGroupSnapshot by, unless the Backup names another.
+	CloudCasaVGSLabelKey = "cloudcasa.io/volume-group"
+
 	// SnapshotClassRequiredDriversAnnotation lists, comma-separated, the CSI
 	// drivers whose VolumeSnapshotClass must be configured explicitly; the
 	// plugin never auto-creates one for them. Set by the kubeagent on the Backup.
