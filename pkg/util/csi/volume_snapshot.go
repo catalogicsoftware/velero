@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,6 +53,8 @@ import (
 const (
 	waitInternal                          = 2 * time.Second
 	volumeSnapshotContentProtectFinalizer = "velero.io/volume-snapshot-content-protect-finalizer"
+	// snapshotterContentFinalizer is the CSI snapshotter's finalizer on a bound VolumeSnapshotContent.
+	snapshotterContentFinalizer = "snapshot.storage.kubernetes.io/volumesnapshotcontent-bound-protection"
 )
 
 // WaitVolumeSnapshotReady waits a VS to become ready to use until the timeout reaches
@@ -1001,6 +1004,25 @@ func DeleteVolumeSnapshot(
 	}
 }
 
+// removeContentFinalizer removes a finalizer from a VolumeSnapshotContent, if
+// the content still exists.
+func removeContentFinalizer(client crclient.Client, name, finalizer string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vsc := new(snapshotv1api.VolumeSnapshotContent)
+		if err := client.Get(context.TODO(), crclient.ObjectKey{Name: name}, vsc); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if !slices.Contains(vsc.Finalizers, finalizer) {
+			return nil
+		}
+		vsc.Finalizers = slices.DeleteFunc(vsc.Finalizers, func(f string) bool { return f == finalizer })
+		return client.Update(context.TODO(), vsc)
+	})
+}
+
 // recreateVolumeSnapshotContent will delete then re-create VolumeSnapshotContent,
 // because some parameter in VolumeSnapshotContent Spec is immutable,
 // e.g. VolumeSnapshotRef and Source.
@@ -1027,6 +1049,14 @@ func recreateVolumeSnapshotContent(
 
 	if err := client.Delete(context.TODO(), &vsc); err != nil {
 		return errors.Wrapf(err, "fail to delete VolumeSnapshotContent: %s", vsc.Name)
+	}
+	// The snapshotter never releases a group member's content once its
+	// VolumeSnapshot is gone; with Retain its finalizer guards nothing.
+	if vsc.Status != nil && vsc.Status.VolumeGroupSnapshotHandle != nil &&
+		vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentRetain {
+		if err := removeContentFinalizer(client, vsc.Name, snapshotterContentFinalizer); err != nil {
+			return errors.Wrapf(err, "fail to release VolumeSnapshotContent %s of a group snapshot", vsc.Name)
+		}
 	}
 
 	// Check VolumeSnapshotContents is already deleted, before re-creating it.
