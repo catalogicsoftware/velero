@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -148,6 +149,23 @@ func TestGetVolumeSnapshotDetailsFromExtractedBackup(t *testing.T) {
 
 	assert.Equal(t, "vs-1", vsName)
 	assert.Equal(t, "class-1", vsClassName)
+}
+
+// A group member's VolumeSnapshot has no class (the group's class made it), so
+// its missing class is not a missing detail to warn of or look up.
+func TestGetVolumeSnapshotDetailsOfAGroupMember(t *testing.T) {
+	logger, hook := logrustest.NewNullLogger()
+	ctx := &restoreContext{log: logger, restoreDir: "/tmp/velero-restore-1", fileSystem: velerotest.NewFakeFileSystem()}
+	volumeInfo := &volume.BackupVolumeInfo{BackupMethod: volume.CSISnapshot,
+		CSISnapshotInfo: &volume.CSISnapshotInfo{VSName: "vs-1", VolumeGroupSnapshotHandle: "group-1"}}
+
+	vsName, vsClassName := getVolumeSnapshotDetails(ctx, "persistentvolumeclaims", "ns-1", "pvc-a", volumeInfo)
+
+	assert.Equal(t, "vs-1", vsName)
+	assert.Empty(t, vsClassName)
+	for _, entry := range hook.AllEntries() {
+		assert.Greater(t, entry.Level, logrus.WarnLevel, "unexpected %s: %s", entry.Level, entry.Message)
+	}
 }
 
 // A trailing comma must not make a namespaced-only restore look cluster-scoped.

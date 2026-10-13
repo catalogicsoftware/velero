@@ -3709,6 +3709,10 @@ func getVolumeSnapshotDetails(
 	if vsName != "" && vsclsName != "" {
 		return vsName, vsclsName
 	}
+	// A group member's VolumeSnapshot has no class: the group's class made it.
+	if vsName != "" && volumeInfo.CSISnapshotInfo.VolumeGroupSnapshotHandle != "" {
+		return vsName, vsclsName
+	}
 
 	log.Warnf("Missing CSI Snapshot details for PVC '%s/%s'. Retrieving from backup resources...", namespace, name)
 
