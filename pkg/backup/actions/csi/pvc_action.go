@@ -1058,9 +1058,10 @@ func (p *pvcBackupItemAction) determineVGSClass(
 	if len(matched) == 1 {
 		return matched[0], nil
 	} else if len(matched) == 0 {
-		return "", errors.Errorf("no VolumeGroupSnapshotClass found for driver %q for PVC %s", driver, pvc.Name)
+		return "", errors.Errorf("no VolumeGroupSnapshotClass found for driver %q for PVC %s: label one class of the driver %s=true",
+			driver, pvc.Name, velerov1api.VolumeGroupSnapshotClassDefaultLabel)
 	} else {
-		return "", errors.Errorf("multiple VolumeGroupSnapshotClasses found for driver %q with label velero.io/csi-volumegroupsnapshot-class=true", driver)
+		return "", errors.Errorf("multiple VolumeGroupSnapshotClasses found for driver %q with label %s=true", driver, velerov1api.VolumeGroupSnapshotClassDefaultLabel)
 	}
 }
 

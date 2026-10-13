@@ -108,3 +108,29 @@ func TestGroupWarnsOfAGroupedPVCBackedUpWithoutASnapshot(t *testing.T) {
 	assert.Contains(t, warnings[0], "ns/pvc-b")
 	assert.Contains(t, warnings[0], "cloudcasa.io/volume-group=demo")
 }
+
+// CloudCasa marks the default group snapshot class of a driver with its own
+// label; a class with only Velero's label is not picked.
+func TestDetermineVGSClassUsesTheCloudCasaLabel(t *testing.T) {
+	class := func(name string, labels map[string]string) *volumegroupsnapshotv1beta2.VolumeGroupSnapshotClass {
+		return &volumegroupsnapshotv1beta2.VolumeGroupSnapshotClass{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+			Driver:     "hostpath.csi.k8s.io",
+		}
+	}
+	backup := builder.ForBackup("velero", "backup-1").Result()
+	pvc := builder.ForPersistentVolumeClaim("ns", "pvc-a").Result()
+
+	p := &pvcBackupItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t,
+		class("velero-labelled", map[string]string{"velero.io/csi-volumegroupsnapshot-class": "true"}),
+		class("cloudcasa-labelled", map[string]string{"cloudcasa.io/csi-volumegroupsnapshot-class": "true"}))}
+	name, err := p.determineVGSClass(t.Context(), "hostpath.csi.k8s.io", backup, pvc)
+	require.NoError(t, err)
+	assert.Equal(t, "cloudcasa-labelled", name)
+
+	p = &pvcBackupItemAction{log: logrus.New(), crClient: velerotest.NewFakeControllerRuntimeClient(t,
+		class("velero-labelled", map[string]string{"velero.io/csi-volumegroupsnapshot-class": "true"}))}
+	_, err = p.determineVGSClass(t.Context(), "hostpath.csi.k8s.io", backup, pvc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cloudcasa.io/csi-volumegroupsnapshot-class=true")
+}
