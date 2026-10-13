@@ -1166,9 +1166,10 @@ func (p *pvcBackupItemAction) updateVGSCreatedVS(
 			continue
 		}
 
+		var latestVS *snapshotv1api.VolumeSnapshot
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			// Re-fetch the latest VS to avoid conflict
-			latestVS := &snapshotv1api.VolumeSnapshot{}
+			latestVS = &snapshotv1api.VolumeSnapshot{}
 			if err := p.crClient.Get(ctx, crclient.ObjectKeyFromObject(vs), latestVS); err != nil {
 				return errors.Wrapf(err, "failed to get latest VolumeSnapshot %s (PVC %s)", vs.Name, pvcName)
 			}
@@ -1195,6 +1196,9 @@ func (p *pvcBackupItemAction) updateVGSCreatedVS(
 		if err != nil {
 			return errors.Wrapf(err, "failed to update VS %s (PVC %s) after retrying on conflict", vs.Name, pvcName)
 		}
+		// The PVC that created the group goes on with this map entry, and the
+		// snapshot wait needs the backup label just added.
+		vsMap[pvcName] = latestVS
 	}
 
 	return nil

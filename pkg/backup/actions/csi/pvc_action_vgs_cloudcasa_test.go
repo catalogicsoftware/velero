@@ -20,10 +20,15 @@ import (
 	"testing"
 
 	volumegroupsnapshotv1beta2 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumegroupsnapshot/v1beta2"
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
+	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 )
 
 // The snapshot controller writes the owner reference of a member VolumeSnapshot
@@ -44,4 +49,31 @@ func TestHasOwnerReferenceAcceptsEveryGroupSnapshotAPIVersion(t *testing.T) {
 			assert.True(t, hasOwnerReference(obj, vgs))
 		})
 	}
+}
+
+// The PVC that created the group goes on with the VolumeSnapshot from the map;
+// CloudCasa's snapshot wait needs the backup label the update just added.
+func TestUpdateVGSCreatedVSKeepsTheUpdatedSnapshotInTheMap(t *testing.T) {
+	backup := &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Name: "6acdc8986f5eb06abf282035", UID: "backup-uid"}}
+	vgs := &volumegroupsnapshotv1beta2.VolumeGroupSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "velero-demo-kmgrr", Namespace: "ns", UID: "vgs-uid"},
+	}
+	vs := &snapshotv1api.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot-c6eb",
+			Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "groupsnapshot.storage.k8s.io/v1", Kind: kuberesource.VGSKind, Name: vgs.Name, UID: vgs.UID,
+			}},
+		},
+		Spec:   snapshotv1api.VolumeSnapshotSpec{Source: snapshotv1api.VolumeSnapshotSource{PersistentVolumeClaimName: ptr.To("group-pvc-a")}},
+		Status: &snapshotv1api.VolumeSnapshotStatus{VolumeGroupSnapshotName: ptr.To(vgs.Name), ReadyToUse: ptr.To(true)},
+	}
+	action := &pvcBackupItemAction{log: velerotest.NewLogger(), crClient: velerotest.NewFakeControllerRuntimeClient(t, vgs, vs)}
+	vsMap := map[string]*snapshotv1api.VolumeSnapshot{"group-pvc-a": vs.DeepCopy()}
+
+	require.NoError(t, action.updateVGSCreatedVS(t.Context(), vsMap, vgs, backup))
+
+	assert.Equal(t, backup.Name, vsMap["group-pvc-a"].Labels[velerov1api.BackupNameLabel])
+	assert.Empty(t, vsMap["group-pvc-a"].OwnerReferences)
 }
