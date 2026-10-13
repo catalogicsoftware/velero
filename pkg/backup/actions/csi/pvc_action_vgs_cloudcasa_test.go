@@ -26,8 +26,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1api "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/velero/internal/catalogic"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
@@ -96,7 +98,9 @@ func TestGroupWarnsOfAGroupedPVCBackedUpWithoutASnapshot(t *testing.T) {
 			ObjectMeta(builder.WithAnnotations("cloudcasa.io/backup-method", "LIVE")).Result(),
 	}
 
-	p.warnOfGroupedPVCsNotSnapshotted(pvcs, "hostpath.csi.k8s.io", "cloudcasa.io/volume-group", "demo", "backup-1")
+	skipped := p.groupedPVCsNotSnapshotted(pvcs, "hostpath.csi.k8s.io", "cloudcasa.io/volume-group", "demo", "backup-1")
+
+	assert.Equal(t, map[string]bool{"pvc-b": true}, skipped)
 
 	var warnings []string
 	for _, entry := range hook.AllEntries() {
@@ -133,4 +137,81 @@ func TestDetermineVGSClassUsesTheCloudCasaLabel(t *testing.T) {
 	_, err = p.determineVGSClass(t.Context(), "hostpath.csi.k8s.io", backup, pvc)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cloudcasa.io/csi-volumegroupsnapshot-class=true")
+}
+
+func groupMember(name, pvcName, content string) *snapshotv1api.VolumeSnapshot {
+	vs := builder.ForVolumeSnapshot("ns", name).SourcePVC(pvcName).Status().BoundVolumeSnapshotContentName(content).Result()
+	group := "velero-demo-x"
+	vs.Status.VolumeGroupSnapshotName = &group
+	return vs
+}
+
+func groupMemberContentObject(name, handle string) *snapshotv1api.VolumeSnapshotContent {
+	groupHandle := "group-1"
+	vsc := builder.ForVolumeSnapshotContent(name).DeletionPolicy(snapshotv1api.VolumeSnapshotContentDelete).
+		Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle, VolumeGroupSnapshotHandle: &groupHandle}).Result()
+	vsc.Finalizers = []string{"snapshot.storage.kubernetes.io/volumesnapshotcontent-bound-protection"}
+	return vsc
+}
+
+func readyGroup(infos ...volumegroupsnapshotv1beta2.VolumeSnapshotInfo) (*volumegroupsnapshotv1beta2.VolumeGroupSnapshot, *volumegroupsnapshotv1beta2.VolumeGroupSnapshotContent) {
+	contentName := "groupcontent-1"
+	vgs := &volumegroupsnapshotv1beta2.VolumeGroupSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "velero-demo-x"},
+		Status:     &volumegroupsnapshotv1beta2.VolumeGroupSnapshotStatus{BoundVolumeGroupSnapshotContentName: &contentName},
+	}
+	vgsc := &volumegroupsnapshotv1beta2.VolumeGroupSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: contentName},
+		Status:     &volumegroupsnapshotv1beta2.VolumeGroupSnapshotContentStatus{VolumeSnapshotInfoList: infos},
+	}
+	return vgs, vgsc
+}
+
+// The group content lists every member the storage snapshotted, so that list is
+// recorded on each member. A member CloudCasa backs up without a snapshot keeps
+// no snapshot objects; its storage snapshot stays with the group, which the list
+// still names.
+func TestSettleGroupMembersRecordsTheMembersAndDropsASkippedOne(t *testing.T) {
+	vgs, vgsc := readyGroup(
+		volumegroupsnapshotv1beta2.VolumeSnapshotInfo{VolumeHandle: "vol-b", SnapshotHandle: "snap-b"},
+		volumegroupsnapshotv1beta2.VolumeSnapshotInfo{VolumeHandle: "vol-a", SnapshotHandle: "snap-a"})
+	vsA, vsB := groupMember("vs-a", "pvc-a", "content-a"), groupMember("vs-b", "pvc-b", "content-b")
+	client := velerotest.NewFakeControllerRuntimeClient(t, vgs, vgsc, vsA, vsB,
+		groupMemberContentObject("content-a", "snap-a"), groupMemberContentObject("content-b", "snap-b"))
+	p := &pvcBackupItemAction{log: logrus.New(), crClient: client}
+	vsMap := map[string]*snapshotv1api.VolumeSnapshot{"pvc-a": vsA, "pvc-b": vsB}
+
+	require.NoError(t, p.settleGroupMembers(t.Context(), vgs, vsMap, map[string]bool{"pvc-b": true}))
+
+	want := `["snap-a","snap-b"]`
+	kept := &snapshotv1api.VolumeSnapshot{}
+	require.NoError(t, client.Get(t.Context(), crclient.ObjectKeyFromObject(vsA), kept))
+	assert.Equal(t, want, kept.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation])
+	assert.Equal(t, want, vsMap["pvc-a"].Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation])
+	assert.NotContains(t, vsMap, "pvc-b")
+	assert.True(t, apierrors.IsNotFound(client.Get(t.Context(), crclient.ObjectKeyFromObject(vsB), &snapshotv1api.VolumeSnapshot{})))
+	assert.True(t, apierrors.IsNotFound(client.Get(t.Context(), crclient.ObjectKey{Name: "content-b"}, &snapshotv1api.VolumeSnapshotContent{})))
+	contentA := &snapshotv1api.VolumeSnapshotContent{}
+	require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: "content-a"}, contentA))
+	assert.Equal(t, snapshotv1api.VolumeSnapshotContentDelete, contentA.Spec.DeletionPolicy)
+}
+
+// Without a member list from the group content, nothing is recorded and a
+// skipped member keeps its objects: they are then the only record of its
+// snapshot for the group's later deletion.
+func TestSettleGroupMembersKeepsEverythingWithoutAMemberList(t *testing.T) {
+	vgs, vgsc := readyGroup()
+	vsA, vsB := groupMember("vs-a", "pvc-a", "content-a"), groupMember("vs-b", "pvc-b", "content-b")
+	client := velerotest.NewFakeControllerRuntimeClient(t, vgs, vgsc, vsA, vsB,
+		groupMemberContentObject("content-a", "snap-a"), groupMemberContentObject("content-b", "snap-b"))
+	p := &pvcBackupItemAction{log: logrus.New(), crClient: client}
+	vsMap := map[string]*snapshotv1api.VolumeSnapshot{"pvc-a": vsA, "pvc-b": vsB}
+
+	require.NoError(t, p.settleGroupMembers(t.Context(), vgs, vsMap, map[string]bool{"pvc-b": true}))
+
+	kept := &snapshotv1api.VolumeSnapshot{}
+	require.NoError(t, client.Get(t.Context(), crclient.ObjectKeyFromObject(vsA), kept))
+	assert.NotContains(t, kept.Annotations, velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation)
+	require.NoError(t, client.Get(t.Context(), crclient.ObjectKeyFromObject(vsB), &snapshotv1api.VolumeSnapshot{}))
+	require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: "content-b"}, &snapshotv1api.VolumeSnapshotContent{}))
 }

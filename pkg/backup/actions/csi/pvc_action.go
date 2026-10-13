@@ -18,6 +18,7 @@ package csi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strconv"
@@ -841,7 +842,7 @@ func (p *pvcBackupItemAction) getVolumeSnapshotReference(
 		if driver == "" {
 			return nil, errors.New("no csi driver found, failing the backup")
 		}
-		p.warnOfGroupedPVCsNotSnapshotted(groupedPVCs, driver, vgsLabelKey, group, backup.Name)
+		skipped := p.groupedPVCsNotSnapshotted(groupedPVCs, driver, vgsLabelKey, group, backup.Name)
 
 		// Determine the VGSClass to be used for the VGS object to be created
 		vgsClass, err := p.determineVGSClass(ctx, driver, backup, &pvc)
@@ -877,6 +878,11 @@ func (p *pvcBackupItemAction) getVolumeSnapshotReference(
 		latestVGS := &volumegroupsnapshotv1beta2.VolumeGroupSnapshot{}
 		if err := p.crClient.Get(ctx, crclient.ObjectKeyFromObject(newVGS), latestVGS); err != nil {
 			return nil, errors.Wrapf(err, "failed to re-fetch VolumeGroupSnapshot %s after VGSC binding wait", newVGS.Name)
+		}
+
+		// Record the members while the group content still lists them.
+		if err := p.settleGroupMembers(ctx, latestVGS, vsMap, skipped); err != nil {
+			return nil, errors.Wrapf(err, "failed to record the members of VolumeGroupSnapshot %s", newVGS.Name)
 		}
 
 		// Patch the VGSC deletionPolicy to Retain.
@@ -1002,13 +1008,14 @@ func (p *pvcBackupItemAction) determineCSIDriver(
 	return driver, nil
 }
 
-// warnOfGroupedPVCsNotSnapshotted warns of grouped PVCs that CloudCasa backs
-// up without a snapshot: the group selects its PVCs by label, so they are
-// snapshotted with it anyway, and only the group can delete that snapshot.
-func (p *pvcBackupItemAction) warnOfGroupedPVCsNotSnapshotted(
+// groupedPVCsNotSnapshotted returns, and warns of, the grouped PVCs that
+// CloudCasa backs up without a snapshot: the group selects its PVCs by label,
+// so they are snapshotted with it anyway, and only the group can delete that snapshot.
+func (p *pvcBackupItemAction) groupedPVCsNotSnapshotted(
 	pvcs []corev1api.PersistentVolumeClaim,
 	driver, labelKey, group, jobID string,
-) {
+) map[string]bool {
+	skipped := map[string]bool{}
 	for i := range pvcs {
 		skip, err := p.shouldSkipSnapshot(&pvcs[i], pvcs[i].Spec.VolumeName, driver, jobID)
 		if err != nil || !skip {
@@ -1017,7 +1024,73 @@ func (p *pvcBackupItemAction) warnOfGroupedPVCsNotSnapshotted(
 		p.log.Warnf("PVC %s/%s has the VolumeGroupSnapshot label %s=%s but its backup method takes no snapshot; "+
 			"the group snapshot includes it anyway. Remove the label from it, or back it up with a snapshot",
 			pvcs[i].Namespace, pvcs[i].Name, labelKey, group)
+		skipped[pvcs[i].Name] = true
 	}
+	return skipped
+}
+
+// settleGroupMembers records on each member VolumeSnapshot every member's
+// snapshot handle, as the group content lists them, and removes the snapshot
+// objects of members CloudCasa backs up without a snapshot. Their storage
+// snapshot stays with the group, whose recorded list still names it.
+func (p *pvcBackupItemAction) settleGroupMembers(
+	ctx context.Context,
+	vgs *volumegroupsnapshotv1beta2.VolumeGroupSnapshot,
+	vsMap map[string]*snapshotv1api.VolumeSnapshot,
+	skipped map[string]bool,
+) error {
+	if vgs.Status == nil || vgs.Status.BoundVolumeGroupSnapshotContentName == nil {
+		return nil
+	}
+	vgscName := *vgs.Status.BoundVolumeGroupSnapshotContentName
+	vgsc := &volumegroupsnapshotv1beta2.VolumeGroupSnapshotContent{}
+	if err := p.crClient.Get(ctx, crclient.ObjectKey{Name: vgscName}, vgsc); err != nil {
+		return errors.Wrapf(err, "failed to get VolumeGroupSnapshotContent %s", vgscName)
+	}
+	handles := []string{}
+	if vgsc.Status != nil {
+		for _, info := range vgsc.Status.VolumeSnapshotInfoList {
+			if info.SnapshotHandle != "" && !slices.Contains(handles, info.SnapshotHandle) {
+				handles = append(handles, info.SnapshotHandle)
+			}
+		}
+	}
+	if len(handles) == 0 {
+		p.log.Infof("VolumeGroupSnapshotContent %s lists no member snapshots; they are found from the contents in the cluster", vgscName)
+		return nil
+	}
+	slices.Sort(handles)
+	members, err := json.Marshal(handles)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	for pvcName, vs := range vsMap {
+		if skipped[pvcName] {
+			p.log.Infof("Removing the snapshot objects of group member %s/%s for PVC %s; its storage snapshot stays with the group",
+				vs.Namespace, vs.Name, pvcName)
+			if err := csi.RemoveGroupMemberObjects(ctx, p.crClient, vs); err != nil {
+				return err
+			}
+			delete(vsMap, pvcName)
+			continue
+		}
+		latestVS := &snapshotv1api.VolumeSnapshot{}
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := p.crClient.Get(ctx, crclient.ObjectKeyFromObject(vs), latestVS); err != nil {
+				return err
+			}
+			kubeutil.AddAnnotations(&latestVS.ObjectMeta, map[string]string{
+				velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation: string(members),
+			})
+			return p.crClient.Update(ctx, latestVS)
+		})
+		if err != nil {
+			return errors.Wrapf(err, "failed to record the group members on VolumeSnapshot %s/%s", vs.Namespace, vs.Name)
+		}
+		vsMap[pvcName] = latestVS
+	}
+	return nil
 }
 
 func (p *pvcBackupItemAction) determineVGSClass(

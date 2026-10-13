@@ -169,7 +169,11 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 			// for CSI drivers that populate this field (e.g., Ceph RBD).
 			if vsc.Status.VolumeGroupSnapshotHandle != nil {
 				annotations[velerov1api.VolumeGroupSnapshotHandleAnnotation] = *vsc.Status.VolumeGroupSnapshotHandle
-				members, err := groupMemberSnapshotHandles(ctx, p.crClient, *vsc.Status.VolumeGroupSnapshotHandle)
+				// A list recorded from the group content when the group was made is kept.
+				members, recorded := vs.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation]
+				if !recorded {
+					members, err = groupMemberSnapshotHandles(ctx, p.crClient, *vsc.Status.VolumeGroupSnapshotHandle)
+				}
 				if err != nil {
 					p.log.Warnf("Failed to list the members of group snapshot %s: %v", *vsc.Status.VolumeGroupSnapshotHandle, err)
 				} else {

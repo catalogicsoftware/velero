@@ -99,3 +99,27 @@ func TestVSExecuteNoGroupMemberHandlesOutsideAGroup(t *testing.T) {
 	require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(out.UnstructuredContent(), backedUp))
 	assert.NotContains(t, backedUp.Annotations, velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation)
 }
+
+// A member list recorded from the group content when the group was made is
+// kept: the contents in the cluster may no longer show every member.
+func TestVSExecuteKeepsARecordedGroupMemberList(t *testing.T) {
+	vs := builder.ForVolumeSnapshot("ns", "vs-a").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup"),
+			builder.WithAnnotations(velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation, `["snap-a","snap-b"]`)).
+		Status().BoundVolumeSnapshotContentName("vsc-a").Result()
+	client := velerotest.NewFakeControllerRuntimeClient(t, vs, groupMemberVSC("vsc-a", "snap-a", "group-1"))
+	vsBIA := volumeSnapshotBackupItemAction{log: logrus.New(), crClient: client}
+	item, err := runtime.DefaultUnstructuredConverter.ToUnstructured(vs)
+	require.NoError(t, err)
+
+	out, _, _, _, err := vsBIA.Execute(&unstructured.Unstructured{Object: item},
+		builder.ForBackup("velero", "backup").Phase(velerov1api.BackupPhaseInProgress).Result())
+	require.NoError(t, err)
+
+	backedUp := new(snapshotv1api.VolumeSnapshot)
+	require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(out.UnstructuredContent(), backedUp))
+	assert.Equal(t, `["snap-a","snap-b"]`, backedUp.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation])
+	content := new(snapshotv1api.VolumeSnapshotContent)
+	require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: "vsc-a"}, content))
+	assert.Equal(t, `["snap-a","snap-b"]`, content.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation])
+}

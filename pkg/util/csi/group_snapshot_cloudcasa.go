@@ -271,3 +271,27 @@ func releaseStub(ctx context.Context, client crclient.Client, stub *volumegroups
 	}
 	return nil
 }
+
+// RemoveGroupMemberObjects removes a group member's VolumeSnapshot and content
+// but not its storage snapshot, which only its group can delete. The content
+// goes as Retain; its finalizer is removed after the delete, as the snapshot
+// controller re-adds it to a content not being deleted.
+func RemoveGroupMemberObjects(ctx context.Context, client crclient.Client, vs *snapshotv1api.VolumeSnapshot) error {
+	if err := client.Delete(ctx, vs); err != nil && !apierrors.IsNotFound(err) {
+		return errors.Wrapf(err, "error deleting VolumeSnapshot %s/%s", vs.Namespace, vs.Name)
+	}
+	if vs.Status == nil || vs.Status.BoundVolumeSnapshotContentName == nil {
+		return nil
+	}
+	name := *vs.Status.BoundVolumeSnapshotContentName
+	if _, err := SetVolumeSnapshotContentDeletionPolicy(name, client, snapshotv1api.VolumeSnapshotContentRetain); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return errors.Wrapf(err, "error setting VolumeSnapshotContent %s to Retain", name)
+	}
+	if err := client.Delete(ctx, &snapshotv1api.VolumeSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: name}}); err != nil && !apierrors.IsNotFound(err) {
+		return errors.Wrapf(err, "error deleting VolumeSnapshotContent %s", name)
+	}
+	return removeContentFinalizer(client, name, snapshotterContentFinalizer)
+}
