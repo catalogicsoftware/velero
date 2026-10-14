@@ -48,38 +48,16 @@ RUN mkdir -p /output/usr/bin && \
     -ldflags "${LDFLAGS}" ${PKG}/cmd/velero-helper && \
     go clean -modcache -cache
 
-# Restic binary build section
-FROM --platform=$BUILDPLATFORM golang:1.26.8-trixie AS restic-builder
+FROM registry.access.redhat.com/ubi9/ubi
 
-ARG GOPROXY
-ARG BIN
-ARG TARGETOS
-ARG TARGETARCH
-ARG TARGETVARIANT
-ARG RESTIC_VERSION
+RUN yum -y update \
+ && yum -y upgrade \
+ && yum -y install ca-certificates \
+ && yum -y update ca-certificates \
+ && yum clean all
 
-ENV CGO_ENABLED=0 \
-    GO111MODULE=on \
-    GOPROXY=${GOPROXY} \
-    GOOS=${TARGETOS} \
-    GOARCH=${TARGETARCH} \
-    GOARM=${TARGETVARIANT}
+LABEL maintainer="CloudCasa <support@cloudcasa.io>"
 
-COPY . /go/src/github.com/vmware-tanzu/velero
+COPY --from=velero-builder --chown=1001:0 /output /
 
-RUN mkdir -p /output/usr/bin && \
-    export GOARM=$(echo "${GOARM}" | cut -c2-) && \
-    /go/src/github.com/vmware-tanzu/velero/hack/build-restic.sh && \
-    go clean -modcache -cache
-
-# Velero image packing section
-FROM paketobuildpacks/run-jammy-tiny:0.2.177
-
-LABEL maintainer="Xun Jiang <jxun@vmware.com>"
-
-COPY --from=velero-builder /output /
-
-COPY --from=restic-builder /output /
-
-USER cnb:cnb
-
+USER 1001

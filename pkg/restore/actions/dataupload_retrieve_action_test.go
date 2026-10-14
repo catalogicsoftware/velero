@@ -54,7 +54,7 @@ func TestDataUploadRetrieveActionExectue(t *testing.T) {
 			dataUpload:    builder.ForDataUpload("velero", "testDU").SourceNamespace("testNamespace").SourcePVC("testPVC").Result(),
 			restore:       builder.ForRestore("velero", "testRestore").ObjectMeta(builder.WithUID("testingUID")).Backup("testBackup").Result(),
 			runtimeScheme: scheme,
-			expectedErr:   "error to get backup for restore testRestore: backups.velero.io \"testBackup\" not found",
+			expectedErr:   "error to get backup for restore testRestore: backups.cloudcasa.io \"testBackup\" not found",
 		},
 		{
 			name:          "DataUploadRetrieve Action test",

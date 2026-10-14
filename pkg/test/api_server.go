@@ -58,6 +58,7 @@ func NewAPIServer(t *testing.T) *APIServer {
 				{Group: "velero.io", Version: "v2alpha1", Resource: "datauploads"}:                         "DataUploadsList",
 				{Group: "mygroup.io", Version: "v1", Resource: "mycustomkinds"}:                            "MyCustomKindList",
 				{Group: "mygroup.io", Version: "v1", Resource: "myclustercustomkinds"}:                     "MyClusterCustomKindList",
+				{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}:                         "VirtualMachineList",
 				{Group: "storage.k8s.io", Version: "v1", Resource: "storageclasses"}:                       "StorageClassList",
 				{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}:             "VolumeSnapshotList",
 				{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotcontents"}:      "VolumeSnapshotContentList",

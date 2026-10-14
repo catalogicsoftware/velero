@@ -25,7 +25,9 @@ import (
 	"github.com/cockroachdb/errors"
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -83,103 +85,137 @@ func (c *fakeClientWithErrors) Delete(ctx context.Context, obj crclient.Object, 
 }
 
 func TestVSCExecute(t *testing.T) {
-	snapshotHandleStr := "test"
+	handle := "snap-handle-1"
+	backupVSC := func(status *snapshotv1api.VolumeSnapshotContentStatus) *snapshotv1api.VolumeSnapshotContent {
+		vsc := builder.ForVolumeSnapshotContent("snapcontent-1").
+			ObjectMeta(builder.WithLabelsMap(map[string]string{velerov1api.BackupNameLabel: "backup"})).
+			Status(status).Result()
+		vsc.Spec.DeletionPolicy = snapshotv1api.VolumeSnapshotContentRetain
+		return vsc
+	}
 	tests := []struct {
-		name     string
-		item     runtime.Unstructured
-		vsc      *snapshotv1api.VolumeSnapshotContent
-		backup   *velerov1api.Backup
-		function func(
-			ctx context.Context,
-			vsc *snapshotv1api.VolumeSnapshotContent,
-			client crclient.Client,
-		) (bool, error)
-		expectErr bool
+		name        string
+		item        *snapshotv1api.VolumeSnapshotContent
+		inCluster   bool
+		errClient   *fakeClientWithErrors
+		wantDeleted bool
+		wantErr     bool
+		wantWarning string
 	}{
 		{
-			name: "VolumeSnapshotContent doesn't have backup label",
-			item: velerotest.UnstructuredOrDie(
-				`
-				{
-					"apiVersion": "snapshot.storage.k8s.io/v1",
-					"kind": "VolumeSnapshotContent",
-					"metadata": {
-						"namespace": "ns",
-						"name": "foo"
-					}
-				}
-				`,
-			),
-			backup:    builder.ForBackup("velero", "backup").Result(),
-			expectErr: false,
+			name:      "not taken by the backup",
+			item:      builder.ForVolumeSnapshotContent("snapcontent-1").Result(),
+			inCluster: true,
 		},
 		{
-			name:      "Normal case, VolumeSnapshot should be deleted",
-			vsc:       builder.ForVolumeSnapshotContent("bar").ObjectMeta(builder.WithLabelsMap(map[string]string{velerov1api.BackupNameLabel: "backup"})).VolumeSnapshotClassName("volumesnapshotclass").Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &snapshotHandleStr}).Result(),
-			backup:    builder.ForBackup("velero", "backup").ObjectMeta(builder.WithAnnotationsMap(map[string]string{velerov1api.ResourceTimeoutAnnotation: "5s"})).Result(),
-			expectErr: false,
-			function: func(
-				ctx context.Context,
-				vsc *snapshotv1api.VolumeSnapshotContent,
-				client crclient.Client,
-			) (bool, error) {
-				return true, nil
-			},
+			name:        "retained in the cluster: deleted with its snapshot",
+			item:        backupVSC(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}),
+			inCluster:   true,
+			wantDeleted: true,
 		},
 		{
-			name:      "Error case, deletion fails",
-			vsc:       builder.ForVolumeSnapshotContent("bar").ObjectMeta(builder.WithLabelsMap(map[string]string{velerov1api.BackupNameLabel: "backup"})).Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &snapshotHandleStr}).Result(),
-			backup:    builder.ForBackup("velero", "backup").ObjectMeta(builder.WithAnnotationsMap(map[string]string{velerov1api.ResourceTimeoutAnnotation: "5s"})).Result(),
-			expectErr: true,
-			function: func(
-				ctx context.Context,
-				vsc *snapshotv1api.VolumeSnapshotContent,
-				client crclient.Client,
-			) (bool, error) {
-				return false, errors.Errorf("test error case")
-			},
+			name: "gone from the cluster: deleted through a temporary content",
+			item: backupVSC(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}),
 		},
 		{
-			name:      "Error case with CSI error, dangling VSC should be cleaned up",
-			vsc:       builder.ForVolumeSnapshotContent("bar").ObjectMeta(builder.WithLabelsMap(map[string]string{velerov1api.BackupNameLabel: "backup"})).Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &snapshotHandleStr}).Result(),
-			backup:    builder.ForBackup("velero", "backup").ObjectMeta(builder.WithAnnotationsMap(map[string]string{velerov1api.ResourceTimeoutAnnotation: "5s"})).Result(),
-			expectErr: true,
-			function: func(
-				ctx context.Context,
-				vsc *snapshotv1api.VolumeSnapshotContent,
-				client crclient.Client,
-			) (bool, error) {
-				return false, errors.Errorf("VolumeSnapshotContent %s has error: InvalidSnapshot.NotFound", vsc.Name)
-			},
+			name:        "gone from the cluster, no status in the backup",
+			item:        backupVSC(nil),
+			wantWarning: "May leave orphan snapshot <unknown> on cloud provider.",
+		},
+		{
+			name:      "policy change fails",
+			item:      backupVSC(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}),
+			inCluster: true,
+			errClient: &fakeClientWithErrors{patchError: errors.New("patch refused")},
+			wantErr:   true,
+		},
+		{
+			name:      "delete fails",
+			item:      backupVSC(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}),
+			inCluster: true,
+			errClient: &fakeClientWithErrors{deleteError: errors.New("delete refused")},
+			wantErr:   true,
 		},
 	}
-
+	previousSleep := sleepBetweenTempVSCCreateAndDelete
+	sleepBetweenTempVSCCreateAndDelete = func(time.Duration) {}
+	t.Cleanup(func() { sleepBetweenTempVSCCreateAndDelete = previousSleep })
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			crClient := velerotest.NewFakeControllerRuntimeClient(t)
-			logger := logrus.StandardLogger()
-			checkVSCReadiness = test.function
-
-			p := volumeSnapshotContentDeleteItemAction{log: logger, crClient: crClient}
-
-			if test.vsc != nil {
-				vscMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(test.vsc)
-				require.NoError(t, err)
-				test.item = &unstructured.Unstructured{Object: vscMap}
+			var objects []runtime.Object
+			if test.inCluster {
+				objects = append(objects, test.item.DeepCopy())
 			}
+			fakeClient := velerotest.NewFakeControllerRuntimeClient(t, objects...)
+			var client crclient.Client = fakeClient
+			if test.errClient != nil {
+				test.errClient.Client = fakeClient
+				client = test.errClient
+			}
+			logger, hook := logrustest.NewNullLogger()
+			p := volumeSnapshotContentDeleteItemAction{log: logger, crClient: client}
+			item, err := runtime.DefaultUnstructuredConverter.ToUnstructured(test.item)
+			require.NoError(t, err)
 
-			err := p.Execute(
-				&velero.DeleteItemActionExecuteInput{
-					Item:   test.item,
-					Backup: test.backup,
-				},
-			)
+			err = p.Execute(&velero.DeleteItemActionExecuteInput{
+				Item:   &unstructured.Unstructured{Object: item},
+				Backup: builder.ForBackup("velero", "backup").Result(),
+			})
 
-			if test.expectErr == false {
+			if test.wantErr {
+				require.Error(t, err)
+			} else {
 				require.NoError(t, err)
+			}
+			inCluster := new(snapshotv1api.VolumeSnapshotContent)
+			getErr := fakeClient.Get(t.Context(), crclient.ObjectKey{Name: "snapcontent-1"}, inCluster)
+			if test.wantDeleted {
+				require.True(t, apierrors.IsNotFound(getErr), "the VolumeSnapshotContent is deleted")
+			} else if test.inCluster {
+				require.NoError(t, getErr, "the VolumeSnapshotContent is kept")
+			}
+			if test.wantWarning != "" {
+				require.Contains(t, hook.LastEntry().Message, test.wantWarning)
+				require.Equal(t, logrus.WarnLevel, hook.LastEntry().Level)
 			}
 		})
 	}
+}
+
+// The policy is Delete when the VolumeSnapshotContent is deleted, so the CSI
+// snapshot controller also deletes the snapshot on the storage provider.
+func TestVSCExecuteDeletesTheSnapshotWithTheContent(t *testing.T) {
+	handle := "snap-handle-1"
+	vsc := builder.ForVolumeSnapshotContent("snapcontent-1").
+		ObjectMeta(builder.WithLabelsMap(map[string]string{velerov1api.BackupNameLabel: "backup"})).
+		Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}).Result()
+	vsc.Spec.DeletionPolicy = snapshotv1api.VolumeSnapshotContentRetain
+	fakeClient := velerotest.NewFakeControllerRuntimeClient(t, vsc.DeepCopy())
+	client := &policyAtDelete{Client: fakeClient}
+	p := volumeSnapshotContentDeleteItemAction{log: logrus.StandardLogger(), crClient: client}
+	item, err := runtime.DefaultUnstructuredConverter.ToUnstructured(vsc)
+	require.NoError(t, err)
+
+	require.NoError(t, p.Execute(&velero.DeleteItemActionExecuteInput{
+		Item:   &unstructured.Unstructured{Object: item},
+		Backup: builder.ForBackup("velero", "backup").Result(),
+	}))
+
+	require.Equal(t, []snapshotv1api.DeletionPolicy{snapshotv1api.VolumeSnapshotContentDelete}, client.policies)
+}
+
+// policyAtDelete records the in-cluster policy of each VolumeSnapshotContent it deletes.
+type policyAtDelete struct {
+	crclient.Client
+	policies []snapshotv1api.DeletionPolicy
+}
+
+func (c *policyAtDelete) Delete(ctx context.Context, obj crclient.Object, opts ...crclient.DeleteOption) error {
+	current := new(snapshotv1api.VolumeSnapshotContent)
+	if err := c.Client.Get(ctx, crclient.ObjectKeyFromObject(obj), current); err == nil {
+		c.policies = append(c.policies, current.Spec.DeletionPolicy)
+	}
+	return c.Client.Delete(ctx, obj, opts...)
 }
 
 func TestVSCAppliesTo(t *testing.T) {
@@ -323,4 +359,59 @@ func boolPtr(b bool) *bool {
 
 func stringPtr(s string) *string {
 	return &s
+}
+
+// A content that is gone from the cluster is re-created from the backup under
+// a temporary name with policy Delete and the backed-up snapshot handle, and
+// deleted, so the CSI driver deletes the storage snapshot.
+func TestVSCExecuteDeletesTheSnapshotOfAGoneContent(t *testing.T) {
+	handle, class := "snap-handle-1", "class-1"
+	vsc := builder.ForVolumeSnapshotContent("snapcontent-1").
+		ObjectMeta(builder.WithLabelsMap(map[string]string{velerov1api.BackupNameLabel: "backup"})).
+		VolumeSnapshotClassName(class).
+		Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}).Result()
+	vsc.Spec.DeletionPolicy = snapshotv1api.VolumeSnapshotContentRetain
+	vsc.UID = "uid-1"
+	client := &recordingClient{Client: velerotest.NewFakeControllerRuntimeClient(t)}
+	previousSleep := sleepBetweenTempVSCCreateAndDelete
+	sleepBetweenTempVSCCreateAndDelete = func(time.Duration) {}
+	t.Cleanup(func() { sleepBetweenTempVSCCreateAndDelete = previousSleep })
+	p := volumeSnapshotContentDeleteItemAction{log: logrus.StandardLogger(), crClient: client}
+	item, err := runtime.DefaultUnstructuredConverter.ToUnstructured(vsc)
+	require.NoError(t, err)
+
+	require.NoError(t, p.Execute(&velero.DeleteItemActionExecuteInput{
+		Item:   &unstructured.Unstructured{Object: item},
+		Backup: builder.ForBackup("velero", "backup").Result(),
+	}))
+
+	require.Len(t, client.created, 1)
+	temp := client.created[0]
+	require.Regexp(t, `^vsc-[0-9a-f-]{36}$`, temp.Name)
+	require.Equal(t, snapshotv1api.VolumeSnapshotContentDelete, temp.Spec.DeletionPolicy)
+	require.Equal(t, handle, *temp.Spec.Source.SnapshotHandle)
+	require.Nil(t, temp.Spec.Source.VolumeHandle)
+	require.Nil(t, temp.Spec.VolumeSnapshotClassName)
+	require.Equal(t, "name-uid-1", temp.Spec.VolumeSnapshotRef.Name)
+	require.Equal(t, "ns-uid-1", temp.Spec.VolumeSnapshotRef.Namespace)
+	require.Equal(t, []string{temp.Name}, client.deleted)
+}
+
+// recordingClient records the VolumeSnapshotContents created and deleted.
+type recordingClient struct {
+	crclient.Client
+	created []snapshotv1api.VolumeSnapshotContent
+	deleted []string
+}
+
+func (c *recordingClient) Create(ctx context.Context, obj crclient.Object, opts ...crclient.CreateOption) error {
+	if vsc, ok := obj.(*snapshotv1api.VolumeSnapshotContent); ok {
+		c.created = append(c.created, *vsc.DeepCopy())
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+func (c *recordingClient) Delete(ctx context.Context, obj crclient.Object, opts ...crclient.DeleteOption) error {
+	c.deleted = append(c.deleted, obj.GetName())
+	return c.Client.Delete(ctx, obj, opts...)
 }

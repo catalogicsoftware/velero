@@ -55,11 +55,11 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	"github.com/vmware-tanzu/velero/pkg/plugin/framework"
 	pkgrestore "github.com/vmware-tanzu/velero/pkg/restore"
+	"github.com/vmware-tanzu/velero/pkg/util/backup_store"
 	"github.com/vmware-tanzu/velero/pkg/util/collections"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
-	veleroutil "github.com/vmware-tanzu/velero/pkg/util/velero"
 	pkgrestoreUtil "github.com/vmware-tanzu/velero/pkg/util/velero/restore"
 )
 
@@ -72,17 +72,17 @@ var nonRestorableResources = []string{
 
 	// Don't ever restore backups - if appropriate, they'll be synced in from object storage.
 	// https://github.com/vmware-tanzu/velero/issues/622
-	"backups.velero.io",
+	api.Resource("backups").String(),
 
 	// Restores are cluster-specific, and don't have value moving across clusters.
 	// https://github.com/vmware-tanzu/velero/issues/622
-	"restores.velero.io",
+	api.Resource("restores").String(),
 
 	// TODO: Remove this in v1.11 or v1.12
 	// Restic repositories are automatically managed by Velero and will be automatically
 	// created as needed if they don't exist.
 	// https://github.com/vmware-tanzu/velero/issues/1113
-	"resticrepositories.velero.io",
+	api.Resource("resticrepositories").String(),
 
 	// CSINode delegates cluster node for CSI operation.
 	// VolumeAttachement records PV mounts to which node.
@@ -91,7 +91,7 @@ var nonRestorableResources = []string{
 	"volumeattachments.storage.k8s.io",
 
 	// Backup repositories were renamed from Restic repositories
-	"backuprepositories.velero.io",
+	api.Resource("backuprepositories").String(),
 }
 
 var ExternalResourcesFinalizer = "restores.velero.io/external-resources-finalizer"
@@ -184,6 +184,9 @@ func (r *restoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		log.Errorf("Fail to get restore %s: %s", req.NamespacedName.String(), err.Error())
 		return ctrl.Result{}, err
+	}
+	if skipForeign(log, restore) {
+		return ctrl.Result{}, nil
 	}
 
 	// deal with finalizer
@@ -299,6 +302,7 @@ func (r *restoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 func (r *restoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&api.Restore{}).
 		Named(constant.ControllerRestore).
 		Complete(r)
@@ -395,10 +399,8 @@ func (r *restoreReconciler) validateAndComplete(ctx context.Context, restore *ap
 		return backupInfo{}, nil, nil
 	}
 
-	if !veleroutil.BSLIsAvailable(*info.location) {
-		restore.Status.ValidationErrors = append(restore.Status.ValidationErrors, fmt.Sprintf("The BSL %s is unavailable, cannot retrieve the backup", info.location.Name))
-		return backupInfo{}, nil, nil
-	}
+	// The location's phase is not checked: a per-job engine never validates
+	// the shared, unlabeled location, so it has no phase.
 
 	// Fill in the ScheduleName so it's easier to consume for metrics.
 	if restore.Spec.ScheduleName == "" {
@@ -647,17 +649,22 @@ func (r *restoreReconciler) runValidatedRestore(restore *api.Restore, info backu
 	if err != nil {
 		return errors.Wrap(err, "error setting up backup store to persist log and results files")
 	}
+	artifactWriter := newRestoreArtifactWriter(info.location, backupStore, restore, restoreLog)
 
 	if logReader, err := restoreLog.GetPersistFile(); err != nil {
 		restoreErrors.Velero = append(restoreErrors.Velero, fmt.Sprintf("error getting restore log reader: %v", err))
 	} else {
-		if err := backupStore.PutRestoreLog(restore.Spec.BackupName, restore.Name, logReader); err != nil {
-			restoreErrors.Velero = append(restoreErrors.Velero, fmt.Sprintf("error uploading log file to backup storage: %v", err))
+		if err := artifactWriter.WriteLog(restore.Name, logReader); err != nil {
+			restoreLog.WithError(err).WithFields(logrus.Fields{
+				"RestoreName":  restore.Name,
+				"ArtifactType": "RestoreLog",
+			}).Error("Error writing restore log")
+			restoreErrors.Velero = append(restoreErrors.Velero, fmt.Sprintf("error writing log file: %v", err))
 		}
 	}
 
-	// At this point, no further logs should be written to restoreLog since it's been uploaded
-	// to object storage.
+	// At this point, no further logs should be written to restoreLog since it's been persisted
+	// to artifact writer (either BackupStore or local filesystem).
 
 	restore.Status.Warnings = len(restoreWarnings.Velero) + len(restoreWarnings.Cluster)
 	for _, w := range restoreWarnings.Namespaces {
@@ -674,21 +681,30 @@ func (r *restoreReconciler) runValidatedRestore(restore *api.Restore, info backu
 		"errors":   restoreErrors,
 	}
 
-	if err := putResults(restore, m, backupStore); err != nil {
-		r.logger.WithError(err).Error("Error uploading restore results to backup storage")
+	if err := putResultsWithWriter(restore, m, artifactWriter); err != nil {
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"RestoreName": restore.Name,
+			"AccessMode":  string(info.location.Spec.AccessMode),
+		}).Error("Error writing restore results to artifact writer")
 	}
 
-	if err := putRestoredResourceList(restore, restoreReq.RestoredResourceList(), backupStore); err != nil {
-		r.logger.WithError(err).Error("Error uploading restored resource list to backup storage")
+	if err := putRestoredResourceListWithWriter(restore, restoreReq.RestoredResourceList(), artifactWriter); err != nil {
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"RestoreName": restore.Name,
+		}).Error("Error writing restored resource list to artifact writer")
 	}
 
-	if err := putOperationsForRestore(restore, *restoreReq.GetItemOperationsList(), backupStore); err != nil {
-		r.logger.WithError(err).Error("Error uploading restore item action operation resource list to backup storage")
+	if err := putOperationsWithWriter(restore, *restoreReq.GetItemOperationsList(), artifactWriter); err != nil {
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"RestoreName": restore.Name,
+		}).Error("Error writing restore item operations to artifact writer")
 	}
 
 	restoreReq.RestoreVolumeInfoTracker.Populate(context.TODO(), restoreReq.RestoredResourceList())
-	if err := putRestoreVolumeInfoList(restore, restoreReq.RestoreVolumeInfoTracker.Result(), backupStore); err != nil {
-		r.logger.WithError(err).Error("Error uploading restored volume info to backup storage")
+	if err := putRestoreVolumeInfoWithWriter(restore, restoreReq.RestoreVolumeInfoTracker.Result(), artifactWriter); err != nil {
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"RestoreName": restore.Name,
+		}).Error("Error writing restore volume info to artifact writer")
 	}
 
 	if restore.Status.Errors > 0 {
@@ -751,8 +767,11 @@ func (r *restoreReconciler) deleteExternalResources(restore *api.Restore) error 
 		return errors.Wrap(err, fmt.Sprintf("can't get backup info, backup: %s", restore.Spec.BackupName))
 	}
 
-	if !veleroutil.BSLIsAvailable(*backupInfo.location) {
-		return fmt.Errorf("bsl %s is unavailable, cannot get the backup info", backupInfo.location.Name)
+	// The objectstore is immutable, so deleting the restore files is bound
+	// to fail. Skip the delete calls altogether.
+	if backupInfo.location.GetAnnotations()[api.ObjectLockAnnotation] == "true" {
+		r.logger.Info("Immutable policy is enabled for this objectstore, skipping deletion of restore files in object storage")
+		return nil
 	}
 
 	// delete restore files in object storage
@@ -765,6 +784,10 @@ func (r *restoreReconciler) deleteExternalResources(restore *api.Restore) error 
 	}
 
 	if err = backupStore.DeleteRestore(restore.Name); err != nil {
+		if isObjectLockError(err) {
+			r.logger.WithError(err).Warn("Restore files are protected by an immutability policy. Skipping delete and not retrying.")
+			return nil
+		}
 		return errors.Wrap(err, fmt.Sprintf("can't delete restore files in object storage, backup: %s", restore.Spec.BackupName))
 	}
 
@@ -791,7 +814,25 @@ func putResults(restore *api.Restore, results map[string]results.Result, backupS
 	return nil
 }
 
-func putRestoredResourceList(restore *api.Restore, list map[string][]string, backupStore persistence.BackupStore) error {
+// putResultsWithWriter writes restore results to artifact writer
+func putResultsWithWriter(restore *api.Restore, results map[string]results.Result, writer backup_store.ArtifactWriter) error {
+	buf := new(bytes.Buffer)
+	gzw := gzip.NewWriter(buf)
+	defer gzw.Close()
+
+	if err := json.NewEncoder(gzw).Encode(results); err != nil {
+		return errors.Wrap(err, "error encoding restore results to JSON")
+	}
+
+	if err := gzw.Close(); err != nil {
+		return errors.Wrap(err, "error closing gzip writer")
+	}
+
+	return writer.WriteResults(restore.Name, buf)
+}
+
+// putRestoredResourceListWithWriter writes restored resource list to artifact writer
+func putRestoredResourceListWithWriter(restore *api.Restore, list map[string][]string, writer backup_store.ArtifactWriter) error {
 	buf := new(bytes.Buffer)
 	gzw := gzip.NewWriter(buf)
 	defer gzw.Close()
@@ -804,14 +845,11 @@ func putRestoredResourceList(restore *api.Restore, list map[string][]string, bac
 		return errors.Wrap(err, "error closing gzip writer")
 	}
 
-	if err := backupStore.PutRestoredResourceList(restore.Name, buf); err != nil {
-		return err
-	}
-
-	return nil
+	return writer.WriteRestoredResourceList(restore.Name, buf)
 }
 
-func putOperationsForRestore(restore *api.Restore, operations []*itemoperation.RestoreOperation, backupStore persistence.BackupStore) error {
+// putOperationsWithWriter writes restore item operations to artifact writer
+func putOperationsWithWriter(restore *api.Restore, operations []*itemoperation.RestoreOperation, writer backup_store.ArtifactWriter) error {
 	buf := new(bytes.Buffer)
 	gzw := gzip.NewWriter(buf)
 	defer gzw.Close()
@@ -824,14 +862,11 @@ func putOperationsForRestore(restore *api.Restore, operations []*itemoperation.R
 		return errors.Wrap(err, "error closing gzip writer")
 	}
 
-	if err := backupStore.PutRestoreItemOperations(restore.Name, buf); err != nil {
-		return err
-	}
-
-	return nil
+	return writer.WriteItemOperations(restore.Name, buf)
 }
 
-func putRestoreVolumeInfoList(restore *api.Restore, volInfoList []*volume.RestoreVolumeInfo, store persistence.BackupStore) error {
+// putRestoreVolumeInfoWithWriter writes restore volume info to artifact writer
+func putRestoreVolumeInfoWithWriter(restore *api.Restore, volInfoList []*volume.RestoreVolumeInfo, writer backup_store.ArtifactWriter) error {
 	buf := new(bytes.Buffer)
 	gzw := gzip.NewWriter(buf)
 	defer gzw.Close()
@@ -844,7 +879,38 @@ func putRestoreVolumeInfoList(restore *api.Restore, volInfoList []*volume.Restor
 		return errors.Wrap(err, "error closing gzip writer")
 	}
 
-	return store.PutRestoreVolumeInfo(restore.Name, buf)
+	return writer.WriteVolumeInfo(restore.Name, buf)
+}
+
+// isBackupStorageLocationReadOnly checks if a BackupStorageLocation has ReadOnly AccessMode
+func isBackupStorageLocationReadOnly(location *api.BackupStorageLocation) bool {
+	if location == nil {
+		return false
+	}
+	return location.Spec.AccessMode == api.BackupStorageLocationAccessModeReadOnly
+}
+
+// restoreArtifactsDir is where a ReadOnly location's restore artifacts are
+// written; kubeagent copies them out of the engine pod. Tests replace it.
+var restoreArtifactsDir = backup_store.DefaultBasePath
+
+// newRestoreArtifactWriter writes a restore's log and results to the backup
+// store, or to the local file system when the storage location is ReadOnly.
+func newRestoreArtifactWriter(location *api.BackupStorageLocation, backupStore persistence.BackupStore,
+	restore *api.Restore, log logrus.FieldLogger) backup_store.ArtifactWriter {
+	if isBackupStorageLocationReadOnly(location) {
+		log.WithFields(logrus.Fields{
+			"AccessMode":       "ReadOnly",
+			"RestoreName":      restore.Name,
+			"ScratchDirectory": restoreArtifactsDir,
+		}).Info("BackupStorageLocation is ReadOnly. Artifacts will be written to local filesystem instead of object storage")
+		return backup_store.NewLocalArtifactWriterWithPath(restoreArtifactsDir, log)
+	}
+	log.WithFields(logrus.Fields{
+		"AccessMode":  "ReadWrite",
+		"RestoreName": restore.Name,
+	}).Debug("BackupStorageLocation is ReadWrite. Artifacts will be written to BackupStore")
+	return backup_store.NewBackupStoreArtifactWriter(backupStore, restore.Spec.BackupName, log)
 }
 
 func downloadToTempFile(backupName string, backupStore persistence.BackupStore, logger logrus.FieldLogger) (*os.File, error) {

@@ -139,6 +139,12 @@ type RestoreSpec struct {
 	// +optional
 	// +nullable
 	UploaderConfig *UploaderConfigForRestore `json:"uploaderConfig,omitempty"`
+
+	// IncludeNamedResources specifies the specific resources by name to include in the restore.
+	// The key is the plural resource name and the value is a comma-separated list of resource identifiers.
+	// For namespaced resources, use "namespace/objectname"; for cluster-scoped resources, simply "objectname".
+	// +optional
+	IncludeNamedResources map[string]string `json:"includeNamedResources,omitempty"`
 }
 
 // UploaderConfigForRestore defines the configuration for the restore.
@@ -409,8 +415,8 @@ type RestoreProgress struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:object:generate=true
 // +kubebuilder:storageversion
-// +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=create;delete;get;list;patch;update;watch
-// +kubebuilder:rbac:groups=velero.io,resources=restores/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=restores,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=restores/status,verbs=get;update;patch
 
 // Restore is a Velero resource that represents the application of
 // resources from a Velero backup to a target Kubernetes cluster.

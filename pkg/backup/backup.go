@@ -43,6 +43,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/velero/internal/hook"
@@ -127,6 +129,20 @@ type kubernetesBackupper struct {
 	pluginManager             func(logrus.FieldLogger) clientmgmt.Manager
 	backupStoreGetter         persistence.ObjectBackupStoreGetter
 }
+
+type veleroConfig struct {
+	ExcludedPvcs map[string]bool
+}
+
+const (
+	CloudCasaNamespace = "cloudcasa-io"
+
+	// VeleroConfigMapPrefix is the name prefix of the configmap used to store configuration parameters
+	VeleroConfigMapPrefix = "cloudcasa-io-velero-config-"
+)
+
+// getVeleroConfig reads the job's CloudCasa Velero ConfigMap; tests replace it.
+var getVeleroConfig = GetVeleroConfig
 
 func (i *itemKey) String() string {
 	return fmt.Sprintf("resource=%s,namespace=%s,name=%s", i.resource, i.namespace, i.name)
@@ -444,7 +460,23 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		pageSize:              kb.clientPageSize,
 	}
 
-	items := collector.getAllItems()
+	// A backup scoped by IncludeNamedResources collects exactly the named objects
+	// instead of applying the namespace, resource and label filters.
+	var items []*kubernetesResource
+	if len(backupRequest.Backup.Spec.IncludeNamedResources) > 0 {
+		log.Infof("IncludeNamedResources: IncludeNamedResources specified in Backup spec: %v", backupRequest.Backup.Spec.IncludeNamedResources)
+		resourceIDs := parseIncludeNamedResources(backupRequest.Backup.Spec.IncludeNamedResources, log)
+		log.Infof("IncludeNamedResources: Parsed %d resource identifiers", len(resourceIDs))
+		for i, rid := range resourceIDs {
+			log.Infof("ResourceIdentifier[%d]: GroupResource=%s, Namespace='%s', Name='%s'",
+				i, rid.GroupResource.String(), rid.Namespace, rid.Name)
+		}
+		items = collector.getItemsFromResourceIdentifiers(resourceIDs)
+		log.Infof("IncludeNamedResources: Collected %d items using getItemsFromResourceIdentifiers", len(items))
+	} else {
+		log.Infof("No IncludeNamedResources specified; using default item collection with getAllItems")
+		items = collector.getAllItems()
+	}
 	log.WithField("progress", "").Infof("Collected %d items matching the backup spec from the Kubernetes API (actual number of items backed up may be more or less depending on velero.io/exclude-from-backup annotation, plugins returning additional related items to back up, etc.)", len(items))
 
 	updated := backupRequest.Backup.DeepCopy()
@@ -480,6 +512,11 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		return err
 	}
 
+	veleroConfig, err := getVeleroConfig(log, backupRequest.Backup.Name)
+	if err != nil {
+		return errors.Wrap(err, "Failed to get velero configuration")
+	}
+
 	itemBackupper := &itemBackupper{
 		backupRequest:            backupRequest,
 		tarWriter:                tw,
@@ -496,6 +533,7 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		hookTracker:         hook.NewHookTracker(),
 		volumeHelperImpl:    volumeHelperImpl,
 		kubernetesBackupper: kb,
+		excludedPvcs:        veleroConfig.ExcludedPvcs,
 	}
 
 	// helper struct to send current progress between the main
@@ -796,11 +834,13 @@ func (kb *kubernetesBackupper) executeItemBlockActions(
 
 			item, err := client.Get(relatedItem.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
+				// Info, not a warning: the item's own action reports the missing
+				// object ("Additional item was not found"), as in v1.14.0.x.
 				log.WithFields(logrus.Fields{
 					"groupResource": relatedItem.GroupResource,
 					"namespace":     relatedItem.Namespace,
 					"name":          relatedItem.Name,
-				}).Warnf("Related item was not found in Kubernetes API, can't add to item block")
+				}).Infof("Related item was not found in Kubernetes API, can't add to item block")
 				continue
 			}
 			if err != nil {
@@ -897,7 +937,7 @@ func (kb *kubernetesBackupper) handleItemBlockPreHooks(itemBlock *BackupItemBloc
 	var failedPods []itemblock.ItemBlockItem
 	var errs []error
 	for _, pod := range hookPods {
-		err := itemBlock.itemBackupper.itemHookHandler.HandleHooks(itemBlock.Log, pod.Gr, pod.Item, itemBlock.itemBackupper.backupRequest.ResourceHooks, hook.PhasePre, itemBlock.itemBackupper.hookTracker)
+		err := itemBlock.itemBackupper.itemHookHandler.HandleHooks(podHookLog(itemBlock.Log, pod), pod.Gr, pod.Item, itemBlock.itemBackupper.backupRequest.ResourceHooks, hook.PhasePre, itemBlock.itemBackupper.hookTracker)
 		if err == nil {
 			successPods = append(successPods, pod)
 		} else {
@@ -906,6 +946,16 @@ func (kb *kubernetesBackupper) handleItemBlockPreHooks(itemBlock *BackupItemBloc
 		}
 	}
 	return successPods, failedPods, errs
+}
+
+// podHookLog names the pod on its hook lines, as v1.14.0.x's per-item logger
+// did; CloudCasa's catalog reads name, namespace and resource from them.
+func podHookLog(log logrus.FieldLogger, pod itemblock.ItemBlockItem) logrus.FieldLogger {
+	return log.WithFields(logrus.Fields{
+		"name":      pod.Item.GetName(),
+		"resource":  pod.Gr.String(),
+		"namespace": pod.Item.GetNamespace(),
+	})
 }
 
 // The hooks cannot execute until the PVBs to be processed
@@ -919,7 +969,7 @@ func (kb *kubernetesBackupper) handleItemBlockPostHooks(itemBlock *BackupItemBlo
 	}
 
 	for _, pod := range hookPods {
-		if err := itemBlock.itemBackupper.itemHookHandler.HandleHooks(itemBlock.Log, pod.Gr, pod.Item, itemBlock.itemBackupper.backupRequest.ResourceHooks,
+		if err := itemBlock.itemBackupper.itemHookHandler.HandleHooks(podHookLog(itemBlock.Log, pod), pod.Gr, pod.Item, itemBlock.itemBackupper.backupRequest.ResourceHooks,
 			hook.PhasePost, itemBlock.itemBackupper.hookTracker); err != nil {
 			log.WithError(err).WithField("name", pod.Item.GetName()).Error("Error running post hooks for pod")
 		}
@@ -1497,4 +1547,93 @@ func resolveNamespacedFilterPolicies(
 		}
 	}
 	return result, patternOrder, nil
+}
+
+// parseIncludeNamedResources turns {"<resource>": "ns/name,name"} into resource
+// identifiers: "ns/name" is a namespaced object, a bare "name" is cluster-scoped.
+func parseIncludeNamedResources(includeMap map[string]string, log logrus.FieldLogger) []velero.ResourceIdentifier {
+	var resourceIDs []velero.ResourceIdentifier
+	log.Infof("Starting to parse IncludeNamedResources: %v", includeMap)
+
+	for resourceType, namesStr := range includeMap {
+		log.Infof("Parsing resource type '%s' with names string: '%s'", resourceType, namesStr)
+		for _, n := range strings.Split(namesStr, ",") {
+			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
+			var ns, name string
+			if strings.Contains(n, "/") {
+				parts := strings.SplitN(n, "/", 2)
+				ns, name = parts[0], parts[1]
+				log.Infof("Parsed namespaced resource identifier: namespace='%s', name='%s'", ns, name)
+			} else {
+				name = n
+				log.Infof("Parsed cluster-scoped resource identifier: name='%s'", name)
+			}
+			resourceID := velero.ResourceIdentifier{
+				GroupResource: schema.ParseGroupResource(resourceType),
+				Namespace:     ns,
+				Name:          name,
+			}
+			resourceIDs = append(resourceIDs, resourceID)
+			log.Debugf("Appended ResourceIdentifier: %+v", resourceID)
+		}
+	}
+
+	log.Infof("Completed parsing IncludeNamedResources: parsed %d identifiers", len(resourceIDs))
+	return resourceIDs
+}
+
+// GetVeleroConfig reads the job's cloudcasa-io-velero-config-<job> ConfigMap.
+// A missing ConfigMap means no configuration.
+func GetVeleroConfig(log logrus.FieldLogger, jobID string) (*veleroConfig, error) {
+	clientset, err := GetClientset(log)
+	if err != nil {
+		return nil, err
+	}
+	return getVeleroConfigFrom(clientset, log, jobID)
+}
+
+func getVeleroConfigFrom(clientset kubernetes.Interface, log logrus.FieldLogger, jobID string) (*veleroConfig, error) {
+	configmapName := VeleroConfigMapPrefix + jobID
+	configMap, err := clientset.CoreV1().ConfigMaps(CloudCasaNamespace).Get(context.TODO(), configmapName,
+		metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Infof("Velero configuration configmap %q not found", configmapName)
+			return &veleroConfig{}, nil
+		}
+		log.Error(errors.Wrapf(err, "Failed to get %q configmap in %q namespace", configmapName, CloudCasaNamespace))
+		return nil, err
+	}
+
+	var excludedPvcs map[string]bool
+	if excludedPvcsJSON, found := configMap.BinaryData["excludedPvcs"]; found {
+		if err := json.Unmarshal(excludedPvcsJSON, &excludedPvcs); err != nil {
+			log.Error(errors.Wrapf(err, "Failed to parse excludedPvcs value %q from %q",
+				string(excludedPvcsJSON), configmapName))
+			return nil, err
+		}
+	}
+
+	return &veleroConfig{
+		ExcludedPvcs: excludedPvcs,
+	}, nil
+}
+
+func GetClientset(log logrus.FieldLogger) (*kubernetes.Clientset, error) {
+	// creates the in-cluster config
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Error(errors.Wrap(err, "Failed to create in-cluster config"))
+		return nil, err
+	}
+	// creates the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Error(errors.Wrap(err, "Failed to create in-cluster clientset"))
+		return nil, err
+	}
+	return clientset, nil
 }

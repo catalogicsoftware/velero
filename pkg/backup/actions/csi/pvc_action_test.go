@@ -156,7 +156,7 @@ func TestExecute(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "velero.io/v1",
+							APIVersion: "cloudcasa.io/v1",
 							Kind:       "Backup",
 							Name:       "test",
 							UID:        "",
@@ -293,7 +293,11 @@ func TestExecute(t *testing.T) {
 						ReadyToUse:                     &readyToUse,
 					}
 					err = pvcBIA.crClient.Update(t.Context(), &vsList.Items[0])
-					reconcileErrCh <- err
+					if err != nil {
+						reconcileErrCh <- err
+						return
+					}
+					reconcileErrCh <- rewriteUntilObserved(t.Context(), pvcBIA.crClient, crclient.ObjectKeyFromObject(&vsList.Items[0]), vscName)
 				}()
 			}
 
@@ -557,16 +561,16 @@ func TestPVCAppliesTo(t *testing.T) {
 
 func TestNewPVCBackupItemAction(t *testing.T) {
 	logger := logrus.StandardLogger()
-	crClient := velerotest.NewFakeControllerRuntimeClient(t)
+	crClient := velerotest.NewFakeControllerRuntimeWatchClient(t)
 
 	f := &factorymocks.Factory{}
-	f.On("KubebuilderClient").Return(nil, fmt.Errorf(""))
+	f.On("KubebuilderWatchClient").Return(nil, fmt.Errorf(""))
 	plugin := NewPvcBackupItemAction(f)
 	_, err := plugin(logger)
 	require.Error(t, err)
 
 	f1 := &factorymocks.Factory{}
-	f1.On("KubebuilderClient").Return(crClient, nil)
+	f1.On("KubebuilderWatchClient").Return(crClient, nil)
 	plugin1 := NewPvcBackupItemAction(f1)
 	_, err1 := plugin1(logger)
 	require.NoError(t, err1)

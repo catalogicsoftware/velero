@@ -84,14 +84,15 @@ func (c *scheduleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			Predicates: []predicate.Predicate{pred},
 		})
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1.Schedule{}, bld.WithPredicates(kube.SpecChangePredicate{}, pred)).
 		WatchesRawSource(s).
 		Complete(c)
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=schedules,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=schedules/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=create
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=schedules,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=schedules/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backups,verbs=create
 
 func (c *scheduleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := c.logger.WithField("schedule", req.String())
@@ -105,6 +106,9 @@ func (c *scheduleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting schedule %s", req.String())
+	}
+	if skipForeign(log, schedule) {
+		return ctrl.Result{}, nil
 	}
 	c.metrics.InitSchedule(schedule.Name)
 

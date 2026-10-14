@@ -17,6 +17,7 @@ limitations under the License.
 package csi
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -377,6 +378,29 @@ func TestEnsureDeleteVS(t *testing.T) {
 			err: "timeout to assure VolumeSnapshot fake-vs is deleted, finalizers in VS []",
 		},
 		{
+			name:      "wait timeout before the VS is ever retrieved",
+			vsName:    "fake-vs",
+			namespace: "fake-ns",
+			clientObj: []runtime.Object{vsObjWithFinalizer},
+			reactors: []reactor{
+				{
+					verb:     "delete",
+					resource: "volumesnapshots",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, nil
+					},
+				},
+				{
+					verb:     "get",
+					resource: "volumesnapshots",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, context.DeadlineExceeded
+					},
+				},
+			},
+			err: "timeout to assure VolumeSnapshot fake-vs is deleted",
+		},
+		{
 			name:      "success",
 			vsName:    "fake-vs",
 			namespace: "fake-ns",
@@ -486,6 +510,28 @@ func TestEnsureDeleteVSC(t *testing.T) {
 				},
 			},
 			err: "timeout to assure VolumeSnapshotContent fake-vsc is deleted, finalizers in VSC []",
+		},
+		{
+			name:      "wait timeout before the VSC is ever retrieved",
+			vscName:   "fake-vsc",
+			clientObj: []runtime.Object{vscObjWithFinalizer},
+			reactors: []reactor{
+				{
+					verb:     "delete",
+					resource: "volumesnapshotcontents",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, nil
+					},
+				},
+				{
+					verb:     "get",
+					resource: "volumesnapshotcontents",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, context.DeadlineExceeded
+					},
+				},
+			},
+			err: "timeout to assure VolumeSnapshotContent fake-vsc is deleted",
 		},
 		{
 			name:      "success",
@@ -840,7 +886,7 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "foo",
 			Annotations: map[string]string{
-				"velero.io/csi-volumesnapshot-class_foo.csi.k8s.io": "foowithoutlabel",
+				velerov1api.VolumeSnapshotClassDriverBackupAnnotationPrefix + "_foo.csi.k8s.io": "foowithoutlabel",
 			},
 		},
 		Spec: velerov1api.BackupSpec{
@@ -851,7 +897,7 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "foo2",
 			Annotations: map[string]string{
-				"velero.io/csi-volumesnapshot-class_foo.csi.k8s.io": "foo2",
+				velerov1api.VolumeSnapshotClassDriverBackupAnnotationPrefix + "_foo.csi.k8s.io": "foo2",
 			},
 		},
 		Spec: velerov1api.BackupSpec{
@@ -863,7 +909,7 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "bar",
 			Annotations: map[string]string{
-				"velero.io/csi-volumesnapshot-class_bar.csi.k8s.io": "bar2",
+				velerov1api.VolumeSnapshotClassDriverBackupAnnotationPrefix + "_bar.csi.k8s.io": "bar2",
 			},
 		},
 		Spec: velerov1api.BackupSpec{
@@ -885,7 +931,7 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "foo",
 			Annotations: map[string]string{
-				"velero.io/csi-volumesnapshot-class": "foowithoutlabel",
+				velerov1api.VolumeSnapshotClassDriverPVCAnnotation: "foowithoutlabel",
 			},
 		},
 		Spec: corev1api.PersistentVolumeClaimSpec{},
@@ -894,7 +940,7 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "foo",
 			Annotations: map[string]string{
-				"velero.io/csi-volumesnapshot-class": "foo2",
+				velerov1api.VolumeSnapshotClassDriverPVCAnnotation: "foo2",
 			},
 		},
 		Spec: corev1api.PersistentVolumeClaimSpec{},
@@ -953,7 +999,16 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 		Driver: "bar.csi.k8s.io",
 	}
 
-	objs := []runtime.Object{hostpathClass, fooClass, barClass, fooClassWithoutLabel, barClass2}
+	// A single, unlabeled VSC for a driver. Selected implicitly via the
+	// single-match fallback only when that fallback is allowed.
+	hpeClassUnlabeled := &snapshotv1api.VolumeSnapshotClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "hpe-snapclass",
+		},
+		Driver: "csi.hpe.com",
+	}
+
+	objs := []runtime.Object{hostpathClass, fooClass, barClass, fooClassWithoutLabel, barClass2, hpeClassUnlabeled}
 	fakeClient := velerotest.NewFakeControllerRuntimeClient(t, objs...)
 
 	testCases := []struct {
@@ -1013,10 +1068,10 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:        "no snapshotClass for given driver",
+			name:        "no snapshotClass for a required driver fails",
 			driverName:  "blah.csi.k8s.io",
 			pvc:         pvcNone,
-			backup:      backupNone,
+			backup:      builder.ForBackup("velero", "blah").ObjectMeta(builder.WithAnnotations(velerov1api.SnapshotClassRequiredDriversAnnotation, "blah.csi.k8s.io")).Result(),
 			expectedVSC: nil,
 			expectError: true,
 		},
@@ -1028,19 +1083,136 @@ func TestGetVolumeSnapshotClass(t *testing.T) {
 			expectedVSC: fooClass,
 			expectError: false,
 		},
+		{
+			name:       "required driver with no VSC at all fails fast instead of auto-creating",
+			driverName: "nutanix.csi.k8s.io",
+			pvc:        pvcNone,
+			backup: &velerov1api.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "requires-manual-vsc",
+					Annotations: map[string]string{
+						velerov1api.SnapshotClassRequiredDriversAnnotation: "csi.hpe.com, nutanix.csi.k8s.io",
+					},
+				},
+			},
+			expectedVSC: nil,
+			expectError: true,
+		},
+		{
+			name:       "required driver with a single UNLABELED VSC fails fast (implicit match disabled)",
+			driverName: "csi.hpe.com",
+			pvc:        pvcNone,
+			backup: &velerov1api.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "requires-manual-vsc",
+					Annotations: map[string]string{
+						velerov1api.SnapshotClassRequiredDriversAnnotation: "csi.hpe.com",
+					},
+				},
+			},
+			expectedVSC: nil,
+			expectError: true,
+		},
+		{
+			name:        "non-required driver with a single UNLABELED VSC is auto-selected via single-match",
+			driverName:  "csi.hpe.com",
+			pvc:         pvcNone,
+			backup:      backupNone,
+			expectedVSC: hpeClassUnlabeled,
+			expectError: false,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			actualSnapshotClass, actualError := GetVolumeSnapshotClass(
 				tc.driverName, tc.backup, tc.pvc, logrus.New(), fakeClient)
 			if tc.expectError {
-				require.Error(t, actualError)
+				assert.NotNil(t, actualError)
 				assert.Nil(t, actualSnapshotClass)
 				return
 			}
 			assert.Equal(t, tc.expectedVSC, actualSnapshotClass)
 		})
 	}
+}
+
+func TestGetSnapshotClassRequiredDrivers(t *testing.T) {
+	testCases := []struct {
+		name     string
+		backup   *velerov1api.Backup
+		expected []string
+	}{
+		{
+			name:     "nil backup returns empty set",
+			backup:   nil,
+			expected: []string{},
+		},
+		{
+			name:     "annotation absent returns empty set",
+			backup:   &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Name: "b"}},
+			expected: []string{},
+		},
+		{
+			name: "empty annotation returns empty set",
+			backup: &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				velerov1api.SnapshotClassRequiredDriversAnnotation: "",
+			}}},
+			expected: []string{},
+		},
+		{
+			name: "comma-separated values are split and trimmed",
+			backup: &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				velerov1api.SnapshotClassRequiredDriversAnnotation: " csi.hpe.com , nutanix.csi.hpe.com,cephfs.csi.ceph.com , ",
+			}}},
+			expected: []string{"cephfs.csi.ceph.com", "csi.hpe.com", "nutanix.csi.hpe.com"},
+		},
+		{
+			name: "values are lower-cased for case-insensitive matching",
+			backup: &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				velerov1api.SnapshotClassRequiredDriversAnnotation: "CSI.HPE.COM,Nutanix.CSI.HPE.com",
+			}}},
+			expected: []string{"csi.hpe.com", "nutanix.csi.hpe.com"},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := GetSnapshotClassRequiredDrivers(tc.backup)
+			assert.Equal(t, tc.expected, got.List())
+		})
+	}
+}
+
+func TestSnapshotClassDriverRequired(t *testing.T) {
+	backup := &velerov1api.Backup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		velerov1api.SnapshotClassRequiredDriversAnnotation: "csi.hpe.com,cephfs.csi.ceph.com",
+	}}}
+
+	assert.True(t, snapshotClassDriverRequired(backup, "csi.hpe.com"))
+	// provisioner casing differs from the annotation but should still match.
+	assert.True(t, snapshotClassDriverRequired(backup, "CSI.HPE.COM"))
+	assert.False(t, snapshotClassDriverRequired(backup, "hostpath.csi.k8s.io"))
+	assert.False(t, snapshotClassDriverRequired(nil, "csi.hpe.com"))
+}
+
+func TestSnapshotClassRequiredError(t *testing.T) {
+	scName := "hpe-standard"
+	pvc := &corev1api.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "data"},
+		Spec:       corev1api.PersistentVolumeClaimSpec{StorageClassName: &scName},
+	}
+
+	err := snapshotClassRequiredError("csi.hpe.com", pvc)
+	require.Error(t, err)
+	msg := err.Error()
+	// The message must name the driver, PVC, and StorageClass to stay actionable.
+	assert.Contains(t, msg, `"csi.hpe.com"`)
+	assert.Contains(t, msg, "ns1/data")
+	assert.Contains(t, msg, `"hpe-standard"`)
+
+	// Defensive path: nil PVC renders explicit placeholders, not empty fields.
+	errNil := snapshotClassRequiredError("csi.hpe.com", nil)
+	require.Error(t, errNil)
+	assert.Contains(t, errNil.Error(), "<unknown>")
 }
 
 func TestGetVolumeSnapshotClassForStorageClass(t *testing.T) {
@@ -1146,10 +1318,10 @@ func TestGetVolumeSnapshotClassForStorageClass(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actualVSC, actualError := GetVolumeSnapshotClassForStorageClass(tc.driverName, snapshotClasses)
+			actualVSC, actualError := GetVolumeSnapshotClassForStorageClass(tc.driverName, snapshotClasses, true)
 
 			if tc.expectError {
-				require.Error(t, actualError)
+				assert.NotNil(t, actualError)
 				assert.Nil(t, actualVSC)
 				return
 			}
@@ -1680,13 +1852,29 @@ func TestWaitUntilVSCHandleIsReady(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actualVSC, actualError := WaitUntilVSCHandleIsReady(tc.volSnap, fakeClient, logrus.New().WithField("fake", "test"), 0)
-			if tc.expectError && actualError == nil {
+			// The progress report needs the backup label, which every VolumeSnapshot
+			// created by the backup carries. The watch shares one deadline, so a
+			// failing case is bounded by a short timeout.
+			volSnap := tc.volSnap.DeepCopy()
+			if volSnap.Labels == nil {
+				volSnap.Labels = map[string]string{}
+			}
+			volSnap.Labels[velerov1api.BackupNameLabel] = "backup-1"
+			timeout := 30 * time.Second
+			if tc.expectError {
+				timeout = time.Second
+			}
+
+			actualVSC, actualError := WaitUntilVSCHandleIsReady(volSnap, fakeClient, logrus.New().WithField("fake", "test"), timeout)
+			if tc.expectError {
 				require.Error(t, actualError)
 				assert.Nil(t, actualVSC)
 				return
 			}
-			assert.Equal(t, tc.exepctedVSC, actualVSC)
+			require.NoError(t, actualError)
+			assert.Equal(t, tc.exepctedVSC.Name, actualVSC.Name)
+			assert.Equal(t, tc.exepctedVSC.Status.SnapshotHandle, actualVSC.Status.SnapshotHandle)
+			assert.Equal(t, volSnap.Namespace, actualVSC.Annotations["cc-pvc-namespace"])
 		})
 	}
 }
@@ -2005,6 +2193,208 @@ func TestGetVSCForVS(t *testing.T) {
 
 			if tc.expectedVSC != nil {
 				require.True(t, cmp.Equal(tc.expectedVSC, vsc, cmpopts.IgnoreFields(snapshotv1api.VolumeSnapshotContent{}, "ResourceVersion")))
+			}
+		})
+	}
+}
+
+// With no class for a driver that is not required, a Retain class
+// "cloudcasa-<driver>" carrying the selector label is created and used.
+func TestGetVolumeSnapshotClassCreatesFallbackClass(t *testing.T) {
+	fakeClient := velerotest.NewFakeControllerRuntimeClient(t)
+	backup := builder.ForBackup("velero", "b").Result()
+	pvc := builder.ForPersistentVolumeClaim("ns", "pvc").Result()
+
+	vsc, err := GetVolumeSnapshotClass("blah.csi.k8s.io", backup, pvc, logrus.New(), fakeClient)
+	require.NoError(t, err)
+	require.NotNil(t, vsc)
+	assert.Equal(t, "cloudcasa-blah-csi-k8s-io", vsc.Name)
+	assert.Equal(t, "blah.csi.k8s.io", vsc.Driver)
+	assert.Equal(t, snapshotv1api.VolumeSnapshotContentRetain, vsc.DeletionPolicy)
+	assert.Equal(t, "true", vsc.Labels[velerov1api.VolumeSnapshotClassSelectorLabel])
+
+	// A second backup finds the created class through the selector label.
+	again, err := GetVolumeSnapshotClass("blah.csi.k8s.io", backup, pvc, logrus.New(), fakeClient)
+	require.NoError(t, err)
+	assert.Equal(t, "cloudcasa-blah-csi-k8s-io", again.Name)
+}
+
+// The wait watches the objects, so it returns as soon as the snapshot is bound
+// and handled instead of on the next poll (KUBEDR-7625).
+func TestWaitUntilVSCHandleIsReadyReactsToLaterBinding(t *testing.T) {
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).
+		SourcePVC("pvc-1").Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs)
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		bound := vs.DeepCopy()
+		require.NoError(t, client.Get(t.Context(), crclient.ObjectKeyFromObject(vs), bound))
+		vscName := "vsc-1"
+		bound.Status = &snapshotv1api.VolumeSnapshotStatus{BoundVolumeSnapshotContentName: &vscName}
+		require.NoError(t, client.Update(t.Context(), bound))
+		handle := "handle-1"
+		require.NoError(t, client.Create(t.Context(),
+			builder.ForVolumeSnapshotContent(vscName).Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}).Result()))
+	}()
+
+	start := time.Now()
+	vsc, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), time.Minute)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Equal(t, "vsc-1", vsc.Name)
+	assert.Equal(t, "handle-1", *vsc.Status.SnapshotHandle)
+	assert.Equal(t, "pvc-1", vsc.Annotations["cc-pvc-name"])
+	assert.Equal(t, "ns", vsc.Annotations["cc-pvc-namespace"])
+	assert.Equal(t, "vsc-1", *vs.Status.BoundVolumeSnapshotContentName, "the caller's VolumeSnapshot gets the live status")
+	assert.Less(t, elapsed, 3*time.Second, "a 5s poll would not have returned yet")
+}
+
+// recordSnapshotProgress captures the last state the wait reports to kubeagent.
+func recordSnapshotProgress(t *testing.T) *[2]string {
+	t.Helper()
+	last := &[2]string{}
+	previous := reportSnapshotProgress
+	reportSnapshotProgress = func(_ *corev1api.PersistentVolumeClaim, _ *snapshotv1api.VolumeSnapshot,
+		_ *snapshotv1api.VolumeSnapshotContent, state, message, _ string, _ logrus.FieldLogger) error {
+		last[0], last[1] = state, message
+		return nil
+	}
+	t.Cleanup(func() { reportSnapshotProgress = previous })
+	return last
+}
+
+// A snapshot that never binds must end as "error" for kubeagent, not "pending".
+func TestWaitUntilVSCHandleIsReadyReportsErrorWhenNeverBound(t *testing.T) {
+	last := recordSnapshotProgress(t)
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs)
+
+	_, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), time.Second)
+
+	require.Error(t, err)
+	assert.Equal(t, "error", last[0])
+	assert.Contains(t, last[1], "ns/vs-1")
+}
+
+// A content that never gets a handle must also end as "error".
+func TestWaitUntilVSCHandleIsReadyReportsErrorWhenNoHandle(t *testing.T) {
+	last := recordSnapshotProgress(t)
+	vscName := "vsc-1"
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).
+		Status().BoundVolumeSnapshotContentName(vscName).Result()
+	vsc := builder.ForVolumeSnapshotContent(vscName).Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs, vsc)
+
+	_, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), time.Second)
+
+	require.Error(t, err)
+	assert.Equal(t, "error", last[0])
+	assert.Contains(t, last[1], vscName)
+}
+
+// A content error without a message must not crash the wait; it still ends as "error".
+func TestWaitUntilVSCHandleIsReadyWithAnErrorWithoutMessage(t *testing.T) {
+	last := recordSnapshotProgress(t)
+	vscName := "vsc-1"
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).
+		Status().BoundVolumeSnapshotContentName(vscName).Result()
+	vsc := builder.ForVolumeSnapshotContent(vscName).
+		Status(&snapshotv1api.VolumeSnapshotContentStatus{Error: &snapshotv1api.VolumeSnapshotError{}}).Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs, vsc)
+
+	_, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), time.Second)
+
+	require.Error(t, err)
+	assert.Equal(t, "error", last[0])
+	assert.Contains(t, last[1], vscName)
+}
+
+// A driver error that appears while waiting is what the timeout must report.
+func TestWaitUntilVSCHandleIsReadyReportsLateDriverError(t *testing.T) {
+	last := recordSnapshotProgress(t)
+	vscName := "vsc-1"
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).
+		Status().BoundVolumeSnapshotContentName(vscName).Result()
+	vsc := builder.ForVolumeSnapshotContent(vscName).Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs, vsc)
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		failed := &snapshotv1api.VolumeSnapshotContent{}
+		require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: vscName}, failed))
+		message := "driver refused the snapshot"
+		failed.Status = &snapshotv1api.VolumeSnapshotContentStatus{Error: &snapshotv1api.VolumeSnapshotError{Message: &message}}
+		require.NoError(t, client.Update(t.Context(), failed))
+	}()
+
+	_, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), 1500*time.Millisecond)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "driver refused the snapshot")
+	assert.Equal(t, "error", last[0])
+	assert.Contains(t, last[1], "driver refused the snapshot")
+}
+
+// CloudCasa keeps the backup's VolumeSnapshotContent in the cluster (D1): its
+// snapshot gate and its failed-backup cleanup find it by the backup label.
+func TestDeleteVolumeSnapshotKeepsContent(t *testing.T) {
+	handle := "snap-handle-1"
+	newVS := func(bound bool) *snapshotv1api.VolumeSnapshot {
+		b := builder.ForVolumeSnapshot("ns", "vs-1").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1"))
+		if bound {
+			b = b.Status().BoundVolumeSnapshotContentName("vsc-1")
+		}
+		return b.Result()
+	}
+	newVSC := func(policy snapshotv1api.DeletionPolicy) *snapshotv1api.VolumeSnapshotContent {
+		return builder.ForVolumeSnapshotContent("vsc-1").
+			ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1"),
+				builder.WithAnnotations("cc-pvc-name", "pvc-1", "cc-pvc-namespace", "ns")).
+			DeletionPolicy(policy).
+			VolumeSnapshotRef("ns", "vs-1", "uid-1").
+			Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}).Result()
+	}
+
+	tests := []struct {
+		name        string
+		vs          *snapshotv1api.VolumeSnapshot
+		vsc         *snapshotv1api.VolumeSnapshotContent
+		vsDeleted   bool
+		recreated   bool
+		finalPolicy snapshotv1api.DeletionPolicy
+	}{
+		{"bound VS with Delete content: VS deleted, content re-created as Retain", newVS(true), newVSC(snapshotv1api.VolumeSnapshotContentDelete), true, true, snapshotv1api.VolumeSnapshotContentRetain},
+		{"unbound VS with Delete content: nothing deleted", newVS(false), newVSC(snapshotv1api.VolumeSnapshotContentDelete), false, false, snapshotv1api.VolumeSnapshotContentDelete},
+		{"unbound VS with Retain content: VS deleted, content untouched", newVS(false), newVSC(snapshotv1api.VolumeSnapshotContentRetain), true, false, snapshotv1api.VolumeSnapshotContentRetain},
+		{"bound VS with Retain content: VS deleted, content untouched", newVS(true), newVSC(snapshotv1api.VolumeSnapshotContentRetain), true, false, snapshotv1api.VolumeSnapshotContentRetain},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := velerotest.NewFakeControllerRuntimeClient(t, tc.vs, tc.vsc)
+
+			DeleteVolumeSnapshot(*tc.vs, *tc.vsc, builder.ForBackup("velero", "backup-1").Result(), client, logrus.New())
+
+			err := client.Get(t.Context(), crclient.ObjectKeyFromObject(tc.vs), &snapshotv1api.VolumeSnapshot{})
+			assert.Equal(t, tc.vsDeleted, apierrors.IsNotFound(err), "VolumeSnapshot deleted")
+
+			vsc := &snapshotv1api.VolumeSnapshotContent{}
+			require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: "vsc-1"}, vsc), "content must stay in the cluster")
+			assert.Equal(t, tc.finalPolicy, vsc.Spec.DeletionPolicy)
+			assert.Equal(t, "backup-1", vsc.Labels[velerov1api.BackupNameLabel])
+			assert.Equal(t, "pvc-1", vsc.Annotations["cc-pvc-name"])
+			if tc.recreated {
+				require.NotNil(t, vsc.Spec.Source.SnapshotHandle)
+				assert.Equal(t, handle, *vsc.Spec.Source.SnapshotHandle, "static content keeps the snapshot handle")
+				assert.NotEqual(t, "vs-1", vsc.Spec.VolumeSnapshotRef.Name, "static content no longer points at the deleted VS")
+			} else {
+				assert.Equal(t, "vs-1", vsc.Spec.VolumeSnapshotRef.Name)
 			}
 		})
 	}

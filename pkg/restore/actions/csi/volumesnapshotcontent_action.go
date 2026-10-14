@@ -81,6 +81,14 @@ func (p *volumeSnapshotContentRestoreItemAction) Execute(
 			errors.Errorf(err.Error(), "failed to convert input.ItemFromBackup from unstructured")
 	}
 
+	if restoredByAzureFilesMover(input.Restore, vsc.Spec.Driver) {
+		p.log.Infof("Azure Files restore will be performed using CloudCasa Azure Files Mover. VolumeSnapshotContent %s will not be restored.",
+			vsc.Name)
+		return &velero.RestoreItemActionExecuteOutput{
+			SkipRestore: true,
+		}, nil
+	}
+
 	// If cross-namespace restore is configured, change the namespace
 	// for VolumeSnapshot object to be restored
 	newNamespace, ok := input.Restore.Spec.NamespaceMapping[vsc.Spec.VolumeSnapshotRef.Namespace]

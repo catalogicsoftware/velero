@@ -18,6 +18,7 @@ package csi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -88,9 +89,20 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 		backup.Status.Phase == velerov1api.BackupPhaseFinalizingPartiallyFailed {
 		p.log.
 			WithField("Backup", fmt.Sprintf("%s/%s", backup.Namespace, backup.Name)).
-			WithField("BackupPhase", backup.Status.Phase).Debugf("Cleaning VolumeSnapshots.")
+			WithField("BackupPhase", backup.Status.Phase).Debugf("Cleaning up VolumeSnapshot during finalize")
 
-		csi.DeleteReadyVolumeSnapshot(*vs, p.crClient, p.log)
+		// CloudCasa keeps the VolumeSnapshotContent in the cluster (Retain) for its
+		// snapshot tracking and cleanup. Without the bound content, deleting the
+		// VolumeSnapshot could cascade-delete the snapshot, so leave it in place.
+		vsc, err := csi.GetVSCForVS(context.TODO(), vs, p.crClient)
+		if err != nil {
+			p.log.Warnf(
+				"Skipping finalize cleanup of VolumeSnapshot %s/%s; could not get bound VolumeSnapshotContent: %v",
+				vs.Namespace, vs.Name, err)
+			return item, nil, "", nil, nil
+		}
+
+		csi.DeleteVolumeSnapshot(*vs, *vsc, backup, p.crClient, p.log)
 		return item, nil, "", nil, nil
 	}
 
@@ -124,6 +136,7 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 	}
 
 	annotations := make(map[string]string)
+	vscAnnotations := make(map[string]string)
 
 	if vsc != nil {
 		// when we are backing up VolumeSnapshots created outside of velero, we
@@ -156,6 +169,17 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 			// for CSI drivers that populate this field (e.g., Ceph RBD).
 			if vsc.Status.VolumeGroupSnapshotHandle != nil {
 				annotations[velerov1api.VolumeGroupSnapshotHandleAnnotation] = *vsc.Status.VolumeGroupSnapshotHandle
+				// A list recorded from the group content when the group was made is kept.
+				members, recorded := vs.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation]
+				if !recorded {
+					members, err = groupMemberSnapshotHandles(ctx, p.crClient, *vsc.Status.VolumeGroupSnapshotHandle)
+				}
+				if err != nil {
+					p.log.Warnf("Failed to list the members of group snapshot %s: %v", *vsc.Status.VolumeGroupSnapshotHandle, err)
+				} else {
+					annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation] = members
+					vscAnnotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation] = members
+				}
 			}
 		}
 
@@ -185,6 +209,7 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 				velerov1api.BackupNameLabel: label.GetValidName(backup.Name),
 			},
 		)
+		kubeutil.AddAnnotations(&vsc.ObjectMeta, vscAnnotations)
 
 		if vscPatchError := p.crClient.Patch(
 			context.TODO(),
@@ -368,4 +393,18 @@ func NewVolumeSnapshotBackupItemAction(
 			crClient: crClient,
 		}, nil
 	}
+}
+
+// groupMemberSnapshotHandles returns, as a JSON array, the snapshot handles of
+// the contents in the cluster that belong to group snapshot groupHandle.
+func groupMemberSnapshotHandles(ctx context.Context, client crclient.Client, groupHandle string) (string, error) {
+	handles, err := csi.GroupMemberSnapshotHandles(ctx, client, groupHandle)
+	if err != nil {
+		return "", err
+	}
+	members, err := json.Marshal(handles)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+	return string(members), nil
 }
