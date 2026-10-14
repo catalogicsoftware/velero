@@ -17,6 +17,7 @@ limitations under the License.
 package kube
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -684,6 +685,30 @@ func TestEnsureDeletePVC(t *testing.T) {
 				},
 			},
 			err: "timeout to assure pvc fake-pvc is deleted, finalizers in pvc []",
+		},
+		{
+			name:      "wait timeout before the pvc is ever retrieved",
+			pvcName:   "fake-pvc",
+			namespace: "fake-ns",
+			clientObj: []runtime.Object{pvcObjectWithFinalizer},
+			timeout:   time.Millisecond,
+			reactors: []reactor{
+				{
+					verb:     "delete",
+					resource: "persistentvolumeclaims",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, pvcObject, nil
+					},
+				},
+				{
+					verb:     "get",
+					resource: "persistentvolumeclaims",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, context.DeadlineExceeded
+					},
+				},
+			},
+			err: "timeout to assure pvc fake-pvc is deleted",
 		},
 	}
 
