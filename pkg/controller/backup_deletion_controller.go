@@ -74,6 +74,9 @@ var (
 	bslGetRetryInterval    = 500 * time.Millisecond
 )
 
+// invokeDeleteActions runs the backup's DeleteItemActions; tests replace it.
+var invokeDeleteActions = delete.InvokeDeleteActions
+
 // isObjectLockError reports whether err indicates that object storage
 // rejected a delete because of an immutability (object lock) policy.
 func isObjectLockError(err error) bool {
@@ -375,8 +378,15 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 			// Optimization: wrap in a gofunc? Would be useful for large backups with lots of objects.
 			// but what do we do with the error returned? We can't just swallow it as that may lead to dangling resources.
-			err = delete.InvokeDeleteActions(deleteCtx)
-			if err != nil {
+			err = invokeDeleteActions(deleteCtx)
+			var actionErrs delete.ItemActionErrors
+			if errors.As(err, &actionErrs) {
+				// Reported, but the other snapshots and data are still deleted:
+				// a processed request is not retried.
+				for _, actionErr := range actionErrs {
+					errs = append(errs, actionErr.Error())
+				}
+			} else if err != nil {
 				log.WithError(err).Error("Error invoking delete item actions")
 				err2 := r.patchDeleteBackupRequestWithError(ctx, dbr, errors.New("error invoking delete item actions"))
 				return ctrl.Result{}, err2
