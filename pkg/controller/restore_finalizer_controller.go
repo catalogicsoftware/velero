@@ -36,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/vmware-tanzu/velero/internal/catalogic"
 	"github.com/vmware-tanzu/velero/internal/hook"
 	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
@@ -49,6 +50,12 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
+)
+
+// The progress relay of kubeagent; variables so that tests can replace them.
+var (
+	updatePVCProgress          = catalogic.UpdateSnapshotProgress
+	deletePVCProgressConfigMap = catalogic.DeleteSnapshotProgressConfigMap
 )
 
 type restoreFinalizerReconciler struct {
@@ -344,6 +351,22 @@ func (ctx *finalizerContext) execute() (results.Result, results.Result) {
 	return warnings, errs
 }
 
+// reportPVCNotBound tells kubeagent that a restored PVC never bound. The CSI PVC
+// restore action reported it completed when it wrote the PVC, under the backed-up
+// namespace; the same key is used so that the failure replaces that report.
+func (ctx *finalizerContext) reportPVCNotBound(volInfo volume.BackupVolumeInfo, restoredNamespace string, log logrus.FieldLogger) {
+	pvc := &corev1api.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: volInfo.PVCName, Namespace: volInfo.PVCNamespace},
+	}
+	message := fmt.Sprintf("PVC %s/%s did not bind within %s", restoredNamespace, volInfo.PVCName, ctx.resourceTimeout)
+	if err := updatePVCProgress(pvc, nil, nil, "error", message, ctx.restore.Name, log); err != nil {
+		log.WithError(err).Warn("Failed to report the PVC that did not bind to kubeagent")
+		return
+	}
+	time.Sleep(200 * time.Millisecond) // give kubeagent time to read it
+	deletePVCProgressConfigMap(ctx.restore.Name, log)
+}
+
 // patchDynamicPV patches newly dynamically provisioned PV using volume info
 // in order to restore custom settings that would otherwise be lost during dynamic PV recreation.
 func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result) {
@@ -351,6 +374,8 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 
 	var pvWaitGroup sync.WaitGroup
 	var resultLock sync.Mutex
+	// All PVCs of a restore share one progress ConfigMap, so reports go out one at a time.
+	var progressLock sync.Mutex
 
 	maxConcurrency := 3
 	semaphore := make(chan struct{}, maxConcurrency)
@@ -378,6 +403,7 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 				log := ctx.logger.WithField("PVC", volInfo.PVCName).WithField("PVCNamespace", restoredNamespace)
 				log.Debug("patching dynamic PV is in progress")
 
+				pvcBound := false
 				err := wait.PollUntilContextTimeout(context.Background(), 10*time.Second, ctx.resourceTimeout, true, func(context.Context) (bool, error) {
 					// wait for PVC to be bound
 					pvc := &corev1api.PersistentVolumeClaim{}
@@ -440,6 +466,7 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 						log.Debugf("PVC: %s not ready", pvc.Name)
 						return false, nil
 					}
+					pvcBound = true
 
 					// wait for PV to be bound
 					pvName := pvc.Spec.VolumeName
@@ -488,6 +515,11 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 				})
 
 				if err != nil {
+					if !pvcBound && wait.Interrupted(err) {
+						progressLock.Lock()
+						ctx.reportPVCNotBound(volInfo, restoredNamespace, log)
+						progressLock.Unlock()
+					}
 					err = fmt.Errorf("fail to patch dynamic PV, err: %s, PVC: %s, PV: %s", err, volInfo.PVCName, volInfo.PVName)
 					ctx.logger.WithError(errors.WithStack((err))).Error("err patching dynamic PV using volume info")
 					resultLock.Lock()
