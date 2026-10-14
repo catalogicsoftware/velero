@@ -3446,7 +3446,7 @@ func determineRestoreStatus(
 	annotations := obj.GetAnnotations()
 
 	if annotations == nil {
-		log.Warnf("No annotations found for %s, using restore spec setting: %v",
+		log.Debugf("No annotations found for %s, using restore spec setting: %v",
 			kube.NamespaceAndName(obj), shouldRestoreStatus)
 		return shouldRestoreStatus
 	}

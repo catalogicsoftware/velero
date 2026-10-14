@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1api "k8s.io/api/core/v1"
@@ -345,5 +347,20 @@ func TestRestoreDoesNotWarnAboutAnExistingKubeRootCA(t *testing.T) {
 			require.Len(t, warnings.Namespaces["ns-1"], 1)
 			assert.Contains(t, warnings.Namespaces["ns-1"][0], "app-config")
 		})
+	}
+}
+
+// An object without annotations is restored like one without the status
+// annotation; KAS counts every warning line of the restore log.
+func TestDetermineRestoreStatusDoesNotWarnWithoutAnnotations(t *testing.T) {
+	log, hook := logrustest.NewNullLogger()
+	log.SetLevel(logrus.DebugLevel)
+	obj := &unstructured.Unstructured{}
+	obj.SetName("snapcontent-1")
+
+	assert.False(t, determineRestoreStatus(obj, nil, "volumesnapshotcontents.snapshot.storage.k8s.io", log))
+	require.NotEmpty(t, hook.AllEntries())
+	for _, entry := range hook.AllEntries() {
+		assert.Greater(t, entry.Level, logrus.WarnLevel, entry.Message)
 	}
 }
