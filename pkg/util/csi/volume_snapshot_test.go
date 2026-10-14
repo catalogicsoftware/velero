@@ -2297,6 +2297,24 @@ func TestWaitUntilVSCHandleIsReadyReportsErrorWhenNoHandle(t *testing.T) {
 	assert.Contains(t, last[1], vscName)
 }
 
+// A content error without a message must not crash the wait; it still ends as "error".
+func TestWaitUntilVSCHandleIsReadyWithAnErrorWithoutMessage(t *testing.T) {
+	last := recordSnapshotProgress(t)
+	vscName := "vsc-1"
+	vs := builder.ForVolumeSnapshot("ns", "vs-1").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).
+		Status().BoundVolumeSnapshotContentName(vscName).Result()
+	vsc := builder.ForVolumeSnapshotContent(vscName).
+		Status(&snapshotv1api.VolumeSnapshotContentStatus{Error: &snapshotv1api.VolumeSnapshotError{}}).Result()
+	client := velerotest.NewFakeControllerRuntimeWatchClient(t, vs, vsc)
+
+	_, err := WaitUntilVSCHandleIsReady(vs, client, logrus.New(), time.Second)
+
+	require.Error(t, err)
+	assert.Equal(t, "error", last[0])
+	assert.Contains(t, last[1], vscName)
+}
+
 // A driver error that appears while waiting is what the timeout must report.
 func TestWaitUntilVSCHandleIsReadyReportsLateDriverError(t *testing.T) {
 	last := recordSnapshotProgress(t)

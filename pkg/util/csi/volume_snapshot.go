@@ -1274,7 +1274,7 @@ func WaitUntilVSCHandleIsReady(
 					log.Info(snapshotStateMessage)
 					if updatedVSC.Status != nil && updatedVSC.Status.Error != nil {
 						log.Infof("VSC %s has error: %v",
-							boundVSCName, *updatedVSC.Status.Error.Message)
+							boundVSCName, stringptr.GetString(updatedVSC.Status.Error.Message))
 					}
 					return false, nil
 				}
