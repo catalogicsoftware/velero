@@ -269,6 +269,52 @@ node("cloudcasa-build") {
         }
     }
 
+    // Point the selfhosted helmchart at the cloudcasa-velero image just pushed to the agent ACR
+    // (images.agentRegistry). Only the top-level images.veleroTag; images.openshift.veleroTag
+    // tracks the Red Hat certified production image and is managed separately.
+    stage("Update selfhosted helmchart veleroTag") {
+        if (buildCloudcasaVelero && isMasterFlow) {
+            def helmchartRepoBranch = "main"
+            withCredentials([
+                usernamePassword(
+                    credentialsId: 'github-access-token',
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_PASS'
+                )
+            ]) {
+                dir('cloudcasa-server-helmchart') {
+                    git url: 'https://github.com/catalogicsoftware/cloudcasa-server-helmchart.git',
+                        branch: helmchartRepoBranch,
+                        credentialsId: 'github-access-token'
+
+                    sh """
+                        git config user.name 'cloudcasabot'
+                        git config user.email 'cloudcasabot@catalogicsoftware.com'
+                    """
+
+                    sh """
+                        set -eu
+                        sed -i -E "s/^  veleroTag:.*/  veleroTag: ${cloudcasaVeleroTag}/" values.yaml
+
+                        if [ -n "\$(git status --porcelain)" ]; then
+                            if [ "${prepareRepoDryRun}" = "true" ]; then
+                                echo "DRY RUN: helmchart changes detected; skipping commit/push"
+                                git diff --patch
+                            else
+                                git add values.yaml
+                                git commit -m "ci: update velero selfhosted tag to ${cloudcasaVeleroTag} [${env.JOB_NAME} #${env.BUILD_NUMBER}]"
+                                git pull --rebase https://\${GIT_USER}:\${GIT_PASS}@github.com/catalogicsoftware/cloudcasa-server-helmchart.git ${helmchartRepoBranch}
+                                git push https://\${GIT_USER}:\${GIT_PASS}@github.com/catalogicsoftware/cloudcasa-server-helmchart.git ${helmchartRepoBranch}
+                            fi
+                        else
+                            echo "No helmchart veleroTag changes for cloudcasa-velero"
+                        fi
+                    """
+                }
+            }
+        }
+    }
+
     stage("Red Hat certification (cloudcasa-velero)") {
         if (buildCloudcasaVelero && isProductionFlow) {
             def sourceImage = "${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}"
