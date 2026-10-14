@@ -293,6 +293,9 @@ type PVInfo struct {
 // BackupVolumesInformation contains the information needs by generating
 // the backup BackupVolumeInfo array.
 type BackupVolumesInformation struct {
+	// initLock guards the lazy initialization of pvMap, which may be triggered
+	// concurrently by multiple ItemBlock workers.
+	initLock sync.Mutex
 	// A map contains the backup-included PV detail content. The key is PV name.
 	pvMap       *pvcPvMap
 	volumeInfos []*BackupVolumeInfo
@@ -322,11 +325,17 @@ func (v *BackupVolumesInformation) Init() {
 	v.volumeInfos = make([]*BackupVolumeInfo, 0)
 }
 
+// InsertPVMap records the PV and its bound PVC in the PV map. It is called from
+// the ItemBlock worker goroutines, so it must stay safe for concurrent use.
 func (v *BackupVolumesInformation) InsertPVMap(pv corev1api.PersistentVolume, pvcName, pvcNamespace string) {
+	v.initLock.Lock()
 	if v.pvMap == nil {
 		v.Init()
 	}
-	v.pvMap.insert(pv, pvcName, pvcNamespace)
+	pvMap := v.pvMap
+	v.initLock.Unlock()
+
+	pvMap.insert(pv, pvcName, pvcNamespace)
 }
 
 func (v *BackupVolumesInformation) Result(
@@ -669,11 +678,17 @@ func (v *BackupVolumesInformation) generateVolumeInfoFromDataUpload() {
 	v.volumeInfos = append(v.volumeInfos, tmpVolumeInfos...)
 }
 
+// pvcPvMap is safe for concurrent use. On the backup path it is written by the
+// ItemBlock worker goroutines via BackupVolumesInformation.InsertPVMap.
 type pvcPvMap struct {
+	lock sync.RWMutex
 	data map[string]pvcPvInfo
 }
 
 func (m *pvcPvMap) insert(pv corev1api.PersistentVolume, pvcName, pvcNamespace string) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	m.data[pv.Name] = pvcPvInfo{
 		PVCName:      pvcName,
 		PVCNamespace: pvcNamespace,
@@ -682,6 +697,9 @@ func (m *pvcPvMap) insert(pv corev1api.PersistentVolume, pvcName, pvcNamespace s
 }
 
 func (m *pvcPvMap) retrieve(pvName, pvcName, pvcNS string) *pvcPvInfo {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+
 	if pvName != "" {
 		if info, ok := m.data[pvName]; ok {
 			return &info
