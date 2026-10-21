@@ -377,8 +377,6 @@ func (ctx *finalizerContext) reportPVCNotBound(volInfo volume.BackupVolumeInfo, 
 	deletePVCProgressConfigMap(ctx.restore.Name, log)
 }
 
-// patchDynamicPV patches newly dynamically provisioned PV using volume info
-// in order to restore custom settings that would otherwise be lost during dynamic PV recreation.
 // restoredVolumeInfo returns the backup's volume info under the names the
 // restore gave the PVCs: a PVC of a VM restored under a new name is restored
 // as its copy, and as itself only when the restore keeps it.
@@ -398,6 +396,8 @@ func (ctx *finalizerContext) restoredVolumeInfo() []*volume.BackupVolumeInfo {
 	return restored
 }
 
+// patchDynamicPV patches newly dynamically provisioned PV using volume info
+// in order to restore custom settings that would otherwise be lost during dynamic PV recreation.
 func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result) {
 	ctx.logger.Info("patching newly dynamically provisioned PV starts")
 
