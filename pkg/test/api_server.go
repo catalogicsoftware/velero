@@ -56,6 +56,7 @@ func NewAPIServer(t *testing.T) *APIServer {
 				{Group: "extensions", Version: "v1", Resource: "deployments"}:                              "ExtDeploymentsList",
 				{Group: "velero.io", Version: "v1", Resource: "deployments"}:                               "VeleroDeploymentsList",
 				{Group: "velero.io", Version: "v2alpha1", Resource: "datauploads"}:                         "DataUploadsList",
+				{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}:                         "VirtualMachineList",
 			})
 		discoveryClient = &DiscoveryClient{FakeDiscovery: kubeClient.Discovery().(*discoveryfake.FakeDiscovery)}
 	)
