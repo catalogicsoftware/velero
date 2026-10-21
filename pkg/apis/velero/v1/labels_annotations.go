@@ -107,6 +107,12 @@ const (
 	// even if the resource contains a matching selector label.
 	ExcludeFromBackupLabel = "velero.io/exclude-from-backup"
 
+	// ObjectLockAnnotation is set on a BackupStorageLocation by the CloudCasa
+	// agent when the objectstore has an immutability (object lock) policy
+	// enabled. Deletion of objects in such a store is bound to fail, so
+	// controllers skip object storage deletions when this is "true".
+	ObjectLockAnnotation = "cloudcasa.io/object-lock"
+
 	// SkipFromBackupAnnotation is the annotation used by internal BackupItemActions
 	// to indicate that a resource should be skipped from backup,
 	// even if it doesn't have the ExcludeFromBackupLabel.
@@ -124,6 +130,16 @@ const (
 
 	// PVRLabel is the label key used to identify the pvb for pvr pod
 	PVRLabel = "velero.io/pod-volume-restore"
+
+	// BundleKeyFileAnnotation is set on a BackupStorageLocation by the
+	// CloudCasa agent to the path of the file holding the key that encrypts
+	// the bundle files written there.
+	BundleKeyFileAnnotation = "cloudcasa.io/bundle-key-file"
+
+	// BundleEncryptionRequiredAnnotation set to "true" on a
+	// BackupStorageLocation makes reads refuse bundle files that are not
+	// encrypted.
+	BundleEncryptionRequiredAnnotation = "cloudcasa.io/bundle-encryption-required"
 )
 
 type AsyncOperationIDPrefix string
@@ -141,15 +157,29 @@ const (
 
 // CSI related plugin actions' constant variable
 const (
-	VolumeSnapshotLabel                             = "velero.io/volume-snapshot-name"
-	VolumeSnapshotHandleAnnotation                  = "velero.io/csi-volumesnapshot-handle"
-	VolumeSnapshotRestoreSize                       = "velero.io/csi-volumesnapshot-restore-size"
-	DriverNameAnnotation                            = "velero.io/csi-driver-name"
-	VSCDeletionPolicyAnnotation                     = "velero.io/csi-vsc-deletion-policy"
-	VolumeGroupSnapshotHandleAnnotation             = "velero.io/csi-volumegroupsnapshot-handle"
-	VolumeSnapshotClassSelectorLabel                = "velero.io/csi-volumesnapshot-class"
-	VolumeSnapshotClassDriverBackupAnnotationPrefix = "velero.io/csi-volumesnapshot-class"
-	VolumeSnapshotClassDriverPVCAnnotation          = "velero.io/csi-volumesnapshot-class"
+	VolumeSnapshotLabel                                   = "velero.io/volume-snapshot-name"
+	VolumeSnapshotHandleAnnotation                        = "velero.io/csi-volumesnapshot-handle"
+	VolumeSnapshotRestoreSize                             = "velero.io/csi-volumesnapshot-restore-size"
+	DriverNameAnnotation                                  = "velero.io/csi-driver-name"
+	VSCDeletionPolicyAnnotation                           = "velero.io/csi-vsc-deletion-policy"
+	VolumeGroupSnapshotHandleAnnotation                   = "velero.io/csi-volumegroupsnapshot-handle"
+	VolumeSnapshotClassSelectorLabel                      = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassDriverBackupAnnotationPrefix       = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassDriverPVCAnnotation                = "cloudcasa.io/csi-volumesnapshot-class"
+	VolumeSnapshotClassStorageClassBackupAnnotationPrefix = "cloudcasa.io/csi-sc-vsc-mapping-"
+
+	// VolumeGroupSnapshotMemberHandlesAnnotation lists, as a JSON array, the
+	// snapshot handles of every member of the VolumeSnapshot's group snapshot.
+	VolumeGroupSnapshotMemberHandlesAnnotation = "cloudcasa.io/csi-volumegroupsnapshot-member-handles"
+
+	// CloudCasaVGSLabelKey is the label key a CloudCasa engine groups PVCs
+	// under a VolumeGroupSnapshot by, unless the Backup names another.
+	CloudCasaVGSLabelKey = "cloudcasa.io/volume-group"
+
+	// SnapshotClassRequiredDriversAnnotation lists, comma-separated, the CSI
+	// drivers whose VolumeSnapshotClass must be configured explicitly; the
+	// plugin never auto-creates one for them. Set by the kubeagent on the Backup.
+	SnapshotClassRequiredDriversAnnotation = "cloudcasa.io/snapshot-class-required-drivers"
 
 	// https://kubernetes.io/zh-cn/docs/concepts/storage/volume-snapshot-classes/
 	VolumeSnapshotClassKubernetesAnnotation = "snapshot.storage.kubernetes.io/is-default-class"
@@ -184,8 +214,8 @@ const (
 	// DataUploadNameAnnotation is the label key for the DataUpload name
 	DataUploadNameAnnotation = "velero.io/data-upload-name"
 
-	// Label used on VolumeGroupSnapshotClass to mark it as Velero's default for a CSI driver
-	VolumeGroupSnapshotClassDefaultLabel = "velero.io/csi-volumegroupsnapshot-class"
+	// Label used on VolumeGroupSnapshotClass to mark it as CloudCasa's default for a CSI driver
+	VolumeGroupSnapshotClassDefaultLabel = "cloudcasa.io/csi-volumegroupsnapshot-class"
 
 	// Annotation on PVC to override the VGS class to use
 	VolumeGroupSnapshotClassAnnotationPVC = "velero.io/csi-volume-group-snapshot-class"

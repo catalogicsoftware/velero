@@ -18,7 +18,9 @@ package csi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/cockroachdb/errors"
 	volumegroupsnapshotv1beta2 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumegroupsnapshot/v1beta2"
@@ -152,7 +154,7 @@ func (p *volumeSnapshotRestoreItemAction) ensureStubVGSCExists(
 			Source: volumegroupsnapshotv1beta2.VolumeGroupSnapshotContentSource{
 				GroupSnapshotHandles: &volumegroupsnapshotv1beta2.GroupSnapshotHandles{
 					VolumeGroupSnapshotHandle: vgsh,
-					VolumeSnapshotHandles:     []string{snapshotHandle},
+					VolumeSnapshotHandles:     p.groupMemberHandles(vs, snapshotHandle),
 				},
 			},
 			VolumeGroupSnapshotRef: corev1api.ObjectReference{
@@ -195,6 +197,23 @@ func (p *volumeSnapshotRestoreItemAction) ensureStubVGSCExists(
 
 	p.log.Infof("Successfully created stub VGSC %s", vgscName)
 	return nil
+}
+
+// groupMemberHandles returns the snapshot handles of every member of the VS's
+// group, as the backup recorded them. The stub's handles cannot change once it
+// exists, and a driver may refuse a group that does not list all its members.
+func (p *volumeSnapshotRestoreItemAction) groupMemberHandles(vs *snapshotv1api.VolumeSnapshot, snapshotHandle string) []string {
+	var handles []string
+	if members, ok := vs.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation]; ok {
+		if err := json.Unmarshal([]byte(members), &handles); err != nil {
+			p.log.Warnf("VS %s/%s has unreadable group member handles %q: %v", vs.Namespace, vs.Name, members, err)
+			handles = nil
+		}
+	}
+	if !slices.Contains(handles, snapshotHandle) {
+		handles = append(handles, snapshotHandle)
+	}
+	return handles
 }
 
 // addSnapshotHandleToVGSC adds a snapshot handle to an existing VGSC if not already present.
@@ -255,6 +274,13 @@ func (p *volumeSnapshotRestoreItemAction) Execute(
 		input.ItemFromBackup.UnstructuredContent(), &vsFromBackup); err != nil {
 		return &velero.RestoreItemActionExecuteOutput{},
 			errors.Wrapf(err, "failed to convert input.Item from unstructured")
+	}
+
+	if restoredByAzureFilesMover(input.Restore, vs.Annotations[velerov1api.DriverNameAnnotation]) {
+		p.log.Infof("Azure Files restore will be performed using CloudCasa Azure Files Mover. VolumeSnapshot will not be restored.")
+		return &velero.RestoreItemActionExecuteOutput{
+			SkipRestore: true,
+		}, nil
 	}
 
 	// Create stub VGSC if this snapshot was created via VolumeGroupSnapshot

@@ -41,6 +41,9 @@ func NewObjectStoreLayout(prefix string) *ObjectStoreLayout {
 		"metadata": path.Join(prefix, "metadata") + "/",
 		"plugins":  path.Join(prefix, "plugins") + "/",
 		"kopia":    path.Join(prefix, "kopia") + "/",
+		// Adding cloudcasa related custom folders here:
+		"logs":     path.Join(prefix, "logs") + "/",
+		"offloads": path.Join(prefix, "offloads") + "/",
 	}
 
 	return &ObjectStoreLayout{

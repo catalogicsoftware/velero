@@ -25,6 +25,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
@@ -33,6 +34,12 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 )
+
+// ItemActionErrors are the errors DeleteItemActions returned. The rest of the
+// deletion goes on; these are reported on the delete request.
+type ItemActionErrors []error
+
+func (e ItemActionErrors) Error() string { return kubeerrs.NewAggregate(e).Error() }
 
 // Context provides the necessary environment to run DeleteItemAction plugins
 type Context struct {
@@ -79,6 +86,7 @@ func InvokeDeleteActions(ctx *Context) error {
 		return errors.Wrapf(err, "error parsing backup %q", dir)
 	}
 	processdResources := sets.NewString()
+	var actionErrs ItemActionErrors
 
 	for resource := range backupResources {
 		groupResource := schema.ParseGroupResource(resource)
@@ -124,13 +132,18 @@ func InvokeDeleteActions(ctx *Context) error {
 						Item:   obj,
 						Backup: ctx.Backup,
 					})
-					// Since we want to keep looping even on errors, log them instead of just returning.
+					// Keep looping on errors so the other items are still handled.
 					if err != nil {
 						itemLog.WithError(err).Error("plugin error")
+						actionErrs = append(actionErrs, errors.Wrapf(err,
+							"error executing DeleteItemAction for %s %s", groupResource.String(), obj.GetName()))
 					}
 				}
 			}
 		}
+	}
+	if len(actionErrs) > 0 {
+		return actionErrs
 	}
 	return nil
 }

@@ -644,6 +644,74 @@ func TestServiceActionExecute(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "If PreserveNodePorts is false and HealthCheckNodePort is null in last-applied-configuration, it should not crash and the port should be cleared.",
+			obj: corev1api.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "svc-1",
+					Annotations: map[string]string{
+						"kubectl.kubernetes.io/last-applied-configuration": `{"spec":{"healthCheckNodePort":null}}`,
+					},
+				},
+				Spec: corev1api.ServiceSpec{
+					HealthCheckNodePort:   8080,
+					ExternalTrafficPolicy: corev1api.ServiceExternalTrafficPolicyTypeLocal,
+					Type:                  corev1api.ServiceTypeLoadBalancer,
+				},
+			},
+			restore: builder.ForRestore(api.DefaultNamespace, "").PreserveNodePorts(false).Result(),
+			expectedRes: corev1api.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "svc-1",
+					Annotations: map[string]string{
+						"kubectl.kubernetes.io/last-applied-configuration": `{"spec":{"healthCheckNodePort":null}}`,
+					},
+				},
+				Spec: corev1api.ServiceSpec{
+					HealthCheckNodePort:   0,
+					ExternalTrafficPolicy: corev1api.ServiceExternalTrafficPolicyTypeLocal,
+					Type:                  corev1api.ServiceTypeLoadBalancer,
+				},
+			},
+		},
+		{
+			name: "If a port name in last-applied-configuration is not a string, it should not crash.",
+			obj: corev1api.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "svc-1",
+					Annotations: map[string]string{
+						"kubectl.kubernetes.io/last-applied-configuration": `{"spec":{"ports":[{"nodePort":30001,"name":123}]}}`,
+					},
+				},
+				Spec: corev1api.ServiceSpec{
+					Type: corev1api.ServiceTypeNodePort,
+					Ports: []corev1api.ServicePort{
+						{
+							Name:     "http",
+							NodePort: 30001,
+						},
+					},
+				},
+			},
+			restore: builder.ForRestore(api.DefaultNamespace, "").PreserveNodePorts(false).Result(),
+			expectedRes: corev1api.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "svc-1",
+					Annotations: map[string]string{
+						"kubectl.kubernetes.io/last-applied-configuration": `{"spec":{"ports":[{"nodePort":30001,"name":123}]}}`,
+					},
+				},
+				Spec: corev1api.ServiceSpec{
+					Type: corev1api.ServiceTypeNodePort,
+					Ports: []corev1api.ServicePort{
+						{
+							Name:     "http",
+							NodePort: 0,
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, test := range tests {

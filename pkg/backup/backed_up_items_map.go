@@ -27,6 +27,9 @@ type backedUpItemsMap struct {
 	*sync.RWMutex
 	backedUpItems map[itemKey]struct{}
 	totalItems    map[itemKey]struct{}
+	// failedItems keeps the error of an item whose backup failed, so a later
+	// encounter of the same item reports that failure instead of success.
+	failedItems map[itemKey]error
 }
 
 func NewBackedUpItemsMap() *backedUpItemsMap {
@@ -34,6 +37,7 @@ func NewBackedUpItemsMap() *backedUpItemsMap {
 		RWMutex:       &sync.RWMutex{},
 		backedUpItems: make(map[itemKey]struct{}),
 		totalItems:    make(map[itemKey]struct{}),
+		failedItems:   make(map[itemKey]error),
 	}
 }
 
@@ -110,4 +114,19 @@ func (m *backedUpItemsMap) AddItemToTotal(key itemKey) {
 	m.Lock()
 	defer m.Unlock()
 	m.totalItems[key] = struct{}{}
+}
+
+// RecordFailure remembers that backing up the item failed with err.
+func (m *backedUpItemsMap) RecordFailure(key itemKey, err error) {
+	m.Lock()
+	defer m.Unlock()
+	m.failedItems[key] = err
+}
+
+// Failure returns the error of an earlier failed backup of the item.
+func (m *backedUpItemsMap) Failure(key itemKey) (error, bool) {
+	m.RLock()
+	defer m.RUnlock()
+	err, failed := m.failedItems[key]
+	return err, failed
 }

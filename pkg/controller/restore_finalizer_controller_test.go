@@ -655,6 +655,87 @@ func Test_restoreFinalizerReconciler_finishProcessing(t *testing.T) {
 	}
 }
 
+func TestNeedPatch(t *testing.T) {
+	tests := []struct {
+		name     string
+		newPV    *corev1api.PersistentVolume
+		pvInfo   *volume.PVInfo
+		expected bool
+	}{
+		{
+			name: "reclaim policy differs",
+			newPV: builder.ForPersistentVolume("pv1").
+				ReclaimPolicy(corev1api.PersistentVolumeReclaimDelete).Result(),
+			pvInfo: &volume.PVInfo{
+				ReclaimPolicy: string(corev1api.PersistentVolumeReclaimRetain),
+				Labels:        map[string]string{},
+			},
+			expected: true,
+		},
+		{
+			name: "backup has label new PV does not",
+			newPV: builder.ForPersistentVolume("pv1").
+				ObjectMeta(builder.WithLabels("existing", "val")).
+				ReclaimPolicy(corev1api.PersistentVolumeReclaimDelete).Result(),
+			pvInfo: &volume.PVInfo{
+				ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+				Labels:        map[string]string{"existing": "val", "missing": "val"},
+			},
+			expected: true,
+		},
+		{
+			name: "same labels same values",
+			newPV: builder.ForPersistentVolume("pv1").
+				ObjectMeta(builder.WithLabels("key", "val")).
+				ReclaimPolicy(corev1api.PersistentVolumeReclaimDelete).Result(),
+			pvInfo: &volume.PVInfo{
+				ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+				Labels:        map[string]string{"key": "val"},
+			},
+			expected: false,
+		},
+		{
+			name: "same label key different values",
+			newPV: builder.ForPersistentVolume("pv1").
+				ObjectMeta(builder.WithLabels("topology.kubernetes.io/zone", "us-west-2a")).
+				ReclaimPolicy(corev1api.PersistentVolumeReclaimDelete).Result(),
+			pvInfo: &volume.PVInfo{
+				ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+				Labels:        map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
+			},
+			expected: false,
+		},
+		{
+			name: "new PV has labels backup does not",
+			newPV: builder.ForPersistentVolume("pv1").
+				ObjectMeta(builder.WithLabels("provisioner-label", "val")).
+				ReclaimPolicy(corev1api.PersistentVolumeReclaimDelete).Result(),
+			pvInfo: &volume.PVInfo{
+				ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+				Labels:        map[string]string{},
+			},
+			expected: false,
+		},
+		{
+			name: "both labels nil",
+			newPV: builder.ForPersistentVolume("pv1").
+				ReclaimPolicy(corev1api.PersistentVolumeReclaimDelete).Result(),
+			pvInfo: &volume.PVInfo{
+				ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+				Labels:        nil,
+			},
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := needPatch(tc.newPV, tc.pvInfo)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
 func TestRestoreOperationList(t *testing.T) {
 	var empty []*itemoperation.RestoreOperation
 	tests := []struct {
@@ -1087,6 +1168,49 @@ func TestCleanupStubVGSC(t *testing.T) {
 				assert.NotEqual(t, tc.restore.Name, remaining.Labels[velerov1api.RestoreNameLabel],
 					"VGSC %s should have been deleted", remaining.Name)
 			}
+		})
+	}
+}
+
+// When patching a restored PV fails, the finalizer does not also wait for
+// restore exec hooks; otherwise it waits for them as usual.
+func TestFinalizerSkipsTheHookWaitWhenPVPatchingFails(t *testing.T) {
+	failingPV := []*volume.BackupVolumeInfo{{
+		BackupMethod: "PodVolumeBackup",
+		PVCName:      "pvc1",
+		PVName:       "pv1",
+		PVCNamespace: "ns1",
+		PVInfo:       &volume.PVInfo{ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete)},
+	}}
+	tests := []struct {
+		name         string
+		volumeInfo   []*volume.BackupVolumeInfo
+		wantPVErr    bool
+		wantHookWait bool
+	}{
+		{name: "PV patching fails", volumeInfo: failingPV, wantPVErr: true},
+		{name: "nothing to patch", wantHookWait: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := builder.ForRestore(velerov1api.DefaultNamespace, "restore").Result()
+			tracker := hook.NewMultiHookTracker()
+			tracker.Add(restore.Name, "ns1", "pod", "con1", "s1", "h1", hook.PhasePre, 0) // never recorded
+			ctx := &finalizerContext{
+				logger:           velerotest.NewLogger(),
+				crClient:         velerotest.NewFakeControllerRuntimeClientBuilder(t).Build(),
+				restore:          restore,
+				restoredPVCList:  map[string]struct{}{"ns1/pvc1": {}},
+				volumeInfo:       tc.volumeInfo,
+				multiHookTracker: tracker,
+				resourceTimeout:  time.Second,
+			}
+			require.NoError(t, ctx.crClient.Create(t.Context(), restore))
+
+			_, errs := ctx.execute()
+
+			assert.Equal(t, tc.wantPVErr, len(errs.Namespaces["ns1"]) > 0, "PV patch error")
+			assert.Equal(t, tc.wantHookWait, len(errs.Namespaces[velerov1api.DefaultNamespace]) > 0, "hook wait timed out")
 		})
 	}
 }

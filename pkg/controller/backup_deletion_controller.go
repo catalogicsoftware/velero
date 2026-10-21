@@ -47,22 +47,52 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
+	"github.com/vmware-tanzu/velero/pkg/persistence/bundlecrypt"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
 	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	"github.com/vmware-tanzu/velero/pkg/repository"
 	repomanager "github.com/vmware-tanzu/velero/pkg/repository/manager"
 	repotypes "github.com/vmware-tanzu/velero/pkg/repository/types"
+	"github.com/vmware-tanzu/velero/pkg/util"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/csi"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
-	veleroutil "github.com/vmware-tanzu/velero/pkg/util/velero"
 )
 
 const (
 	deleteBackupRequestMaxAge = 24 * time.Hour
 )
+
+// A Backup or BackupStorageLocation just created by kubeagent may not be
+// visible yet when its DeleteBackupRequest arrives, so the reconciler retries
+// getting them; tests shorten the intervals.
+var (
+	deletionGetRetries     = 10
+	backupGetRetryInterval = 3 * time.Second
+	bslGetRetryInterval    = 500 * time.Millisecond
+)
+
+// invokeDeleteActions runs the backup's DeleteItemActions; tests replace it.
+var invokeDeleteActions = delete.InvokeDeleteActions
+
+// isObjectLockError reports whether err indicates that object storage
+// rejected a delete because of an immutability (object lock) policy.
+func isObjectLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+
+	// Azure: Blob is immutable
+	if strings.Contains(errStr, "BlobImmutableDueToPolicy") {
+		return true
+	}
+
+	// S3: Access denied due to Object Lock
+	return strings.Contains(errStr, "AccessDenied") && strings.Contains(errStr, "Object Lock")
+}
 
 type backupDeletionReconciler struct {
 	client.Client
@@ -110,14 +140,15 @@ func (r *backupDeletionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Make sure the expired requests can be deleted eventually
 	s := kube.NewPeriodicalEnqueueSource(r.logger.WithField("controller", constant.ControllerBackupDeletion), mgr.GetClient(), &velerov1api.DeleteBackupRequestList{}, time.Hour, kube.PeriodicalEnqueueSourceOption{})
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.DeleteBackupRequest{}).
 		WatchesRawSource(s).
 		Complete(r)
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=deletebackuprequests,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=deletebackuprequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=deletebackuprequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=deletebackuprequests/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=backups,verbs=delete
 
 func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.logger.WithFields(logrus.Fields{
@@ -133,6 +164,9 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		log.WithError(err).Error("Error getting deletebackuprequest")
 		return ctrl.Result{}, err
+	}
+	if skipForeign(log, dbr) {
+		return ctrl.Result{}, nil
 	}
 
 	// Since we use the reconciler along with the PeriodicalEnqueueSource, there may be reconciliation triggered by
@@ -173,28 +207,71 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Get the backup we're trying to delete
 	backup := &velerov1api.Backup{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Namespace: dbr.Namespace,
-		Name:      dbr.Spec.BackupName,
-	}, backup); apierrors.IsNotFound(err) {
+	if err := util.RetryOnError(ctx, deletionGetRetries, backupGetRetryInterval, r.logger, func() error {
+		return r.Get(ctx, types.NamespacedName{
+			Namespace: dbr.Namespace,
+			Name:      dbr.Spec.BackupName,
+		}, backup)
+	}); err != nil {
 		// Couldn't find backup - update status to Processed and record the not-found error
-		err = r.patchDeleteBackupRequestWithError(ctx, dbr, errors.New("backup not found"))
-		return ctrl.Result{}, err
-	} else if err != nil {
+		if apierrors.IsNotFound(err) {
+			_, err = r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
+				r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
+				r.Status.Errors = []string{fmt.Sprintf("backup %q not found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)}
+			})
+			r.logger.Infof("Backup %q NOT found in the %q namespace", dbr.Spec.BackupName, dbr.Namespace)
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, errors.Wrap(err, "error getting backup")
 	}
+	r.logger.Infof("Backup %q found in the %q namespace.", backup.GetName(), backup.GetNamespace())
 
 	// Don't allow deleting backups in read-only storage locations
 	location := &velerov1api.BackupStorageLocation{}
-	if err := r.Get(context.Background(), client.ObjectKey{
-		Namespace: backup.Namespace,
-		Name:      backup.Spec.StorageLocation,
-	}, location); err != nil {
-		if apierrors.IsNotFound(err) {
-			err := r.patchDeleteBackupRequestWithError(ctx, dbr, fmt.Errorf("backup storage location %s not found", backup.Spec.StorageLocation))
+	var getErr error
+	r.logger.Infof("Getting BackupStorageLocation %q in the %q namespace", backup.Spec.StorageLocation, backup.Namespace)
+
+	for i := 1; i <= deletionGetRetries; i++ {
+		getErr = r.Get(context.Background(), client.ObjectKey{
+			Namespace: backup.Namespace,
+			Name:      backup.Spec.StorageLocation,
+		}, location)
+
+		if getErr == nil {
+			break
+		}
+
+		if apierrors.IsNotFound(getErr) {
+			r.logger.WithFields(logrus.Fields{
+				"attempt": i,
+				"max":     deletionGetRetries,
+				"bsl":     backup.Spec.StorageLocation,
+			}).Info("BackupStorageLocation not found, retrying...")
+			time.Sleep(bslGetRetryInterval)
+			continue
+		}
+
+		// Non-IsNotFound errors: break out and handle after loop
+		break
+	}
+
+	if getErr != nil {
+		if apierrors.IsNotFound(getErr) {
+			// Final failure after retries
+			_, err := r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
+				r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
+				r.Status.Errors = append(r.Status.Errors, fmt.Sprintf("backup storage location %s not found after %d retries", backup.Spec.StorageLocation, deletionGetRetries))
+			})
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, errors.Wrap(err, "error getting backup storage location")
+		return ctrl.Result{}, errors.Wrap(getErr, "error getting backup storage location")
+	}
+	if location.Spec.ObjectStorage != nil {
+		r.logger.Infof("Found BackupStorageLocation %q in the %q namespace. ObjectStorage: %#v",
+			location.Name, location.Namespace, location.Spec.ObjectStorage)
+	} else {
+		r.logger.Infof("Found BackupStorageLocation %q in the %q namespace. ObjectStorage: <nil>",
+			location.Name, location.Namespace)
 	}
 
 	if location.Spec.AccessMode == velerov1api.BackupStorageLocationAccessModeReadOnly {
@@ -202,10 +279,8 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	if !veleroutil.BSLIsAvailable(*location) {
-		err := r.patchDeleteBackupRequestWithError(ctx, dbr, fmt.Errorf("cannot delete backup because backup storage location %s is currently in Unavailable state", location.Name))
-		return ctrl.Result{}, err
-	}
+	// The location's phase is not checked: a per-job engine never validates
+	// the shared, unlabeled location, so it has no phase.
 
 	// if the request object has no labels defined, initialize an empty map since
 	// we will be updating labels
@@ -266,6 +341,17 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// Download the tarball
 		backupFile, err := downloadToTempFile(backup.Name, backupStore, log)
 
+		// Going on without the DeleteItemActions would remove the bundle and
+		// leave the backup's snapshots behind.
+		if err != nil && bundlecrypt.IsDecryptError(err) {
+			log.WithError(err).Errorf("Unable to read the encrypted tarball for backup %s, not deleting it", backup.Name)
+			r.metrics.RegisterBackupDeletionFailed(backupScheduleName)
+			_, patchErr := r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
+				r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
+				r.Status.Errors = append(r.Status.Errors, fmt.Sprintf("unable to read the encrypted tarball of backup %s: %v", backup.Name, err))
+			})
+			return ctrl.Result{}, patchErr
+		}
 		if err != nil {
 			log.WithError(err).Errorf("Unable to download tarball for backup %s, skipping associated DeleteItemAction plugins", backup.Name)
 			// for backups which failed before tarball object could be uploaded we do offline cleanup
@@ -292,13 +378,25 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 			// Optimization: wrap in a gofunc? Would be useful for large backups with lots of objects.
 			// but what do we do with the error returned? We can't just swallow it as that may lead to dangling resources.
-			err = delete.InvokeDeleteActions(deleteCtx)
-			if err != nil {
+			err = invokeDeleteActions(deleteCtx)
+			var actionErrs delete.ItemActionErrors
+			if errors.As(err, &actionErrs) {
+				// Reported, but the other snapshots and data are still deleted:
+				// a processed request is not retried.
+				for _, actionErr := range actionErrs {
+					errs = append(errs, actionErr.Error())
+				}
+			} else if err != nil {
 				log.WithError(err).Error("Error invoking delete item actions")
 				err2 := r.patchDeleteBackupRequestWithError(ctx, dbr, errors.New("error invoking delete item actions"))
 				return ctrl.Result{}, err2
 			}
 		}
+	}
+
+	// The delete actions leave each group snapshot to a stub group content.
+	for _, err := range csi.DeleteGroupSnapshotStubs(ctx, r.Client, backup, log) {
+		errs = append(errs, err.Error())
 	}
 
 	if backupStore != nil {
@@ -366,9 +464,17 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	if backupStore != nil && len(errs) == 0 {
-		log.Info("Removing backup from backup storage")
-		if err := backupStore.DeleteBackup(backup.Name); err != nil {
-			errs = append(errs, errors.Wrap(err, "error removing backup from backup storage").Error())
+		if location.GetAnnotations()[velerov1api.ObjectLockAnnotation] == "true" {
+			log.Info("Immutable policy is enabled for this objectstore, skipping removal of backup data from backup storage")
+		} else {
+			log.Info("Removing backup from backup storage")
+			if err := backupStore.DeleteBackup(backup.Name); err != nil {
+				if isObjectLockError(err) {
+					log.WithError(err).Warn("Backup storage objects are protected by an immutability policy. Skipping delete and not retrying.")
+				} else {
+					errs = append(errs, errors.Wrap(err, "error removing backup from backup storage").Error())
+				}
+			}
 		}
 	} else if len(errs) > 0 {
 		log.Info("Skipping removal of backup from backup storage due to previous errors")

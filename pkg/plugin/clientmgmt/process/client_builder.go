@@ -21,6 +21,8 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strconv"
+	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
 	hcplugin "github.com/hashicorp/go-plugin"
@@ -63,6 +65,20 @@ func newLogrusAdapter(pluginLogger logrus.FieldLogger, logLevel logrus.Level) *l
 	return &logrusAdapter{impl: pluginLogger, level: logLevel}
 }
 
+// pluginStartTimeout is how long a plugin process may take to start:
+// PLUGIN_START_TIMEOUT minutes, 5 by default.
+func pluginStartTimeout() time.Duration {
+	timeoutMinutes := 5
+
+	if value, found := os.LookupEnv("PLUGIN_START_TIMEOUT"); found {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			timeoutMinutes = parsed
+		}
+	}
+
+	return time.Duration(timeoutMinutes) * time.Minute
+}
+
 func (b *clientBuilder) clientConfig() *hcplugin.ClientConfig {
 	return &hcplugin.ClientConfig{
 		HandshakeConfig:  framework.Handshake(),
@@ -78,8 +94,9 @@ func (b *clientBuilder) clientConfig() *hcplugin.ClientConfig {
 			string(common.PluginKindDeleteItemAction):    framework.NewDeleteItemActionPlugin(common.ClientLogger(b.clientLogger)),
 			string(common.PluginKindItemBlockAction):     ibav1.NewItemBlockActionPlugin(common.ClientLogger(b.clientLogger)),
 		},
-		Logger: b.pluginLogger,
-		Cmd:    exec.CommandContext(context.Background(), b.commandName, b.commandArgs...), //nolint:gosec // Internal call. No need to check the command line.
+		Logger:       b.pluginLogger,
+		Cmd:          exec.CommandContext(context.Background(), b.commandName, b.commandArgs...), //nolint:gosec // Internal call. No need to check the command line.
+		StartTimeout: pluginStartTimeout(),
 	}
 }
 

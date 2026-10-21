@@ -14,6 +14,7 @@ import (
 
 	velerov1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	velerov2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
+	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	repotypes "github.com/vmware-tanzu/velero/pkg/repository/types"
@@ -26,7 +27,7 @@ type DataUploadDeleteAction struct {
 
 func (d *DataUploadDeleteAction) AppliesTo() (velero.ResourceSelector, error) {
 	return velero.ResourceSelector{
-		IncludedResources: []string{"datauploads.velero.io"},
+		IncludedResources: []string{kuberesource.DataUploads.String()},
 	}, nil
 }
 

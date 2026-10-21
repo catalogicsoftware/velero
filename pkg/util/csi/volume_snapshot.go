@@ -20,8 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,11 +32,18 @@ import (
 	corev1api "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	k8swatch "k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
+	watchtools "k8s.io/client-go/tools/watch"
+	"k8s.io/client-go/util/retry"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/vmware-tanzu/velero/internal/catalogic"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/stringptr"
@@ -47,6 +53,8 @@ import (
 const (
 	waitInternal                          = 2 * time.Second
 	volumeSnapshotContentProtectFinalizer = "velero.io/volume-snapshot-content-protect-finalizer"
+	// snapshotterContentFinalizer is the CSI snapshotter's finalizer on a bound VolumeSnapshotContent.
+	snapshotterContentFinalizer = "snapshot.storage.kubernetes.io/volumesnapshotcontent-bound-protection"
 )
 
 // WaitVolumeSnapshotReady waits a VS to become ready to use until the timeout reaches
@@ -186,6 +194,12 @@ func EnsureDeleteVS(ctx context.Context, snapshotClient snapshotter.SnapshotV1In
 
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
+			// updated is only set once the VS has been retrieved successfully, so it
+			// is still nil when the deadline is exceeded before that happens, e.g.
+			// when the first Get times out. No finalizers are available to report.
+			if updated == nil {
+				return errors.Errorf("timeout to assure VolumeSnapshot %s is deleted", vsName)
+			}
 			return errors.Errorf("timeout to assure VolumeSnapshot %s is deleted, finalizers in VS %v", vsName, updated.Finalizers)
 		} else {
 			return errors.Wrapf(err, "error to assure VolumeSnapshot is deleted, %s", vsName)
@@ -245,6 +259,12 @@ func EnsureDeleteVSC(ctx context.Context, snapshotClient snapshotter.SnapshotV1I
 
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
+			// updated is only set once the VSC has been retrieved successfully, so it
+			// is still nil when the deadline is exceeded before that happens, e.g.
+			// when the first Get times out. No finalizers are available to report.
+			if updated == nil {
+				return errors.Errorf("timeout to assure VolumeSnapshotContent %s is deleted", vscName)
+			}
 			return errors.Errorf("timeout to assure VolumeSnapshotContent %s is deleted, finalizers in VSC %v", vscName, updated.Finalizers)
 		} else {
 			return errors.Wrapf(err, "error to assure VolumeSnapshotContent is deleted, %s", vscName)
@@ -320,8 +340,19 @@ func GetVolumeSnapshotClass(
 	if err != nil {
 		return nil, errors.Wrap(err, "error listing VolumeSnapshotClass")
 	}
-	// If a snapshot class is set for provider in PVC annotations, use that
-	snapshotClass, err := GetVolumeSnapshotClassFromPVCAnnotationsForDriver(
+
+	// 1. Check if there is a mapping for the PVC's StorageClass in the Backup annotations
+	snapshotClass, err := GetVolumeSnapshotClassFromBackupMapping(backup, pvc, provisioner, snapshotClasses)
+	if err != nil {
+		log.Debugf("Didn't find VolumeSnapshotClass from Backup StorageClass mapping: %v", err)
+	}
+	if snapshotClass != nil {
+		log.Infof("Found VolumeSnapshotClass %s from Backup StorageClass mapping for PVC %s", snapshotClass.Name, pvc.Name)
+		return snapshotClass, nil
+	}
+
+	// 2. If a snapshot class is set for provider in PVC annotations, use that
+	snapshotClass, err = GetVolumeSnapshotClassFromPVCAnnotationsForDriver(
 		pvc, provisioner, snapshotClasses,
 	)
 	if err != nil {
@@ -331,7 +362,7 @@ func GetVolumeSnapshotClass(
 		return snapshotClass, nil
 	}
 
-	// If there is no annotation in PVC, attempt to fetch it from backup annotations
+	// 3. If there is no annotation in PVC, attempt to fetch it from backup annotations (Driver based)
 	snapshotClass, err = GetVolumeSnapshotClassFromBackupAnnotationsForDriver(
 		backup, provisioner, snapshotClasses)
 	if err != nil {
@@ -341,14 +372,150 @@ func GetVolumeSnapshotClass(
 		return snapshotClass, nil
 	}
 
-	// fallback to default behavior of fetching snapshot class based on label
+	// Drivers listed in the Backup's SnapshotClassRequiredDriversAnnotation must
+	// have a VolumeSnapshotClass configured explicitly (tiers 1-3 above, or a VSC
+	// the user labeled as the default in tier 4). For these drivers we do NOT
+	// allow the implicit selections that follow -- picking a lone unlabeled VSC
+	// (tier 4) or auto-creating one (tier 5) -- because the result would lack the
+	// driver-specific parameters the snapshot needs and would only time out.
+	isRequiredDriver := snapshotClassDriverRequired(backup, provisioner)
+
+	// 4. Fallback to default behavior of fetching snapshot class based on label.
+	// For required drivers the single-match fallback is disabled, so only a
+	// user-labeled VSC qualifies here.
 	snapshotClass, err = GetVolumeSnapshotClassForStorageClass(
-		provisioner, snapshotClasses)
-	if err != nil || snapshotClass == nil {
-		return nil, errors.Wrap(err, "error getting VolumeSnapshotClass")
+		provisioner, snapshotClasses, !isRequiredDriver)
+	if err == nil && snapshotClass != nil {
+		return snapshotClass, nil
 	}
 
-	return snapshotClass, nil
+	// For a required driver, none of the explicit methods matched, so fail this
+	// PVC's snapshot immediately with an actionable message instead of falling
+	// through to the implicit auto-create.
+	if isRequiredDriver {
+		return nil, snapshotClassRequiredError(provisioner, pvc)
+	}
+
+	log.Debugf("No VolumeSnapshotClass found via standard methods: %v", err)
+
+	// 5. Absolute last resort fallback.
+	return GetFallbackVolumeSnapshotClass(provisioner, log, crClient)
+}
+
+// snapshotClassRequiredError builds the actionable error returned when a CSI
+// driver requires a manually-configured VolumeSnapshotClass but none was found
+// through the explicit selection methods.
+func snapshotClassRequiredError(
+	provisioner string,
+	pvc *corev1api.PersistentVolumeClaim,
+) error {
+	pvcRef := "<unknown>"
+	storageClassName := "<unknown>"
+	if pvc != nil {
+		pvcRef = fmt.Sprintf("%s/%s", pvc.Namespace, pvc.Name)
+		if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != "" {
+			storageClassName = *pvc.Spec.StorageClassName
+		}
+	}
+	return errors.Errorf(
+		"No VolumeSnapshotClass configured for CSI driver %q (PVC %s, StorageClass %q). "+
+			"This driver requires custom parameters in its VolumeSnapshotClass, so CloudCasa "+
+			"will not create one automatically. Configure a VolumeSnapshotClass "+
+			"as described in the documentation, then retry the backup.",
+		provisioner, pvcRef, storageClassName,
+	)
+}
+
+// GetSnapshotClassRequiredDrivers parses the comma-separated list of CSI driver
+// names from the Backup's SnapshotClassRequiredDriversAnnotation. These drivers
+// require a manually-configured VolumeSnapshotClass, so the plugin must not
+// auto-create one for them. Returns an empty set when the annotation is absent
+// or empty, in which case the feature is a no-op.
+//
+// Names are lower-cased so membership checks are case-insensitive against a
+// StorageClass provisioner / VolumeSnapshotClass driver; callers must lower-case
+// the value they test with Has (see snapshotClassDriverRequired).
+func GetSnapshotClassRequiredDrivers(backup *velerov1api.Backup) sets.String {
+	drivers := sets.NewString()
+	if backup == nil {
+		return drivers
+	}
+	raw := backup.Annotations[velerov1api.SnapshotClassRequiredDriversAnnotation]
+	for _, d := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(d); trimmed != "" {
+			drivers.Insert(strings.ToLower(trimmed))
+		}
+	}
+	return drivers
+}
+
+// snapshotClassDriverRequired reports whether the given CSI driver/provisioner
+// is in the Backup's required-drivers list, matching case-insensitively to stay
+// consistent with the driver comparisons used by the other selection tiers.
+func snapshotClassDriverRequired(backup *velerov1api.Backup, provisioner string) bool {
+	return GetSnapshotClassRequiredDrivers(backup).Has(strings.ToLower(provisioner))
+}
+
+// Checks for StorageClass -> VolumeSnapshotClass mapping
+func GetVolumeSnapshotClassFromBackupMapping(
+	backup *velerov1api.Backup,
+	pvc *corev1api.PersistentVolumeClaim,
+	provisioner string,
+	snapshotClasses *snapshotv1api.VolumeSnapshotClassList,
+) (*snapshotv1api.VolumeSnapshotClass, error) {
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
+		// If no StorageClass is specified, we cannot use the SC-based mapping.
+		// Log this and return nil to fall through to other methods.
+		// (An empty string check is also good practice, though nil is the primary concern).
+		return nil, nil
+	}
+	targetStorageClass := *pvc.Spec.StorageClassName
+
+	// Iterate over ALL backup annotations to find our specific prefix
+	var targetVSCName string
+	found := false
+
+	for k, v := range backup.Annotations {
+		if strings.HasPrefix(k, velerov1api.VolumeSnapshotClassStorageClassBackupAnnotationPrefix) {
+			// Value format is "StorageClass:VolumeSnapshotClass"
+			parts := strings.SplitN(v, ":", 2)
+			if len(parts) != 2 {
+				continue // Malformed value, skip
+			}
+
+			scName := parts[0]
+			vscName := parts[1]
+
+			// Check if this mapping matches the PVC's StorageClass
+			if scName == targetStorageClass {
+				targetVSCName = vscName
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		return nil, nil // No mapping found for this storage class
+	}
+
+	// Verify the mapped VolumeSnapshotClass exists and matches the driver
+	for _, sc := range snapshotClasses.Items {
+		if strings.EqualFold(targetVSCName, sc.ObjectMeta.Name) {
+			if !strings.EqualFold(sc.Driver, provisioner) {
+				return nil, errors.Errorf(
+					"Mapped VolumeSnapshotClass %s (from SC %s) is not for driver %s",
+					sc.ObjectMeta.Name, targetStorageClass, provisioner,
+				)
+			}
+			return &sc, nil
+		}
+	}
+
+	return nil, errors.Errorf(
+		"Mapped VolumeSnapshotClass %s not found in cluster for StorageClass %s",
+		targetVSCName, targetStorageClass,
+	)
 }
 
 func GetVolumeSnapshotClassFromPVCAnnotationsForDriver(
@@ -414,48 +581,156 @@ func GetVolumeSnapshotClassFromBackupAnnotationsForDriver(
 
 // GetVolumeSnapshotClassForStorageClass returns a VolumeSnapshotClass
 // for the supplied volume provisioner/ driver name.
+//
+// A VSC carrying the selector label is always preferred. When
+// allowSingleMatchFallback is true and no labeled VSC exists, a lone VSC for the
+// driver is returned as an implicit default. Callers pass false to disable that
+// implicit fallback (e.g. drivers that require an explicitly-configured VSC), in
+// which case only a labeled VSC qualifies.
 func GetVolumeSnapshotClassForStorageClass(
 	provisioner string,
 	snapshotClasses *snapshotv1api.VolumeSnapshotClassList,
+	allowSingleMatchFallback bool,
 ) (*snapshotv1api.VolumeSnapshotClass, error) {
 	n := 0
 	var vsClass snapshotv1api.VolumeSnapshotClass
 	// We pick the VolumeSnapshotClass that matches the CSI driver name
-	// and has a 'velero.io/csi-volumesnapshot-class' label. This allows
+	// and has a 'cloudcasa.io/csi-volumesnapshot-class' label. This allows
 	// multiple VolumeSnapshotClasses for the same driver with different
 	// values for the other fields in the spec.
 	for _, sc := range snapshotClasses.Items {
 		_, hasLabelSelector := sc.Labels[velerov1api.VolumeSnapshotClassSelectorLabel]
 		if sc.Driver == provisioner {
-			n++
+			n += 1
 			vsClass = sc
 			if hasLabelSelector {
 				return &sc, nil
 			}
 		}
 	}
-	// not found by label, pick by annotation
-	for _, sc := range snapshotClasses.Items {
-		_, hasDefaultAnnotation := sc.Annotations[velerov1api.VolumeSnapshotClassKubernetesAnnotation]
-		if sc.Driver == provisioner {
-			vsClass = sc
-			if hasDefaultAnnotation {
-				return &sc, nil
-			}
-		}
-	}
-	// If there's only one volumesnapshotclass for the driver, return it.
-	if n == 1 {
+	// If there's only one volumesnapshotclass for the driver, return it,
+	// unless the caller disabled this implicit fallback.
+	if allowSingleMatchFallback && n == 1 {
 		return &vsClass, nil
 	}
 	return nil, fmt.Errorf(
-		"failed to get VolumeSnapshotClass for provisioner %s: "+
-			"ensure that the desired VolumeSnapshotClass has the %s label or %s annotation, "+
-			"and that its driver matches the StorageClass provisioner",
-		provisioner,
-		velerov1api.VolumeSnapshotClassSelectorLabel,
-		velerov1api.VolumeSnapshotClassKubernetesAnnotation,
-	)
+		"failed to get VolumeSnapshotClass for provisioner %s, "+
+			"ensure that the desired VolumeSnapshot class is configured in Cloudcasa.",
+		provisioner)
+}
+
+// GetFallbackVolumeSnapshotClass attempts to find a usable class or creates a new one
+// if strict matching failed.
+//
+// Drivers that require a manually-configured VolumeSnapshotClass never reach this
+// function: GetVolumeSnapshotClass fails them fast at the explicit-methods
+// boundary (see snapshotClassRequiredError), so this fallback only runs for
+// drivers where auto-selection/creation is acceptable.
+func GetFallbackVolumeSnapshotClass(
+	provisioner string,
+	log logrus.FieldLogger,
+	client crclient.Client,
+) (*snapshotv1api.VolumeSnapshotClass, error) {
+	log.Infof("Attempting to find or create a fallback VolumeSnapshotClass for driver: %s", provisioner)
+
+	// 1. List all VSCs
+	vscList := new(snapshotv1api.VolumeSnapshotClassList)
+	if err := client.List(context.TODO(), vscList); err != nil {
+		return nil, errors.Wrap(err, "failed to list VolumeSnapshotClasses for fallback selection")
+	}
+
+	// 2. Filter by Driver/Provisioner
+	var matches []snapshotv1api.VolumeSnapshotClass
+	for _, vsc := range vscList.Items {
+		if vsc.Driver == provisioner {
+			matches = append(matches, vsc)
+		}
+	}
+
+	// 3. Logic: If exactly one exists, use it (Relaxed requirements)
+	if len(matches) == 1 {
+		log.Infof("Found exactly one existing VolumeSnapshotClass for driver %s: %s. Using it.", provisioner, matches[0].Name)
+		return &matches[0], nil
+	}
+
+	// 4. Logic: If 0 or >1, we create a Cloudcasa specific fallback class.
+	// If >1, we create a new one to ensure we don't pick a class with unknown/undesirable parameters (e.g. Gold vs Bronze).
+	return CreateFallbackVolumeSnapshotClass(provisioner, log, client)
+}
+
+func CreateFallbackVolumeSnapshotClass(
+	provisioner string,
+	log logrus.FieldLogger,
+	client crclient.Client,
+) (*snapshotv1api.VolumeSnapshotClass, error) {
+
+	// Sanitize provisioner name
+	safeName := strings.ReplaceAll(provisioner, ".", "-")
+	vscName := fmt.Sprintf("cloudcasa-%s", safeName)
+
+	log.Infof("Creating new fallback VolumeSnapshotClass: %s", vscName)
+
+	// Define Parameters
+	parameters := make(map[string]string)
+	switch provisioner {
+	case "driver.longhorn.io":
+		parameters["type"] = "snap"
+	case "cinder.csi.openstack.org":
+		parameters["force-create"] = "true"
+	}
+
+	// Define Object
+	newVSC := &snapshotv1api.VolumeSnapshotClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: vscName,
+			Labels: map[string]string{
+				velerov1api.VolumeSnapshotClassSelectorLabel: "true",
+				"created-by": "cloudcasa",
+			},
+		},
+		Driver:         provisioner,
+		DeletionPolicy: snapshotv1api.VolumeSnapshotContentRetain,
+		Parameters:     parameters,
+	}
+
+	// Attempt Create
+	err := client.Create(context.TODO(), newVSC)
+	if err == nil {
+		log.Infof("Successfully created fallback VolumeSnapshotClass: %s", vscName)
+		return newVSC, nil
+	}
+
+	if !apierrors.IsAlreadyExists(err) {
+		return nil, errors.Wrapf(err, "failed to create fallback VolumeSnapshotClass %s", vscName)
+	}
+
+	// --- Handling Race Condition / Cache Lag ---
+	log.Infof("Fallback VolumeSnapshotClass %s already exists, waiting for cache sync...", vscName)
+
+	existingVSC := new(snapshotv1api.VolumeSnapshotClass)
+	key := crclient.ObjectKey{Name: vscName}
+
+	// Retry loop: Poll every 500ms, up to 5 seconds.
+	// This handles the case where API says "Created" but client cache says "NotFound".
+	pollErr := wait.PollUntilContextTimeout(context.Background(), 500*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+		// Use the context passed into the closure
+		if err := client.Get(ctx, key, existingVSC); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Object exists on server but not in cache yet. Retry.
+				return false, nil
+			}
+			// If we get a permission error or connection refused, stop retrying.
+			return false, err
+		}
+		// Success: Found the object
+		return true, nil
+	})
+
+	if pollErr != nil {
+		return nil, errors.Wrapf(pollErr, "failed to retrieve existing fallback VolumeSnapshotClass %s after creation conflict", vscName)
+	}
+
+	return existingVSC, nil
 }
 
 // IsVolumeSnapshotClassHasListerSecret returns whether a volumesnapshotclass has a snapshotlister secret
@@ -592,132 +867,445 @@ func DeleteReadyVolumeSnapshot(
 	}
 }
 
-// WaitUntilVSCHandleIsReady returns the VolumeSnapshotContent
-// object associated with the volumesnapshot
+// annotateVSCWithPVC records on the VolumeSnapshotContent which PVC it came
+// from. The external snapshotter writes to the same object, so a conflicting
+// update is retried rather than reported.
+func annotateVSCWithPVC(
+	ctx context.Context,
+	crClient crclient.Client,
+	vsc *snapshotv1api.VolumeSnapshotContent,
+	boundVSCName string,
+	latestVS *snapshotv1api.VolumeSnapshot,
+	log logrus.FieldLogger,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := crClient.Get(ctx, crclient.ObjectKey{Name: boundVSCName}, vsc); err != nil {
+			return err
+		}
+		if vsc.Annotations == nil {
+			vsc.Annotations = make(map[string]string)
+		}
+		updated := false
+		if _, exists := vsc.Annotations["cc-pvc-name"]; !exists &&
+			latestVS.Spec.Source.PersistentVolumeClaimName != nil {
+			vsc.Annotations["cc-pvc-name"] = *latestVS.Spec.Source.PersistentVolumeClaimName
+			updated = true
+		}
+		if _, exists := vsc.Annotations["cc-pvc-namespace"]; !exists {
+			vsc.Annotations["cc-pvc-namespace"] = latestVS.Namespace
+			updated = true
+		}
+		if updated {
+			if err := crClient.Update(ctx, vsc); err != nil {
+				// The retry above absorbs a conflict, and a failure that outlasts
+				// it is reported by the caller. At warn this counts a conflict the
+				// backup recovered from against its warning total.
+				log.WithError(err).Debugf(
+					"VSC annotation update for %s did not apply; retrying", boundVSCName)
+				return err
+			}
+			log.Infof("Updated PVC annotations on VSC %s", boundVSCName)
+		}
+		return nil
+	})
+}
+
+// nameListWatch lists and watches one named object through a controller-runtime
+// watch client. The API server filters by name; a fake client ignores the raw
+// field selector, so callers must still match the name themselves.
+func nameListWatch(ctx context.Context, watchClient crclient.WithWatch, namespace, name string,
+	newList func() crclient.ObjectList) *cache.ListWatch {
+	fieldSelector := fields.OneTermEqualSelector("metadata.name", name).String()
+	return &cache.ListWatch{
+		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+			opts.FieldSelector = fieldSelector
+			list := newList()
+			err := watchClient.List(ctx, list, &crclient.ListOptions{Raw: &opts, Namespace: namespace})
+			return list, err
+		},
+		WatchFunc: func(opts metav1.ListOptions) (k8swatch.Interface, error) {
+			opts.FieldSelector = fieldSelector
+			return watchClient.Watch(ctx, newList(), &crclient.ListOptions{Raw: &opts, Namespace: namespace})
+		},
+	}
+}
+
+// DeleteVolumeSnapshot handles the VolumeSnapshot instance deletion.
+func DeleteVolumeSnapshot(
+	vs snapshotv1api.VolumeSnapshot,
+	vsc snapshotv1api.VolumeSnapshotContent,
+	backup *velerov1api.Backup,
+	client crclient.Client,
+	logger logrus.FieldLogger,
+) {
+	vsReady := vs.Status != nil &&
+		vs.Status.BoundVolumeSnapshotContentName != nil &&
+		len(*vs.Status.BoundVolumeSnapshotContentName) > 0
+
+	// Guard: if VS is not ready and DeletionPolicy is Delete, we must not
+	// proceed — deleting the VS would cascade-delete the storage snapshot.
+	if !vsReady {
+		if vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentDelete {
+			vscInfo := ""
+			if vsc.Name != "" {
+				vscInfo = fmt.Sprintf(" and VolumeSnapshotContent %s (with DeletionPolicy=%s)", vsc.Name, vsc.Spec.DeletionPolicy)
+			}
+			logger.Warnf("VolumeSnapshot %s/%s is not ready; skipping deletion to prevent cascade-deleting the storage snapshot. "+
+				"The VolumeSnapshot%s will remain in the cluster "+
+				"until the retention period expires or the recovery point is explicitly deleted. "+
+				"Manual deletion of either resource before that will destroy the storage snapshot. "+
+				"To safely clean up manually, first patch the VolumeSnapshotContent DeletionPolicy to Retain, then delete the VolumeSnapshot.",
+				vs.Namespace, vs.Name, vscInfo)
+			return
+		}
+		logger.Infof("VolumeSnapshot %s/%s is not ready, but DeletionPolicy is %s. Proceeding with deletion.",
+			vs.Namespace, vs.Name, vsc.Spec.DeletionPolicy)
+	}
+
+	// Patch DeletionPolicy to Retain before deleting, so the storage snapshot survives.
+	modifyVSCFlag := vsReady && vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentDelete
+
+	if modifyVSCFlag {
+		logger.Infof("VolumeSnapshotContent %s requires DeletionPolicy patch from Delete to Retain before deleting VolumeSnapshot %s/%s",
+			vsc.Name, vs.Namespace, vs.Name)
+	} else {
+		logger.Infof("No DeletionPolicy patch needed for VolumeSnapshot %s/%s (VSCReady=%v, VSC=%q, DeletionPolicy=%s)",
+			vs.Namespace, vs.Name, vsReady, vsc.Name, vsc.Spec.DeletionPolicy)
+	}
+
+	// Change VolumeSnapshotContent's DeletionPolicy to Retain before deleting VolumeSnapshot,
+	// because VolumeSnapshotContent will be deleted by deleting VolumeSnapshot, when
+	// DeletionPolicy is set to Delete, but Velero needs VSC for cleaning snapshot on cloud
+	// in backup deletion.
+	if modifyVSCFlag {
+		logger.Debugf("Patching VolumeSnapshotContent %s", vsc.Name)
+		originVSC := vsc.DeepCopy()
+		vsc.Spec.DeletionPolicy = snapshotv1api.VolumeSnapshotContentRetain
+		err := client.Patch(
+			context.Background(),
+			&vsc,
+			crclient.MergeFrom(originVSC),
+		)
+		if err != nil {
+			logger.Errorf(
+				"fail to modify VolumeSnapshotContent %s DeletionPolicy to Retain: %s",
+				vsc.Name, err.Error(),
+			)
+			return
+		}
+
+		defer func() {
+			logger.Debugf("Start to recreate VolumeSnapshotContent %s", vsc.Name)
+			err := recreateVolumeSnapshotContent(vsc, backup, client, logger)
+			if err != nil {
+				logger.Errorf(
+					"fail to recreate VolumeSnapshotContent %s: %s",
+					vsc.Name,
+					err.Error(),
+				)
+			}
+		}()
+	}
+
+	// Delete VolumeSnapshot from cluster
+	logger.Debugf("Deleting VolumeSnapshot %s/%s", vs.Namespace, vs.Name)
+	err := client.Delete(context.TODO(), &vs)
+	if err != nil {
+		logger.Errorf("fail to delete VolumeSnapshot %s/%s: %s",
+			vs.Namespace, vs.Name, err.Error())
+	}
+}
+
+// removeContentFinalizer removes a finalizer from a VolumeSnapshotContent, if
+// the content still exists.
+func removeContentFinalizer(client crclient.Client, name, finalizer string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vsc := new(snapshotv1api.VolumeSnapshotContent)
+		if err := client.Get(context.TODO(), crclient.ObjectKey{Name: name}, vsc); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if !slices.Contains(vsc.Finalizers, finalizer) {
+			return nil
+		}
+		vsc.Finalizers = slices.DeleteFunc(vsc.Finalizers, func(f string) bool { return f == finalizer })
+		return client.Update(context.TODO(), vsc)
+	})
+}
+
+// recreateVolumeSnapshotContent will delete then re-create VolumeSnapshotContent,
+// because some parameter in VolumeSnapshotContent Spec is immutable,
+// e.g. VolumeSnapshotRef and Source.
+// Source is updated to let csi-controller thinks the VSC is statically
+// provisioned with VS.
+// Set VolumeSnapshotRef's UID to nil will let the csi-controller finds out
+// the related VS is gone, then VSC can be deleted.
+func recreateVolumeSnapshotContent(
+	vsc snapshotv1api.VolumeSnapshotContent,
+	backup *velerov1api.Backup,
+	client crclient.Client,
+	log logrus.FieldLogger,
+) error {
+	// Read resource timeout from backup annotation, if not set, use default value.
+	timeout, err := time.ParseDuration(
+		backup.Annotations[velerov1api.ResourceTimeoutAnnotation])
+	if err != nil {
+		log.Warnf("fail to parse resource timeout annotation %s: %s",
+			backup.Annotations[velerov1api.ResourceTimeoutAnnotation], err.Error())
+		timeout = 10 * time.Minute
+	}
+	log.Debugf("resource timeout is set to %s", timeout.String())
+	interval := 1 * time.Second
+
+	if err := client.Delete(context.TODO(), &vsc); err != nil {
+		return errors.Wrapf(err, "fail to delete VolumeSnapshotContent: %s", vsc.Name)
+	}
+	// The snapshotter never releases a group member's content once its
+	// VolumeSnapshot is gone; with Retain its finalizer guards nothing.
+	if vsc.Status != nil && vsc.Status.VolumeGroupSnapshotHandle != nil &&
+		vsc.Spec.DeletionPolicy == snapshotv1api.VolumeSnapshotContentRetain {
+		if err := removeContentFinalizer(client, vsc.Name, snapshotterContentFinalizer); err != nil {
+			return errors.Wrapf(err, "fail to release VolumeSnapshotContent %s of a group snapshot", vsc.Name)
+		}
+	}
+
+	// Check VolumeSnapshotContents is already deleted, before re-creating it.
+	err = wait.PollUntilContextTimeout(
+		context.Background(),
+		interval,
+		timeout,
+		true,
+		func(ctx context.Context) (bool, error) {
+			tmpVSC := new(snapshotv1api.VolumeSnapshotContent)
+			if err := client.Get(ctx, crclient.ObjectKeyFromObject(&vsc), tmpVSC); err != nil {
+				if apierrors.IsNotFound(err) {
+					return true, nil
+				}
+				return false, errors.Wrapf(err, "failed to get VolumeSnapshotContent %s", vsc.Name)
+			}
+			return false, nil
+		},
+	)
+	if err != nil {
+		return errors.Wrapf(err, "fail to retrieve VolumeSnapshotContent %s info", vsc.Name)
+	}
+
+	// Make the VolumeSnapshotContent static
+	vsc.Spec.Source = snapshotv1api.VolumeSnapshotContentSource{
+		SnapshotHandle: vsc.Status.SnapshotHandle,
+	}
+	// Set VolumeSnapshotRef to none exist one, because VolumeSnapshotContent
+	// validation webhook will check whether name and namespace are nil.
+	// external-snapshotter needs Source pointing to snapshot and VolumeSnapshot
+	// reference's UID to nil to determine the VolumeSnapshotContent is deletable.
+	vsc.Spec.VolumeSnapshotRef = corev1api.ObjectReference{
+		APIVersion: snapshotv1api.SchemeGroupVersion.String(),
+		Kind:       "VolumeSnapshot",
+		Namespace:  "ns-" + string(vsc.UID),
+		Name:       "name-" + string(vsc.UID),
+	}
+	// ResourceVersion shouldn't exist for new creation.
+	vsc.ResourceVersion = ""
+	if err := client.Create(context.TODO(), &vsc); err != nil {
+		return errors.Wrapf(err, "fail to create VolumeSnapshotContent %s", vsc.Name)
+	}
+
+	return nil
+}
+
+// reportSnapshotProgress relays a snapshot state to kubeagent; tests replace it.
+var reportSnapshotProgress = catalogic.UpdateSnapshotProgress
+
+// WaitUntilVSCHandleIsReady waits until the VolumeSnapshot is bound and its
+// VolumeSnapshotContent has a snapshot handle, and returns that content. It
+// watches both objects so it reacts as soon as they change; one deadline of
+// csiSnapshotTimeout covers both phases.
 func WaitUntilVSCHandleIsReady(
 	volSnap *snapshotv1api.VolumeSnapshot,
 	crClient crclient.Client,
 	log logrus.FieldLogger,
 	csiSnapshotTimeout time.Duration,
 ) (*snapshotv1api.VolumeSnapshotContent, error) {
-	// We'll wait for the VSC to be reconciled, trying a fast poll interval first
-	// before falling back to a slower poll interval for the full csiSnapshotTimeout.
-	vsc := new(snapshotv1api.VolumeSnapshotContent)
-	var interval time.Duration
+	log.Infof("Start WaitUntilVSCHandleIsReady: VolSnap=%s/%s, Timeout=%v",
+		volSnap.Namespace, volSnap.Name, csiSnapshotTimeout)
 
-	pollFunc := func(ctx context.Context) (bool, error) {
-		vs := new(snapshotv1api.VolumeSnapshot)
-		if err := crClient.Get(
-			ctx,
-			crclient.ObjectKeyFromObject(volSnap),
-			vs,
-		); err != nil {
-			return false,
-				errors.Wrapf(
-					err,
-					"failed to get volumesnapshot %s/%s",
-					volSnap.Namespace, volSnap.Name,
-				)
-		}
-
-		if vs.Status == nil || vs.Status.BoundVolumeSnapshotContentName == nil {
-			log.Infof("Waiting for CSI driver to reconcile volumesnapshot %s/%s. Retrying in %ds",
-				volSnap.Namespace, volSnap.Name, interval/time.Second)
-			return false, nil
-		}
-
-		if err := crClient.Get(
-			ctx,
-			crclient.ObjectKey{
-				Name: *vs.Status.BoundVolumeSnapshotContentName,
-			},
-			vsc,
-		); err != nil {
-			return false,
-				errors.Wrapf(
-					err,
-					"failed to get VolumeSnapshotContent %s for VolumeSnapshot %s/%s",
-					*vs.Status.BoundVolumeSnapshotContentName, vs.Namespace, vs.Name,
-				)
-		}
-
-		// we need to wait for the VolumeSnapshotContent
-		// to have a snapshot handle because during restore,
-		// we'll use that snapshot handle as the source for
-		// the VolumeSnapshotContent so it's statically
-		// bound to the existing snapshot.
-		if vsc.Status == nil ||
-			vsc.Status.SnapshotHandle == nil {
-			log.Infof(
-				"Waiting for VolumeSnapshotContents %s to have snapshot handle. Retrying in %ds",
-				vsc.Name, interval/time.Second)
-			if vsc.Status != nil &&
-				vsc.Status.Error != nil {
-				log.Warnf("VolumeSnapshotContent %s has error: %v",
-					vsc.Name, *vsc.Status.Error.Message)
-			}
-			return false, nil
-		}
-
-		return true, nil
+	watchClient, ok := crClient.(crclient.WithWatch)
+	if !ok {
+		return nil, errors.New("the client given to WaitUntilVSCHandleIsReady cannot watch")
 	}
 
-	var err error
-	frequentPolling, err := strconv.ParseBool(os.Getenv("CSI_SNAPSHOT_EARLY_FREQUENT_POLLING"))
-
-	if err == nil && frequentPolling {
-		// The short interval for the first ten seconds is due to the fact that
-		// Microsoft VSS backups have a hard-coded unfreeze call after 10 seconds,
-		// so we need to minimize waiting time during the first 10 seconds.
-		// First poll with a short interval and timeout.
-		interval = 1 * time.Second
-		timeout := 10 * time.Second
-		err = wait.PollUntilContextTimeout(
-			context.Background(),
-			interval,
-			timeout,
-			true,
-			pollFunc,
-		)
-
-		if err == nil {
-			return vsc, nil
-		}
-		if !wait.Interrupted(err) {
-			return nil, err
-		}
-	}
-
-	// If the first poll timed out, poll with a longer interval and the full timeout.
-	interval = 5 * time.Second
-	err = wait.PollUntilContextTimeout(
-		context.Background(),
-		interval,
-		csiSnapshotTimeout,
-		true,
-		pollFunc,
-	)
-
-	if err != nil {
-		if wait.Interrupted(err) {
-			if vsc != nil &&
-				vsc.Status != nil &&
-				vsc.Status.Error != nil {
-				log.Errorf(
-					"Timed out awaiting reconciliation of VolumeSnapshot, VolumeSnapshotContent %s has error: %v",
-					vsc.Name, *vsc.Status.Error.Message)
-				return nil,
-					errors.Errorf("CSI got timed out with error: %v",
-						*vsc.Status.Error.Message)
-			} else {
-				log.Errorf(
-					"Timed out awaiting reconciliation of volumesnapshot %s/%s",
-					volSnap.Namespace, volSnap.Name)
-			}
-		}
+	// Validate the backup label that is required by the progress-reporting defer below.
+	jobID, ok := volSnap.Labels["velero.io/backup-name"]
+	if !ok {
+		err := errors.New("missing required label 'velero.io/backup-name' on VolumeSnapshot")
+		log.Error(err)
 		return nil, err
 	}
 
+	// snapshotState / snapshotStateMessage are written throughout the two watch
+	// phases and consumed by the deferred progress-reporter.
+	var snapshotState, snapshotStateMessage string
+	defer func() {
+		uErr := reportSnapshotProgress(nil, volSnap, nil, snapshotState, snapshotStateMessage, jobID, log)
+		if uErr != nil {
+			log.WithError(uErr).Error("Failed to update snapshot progress")
+		}
+		time.Sleep(200 * time.Millisecond)
+		catalogic.DeleteSnapshotProgressConfigMap(jobID, log)
+	}()
+
+	// The plugin ConfigMap only carries an optional timeout override and is often
+	// gone by finalize time, so a missing one falls back to csiSnapshotTimeout.
+	// Failing here would send the caller down the destructive cleanup path.
+	config, err := catalogic.GetPluginConfig(jobID, log)
+	if err != nil {
+		log.WithError(err).Warnf(
+			"Failed to get plugin config; falling back to caller-provided CSI snapshot timeout %v",
+			csiSnapshotTimeout)
+	} else {
+		log.Infof("Plugin config: %+v", config)
+		if config.CsiSnapshotTimeout > 0 {
+			csiSnapshotTimeout = time.Duration(config.CsiSnapshotTimeout) * time.Minute
+			log.Infof("Using configured CSI snapshot Timeout=%v", csiSnapshotTimeout)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), csiSnapshotTimeout)
+	defer cancel()
+
+	// Phase 1: watch the VolumeSnapshot until it is bound to a VolumeSnapshotContent.
+	log.Infof("Phase1: Watching VolumeSnapshot %s/%s for VSC binding, Timeout=%v",
+		volSnap.Namespace, volSnap.Name, csiSnapshotTimeout)
+
+	vsListWatch := nameListWatch(ctx, watchClient, volSnap.Namespace, volSnap.Name,
+		func() crclient.ObjectList { return &snapshotv1api.VolumeSnapshotList{} })
+
+	var boundVSCName string
+	var latestVS *snapshotv1api.VolumeSnapshot
+
+	if _, watchErr := watchtools.UntilWithSync(
+		ctx,
+		vsListWatch,
+		&snapshotv1api.VolumeSnapshot{},
+		nil,
+		func(event k8swatch.Event) (bool, error) {
+			vs, ok := event.Object.(*snapshotv1api.VolumeSnapshot)
+			if !ok || vs.Name != volSnap.Name {
+				return false, nil
+			}
+			switch event.Type {
+			case k8swatch.Deleted:
+				return false, fmt.Errorf(
+					"VolumeSnapshot %s/%s was deleted while waiting for VSC binding",
+					volSnap.Namespace, volSnap.Name)
+			case k8swatch.Added, k8swatch.Modified:
+				if vs.Status == nil || vs.Status.BoundVolumeSnapshotContentName == nil {
+					snapshotState = "pending"
+					snapshotStateMessage = fmt.Sprintf(
+						"Awaiting VolumeSnapshot reconciliation: %s/%s",
+						volSnap.Namespace, volSnap.Name)
+					log.Info(snapshotStateMessage)
+					return false, nil
+				}
+				boundVSCName = *vs.Status.BoundVolumeSnapshotContentName
+				latestVS = vs
+				log.Infof("VolumeSnapshot %s/%s bound to VSC %s",
+					volSnap.Namespace, volSnap.Name, boundVSCName)
+				return true, nil
+			}
+			return false, nil
+		},
+	); watchErr != nil {
+		snapshotState = "error"
+		snapshotStateMessage = fmt.Sprintf("Timed out awaiting reconciliation of VolumeSnapshot %s/%s",
+			volSnap.Namespace, volSnap.Name)
+		log.WithError(watchErr).Errorf(
+			"Phase1 watch failed for VolumeSnapshot %s/%s", volSnap.Namespace, volSnap.Name)
+		return nil, errors.Wrapf(watchErr,
+			"timed out or failed watching VolumeSnapshot %s/%s for VSC binding",
+			volSnap.Namespace, volSnap.Name)
+	}
+	// Give the caller the live status, including the bound content name, which
+	// later steps such as DeleteVolumeSnapshot read.
+	if latestVS != nil {
+		volSnap.Status = latestVS.Status
+	}
+
+	// Annotate the VolumeSnapshotContent with its PVC once the binding is known.
+	vsc := new(snapshotv1api.VolumeSnapshotContent)
+	if annotationErr := annotateVSCWithPVC(ctx, crClient, vsc, boundVSCName, latestVS, log); annotationErr != nil {
+		snapshotState = "error"
+		snapshotStateMessage = fmt.Sprintf("Failed to annotate VolumeSnapshotContent %s: %v", boundVSCName, annotationErr)
+		log.WithError(annotationErr).Errorf(
+			"Failed to update annotations on VSC %s", boundVSCName)
+		return nil, errors.Wrapf(annotationErr, "failed to annotate VSC %s", boundVSCName)
+	}
+
+	// Phase 2: watch the VolumeSnapshotContent until it has a snapshot handle.
+	log.Infof("Phase2: Watching VSC %s for SnapshotHandle readiness", boundVSCName)
+
+	vscListWatch := nameListWatch(ctx, watchClient, "", boundVSCName,
+		func() crclient.ObjectList { return &snapshotv1api.VolumeSnapshotContentList{} })
+	// The last VolumeSnapshotContent seen, so a timeout reports its latest error.
+	lastSeenVSC := vsc
+
+	if _, watchErr := watchtools.UntilWithSync(
+		ctx,
+		vscListWatch,
+		&snapshotv1api.VolumeSnapshotContent{},
+		nil,
+		func(event k8swatch.Event) (bool, error) {
+			updatedVSC, ok := event.Object.(*snapshotv1api.VolumeSnapshotContent)
+			if !ok || updatedVSC.Name != boundVSCName {
+				return false, nil
+			}
+			switch event.Type {
+			case k8swatch.Deleted:
+				return false, fmt.Errorf(
+					"VSC %s was deleted while waiting for SnapshotHandle", boundVSCName)
+			case k8swatch.Added, k8swatch.Modified:
+				lastSeenVSC = updatedVSC
+				if updatedVSC.Status == nil || updatedVSC.Status.SnapshotHandle == nil {
+					snapshotState = "pending"
+					snapshotStateMessage = fmt.Sprintf(
+						"VSC %s lacks SnapshotHandle", boundVSCName)
+					log.Info(snapshotStateMessage)
+					if updatedVSC.Status != nil && updatedVSC.Status.Error != nil {
+						log.Infof("VSC %s has error: %v",
+							boundVSCName, stringptr.GetString(updatedVSC.Status.Error.Message))
+					}
+					return false, nil
+				}
+				vsc = updatedVSC
+				log.Infof("VSC %s is ready with SnapshotHandle", boundVSCName)
+				return true, nil
+			}
+			return false, nil
+		},
+	); watchErr != nil {
+		snapshotState = "error"
+		snapshotStateMessage = fmt.Sprintf("Timed out awaiting snapshot handle of VolumeSnapshotContent %s", boundVSCName)
+		log.WithError(watchErr).Errorf("Phase2 watch failed for VSC %s", boundVSCName)
+		if lastSeenVSC.Status != nil && lastSeenVSC.Status.Error != nil && lastSeenVSC.Status.Error.Message != nil {
+			snapshotStateMessage = fmt.Sprintf("%s: %s", snapshotStateMessage, *lastSeenVSC.Status.Error.Message)
+			return nil, fmt.Errorf("CSI reconciliation timeout for VSC %s: %v",
+				boundVSCName, *lastSeenVSC.Status.Error.Message)
+		}
+		return nil, errors.Wrapf(watchErr,
+			"timed out or failed watching VSC %s for SnapshotHandle", boundVSCName)
+	}
+
+	if vsc.Status != nil && vsc.Status.ReadyToUse != nil && *vsc.Status.ReadyToUse {
+		snapshotState, snapshotStateMessage = "completed", "CSI snapshot complete"
+	} else {
+		snapshotState, snapshotStateMessage = "pending",
+			fmt.Sprintf("VSC %s not ReadyToUse", vsc.Name)
+	}
+
+	log.Infof("Completed WaitUntilVSCHandleIsReady for %s/%s, VSC=%s",
+		volSnap.Namespace, volSnap.Name, vsc.Name)
 	return vsc, nil
 }
 

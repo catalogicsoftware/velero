@@ -20,12 +20,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
+	"time"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 
 	"github.com/cockroachdb/errors"
 	"github.com/sirupsen/logrus"
 	corev1api "k8s.io/api/core/v1"
+	storagev1api "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -33,6 +39,7 @@ import (
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/vmware-tanzu/velero/internal/catalogic"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	velerov2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	"github.com/vmware-tanzu/velero/pkg/client"
@@ -44,11 +51,36 @@ import (
 	uploaderUtil "github.com/vmware-tanzu/velero/pkg/uploader/util"
 	"github.com/vmware-tanzu/velero/pkg/util"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
+	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 )
 
 const (
 	AnnSelectedNode          = "volume.kubernetes.io/selected-node"
 	GenerateNameRandomLength = 5
+	HarvesterhCiIoOwnedBy    = "harvesterhci.io/owned-by"
+	pvcDeleteTimeoutSeconds  = 2 * 60
+
+	DefaultAzureFilesSleepDuration           = 10 * time.Second
+	CCAzureFilesPvcRestoreWaitTimeAnnotation = "cloudcasa-azure-files-pvc-restore-wait-sec"
+	azureFilesRestoreAnnotation              = "cloudcasa-restore-from-azure-files-snapshot"
+	azureFilesDriver                         = "file.csi.azure.com"
+)
+
+// azureFilesSleep spaces out Azure Files PVC restores; tests replace it.
+var azureFilesSleep = time.Sleep
+
+// restoredByAzureFilesMover reports whether the CloudCasa Azure Files mover,
+// rather than a CSI snapshot restore, restores a volume of this CSI driver.
+func restoredByAzureFilesMover(restore *velerov1api.Restore, driver string) bool {
+	_, mover := restore.Annotations[azureFilesRestoreAnnotation]
+	return mover && driver == azureFilesDriver
+}
+
+// updateSnapshotProgress and deleteSnapshotProgressConfigMap relay restore
+// progress to kubeagent; tests replace them.
+var (
+	updateSnapshotProgress          = catalogic.UpdateSnapshotProgress
+	deleteSnapshotProgressConfigMap = catalogic.DeleteSnapshotProgressConfigMap
 )
 
 // pvcRestoreItemAction is a restore item action plugin for Velero
@@ -89,13 +121,19 @@ func (p *pvcRestoreItemAction) Execute(
 	})
 	logger.Info("Starting PVCRestoreItemAction for PVC")
 
+	if err := p.handleExistingPvc(input, &pvc); err != nil {
+		logger.Warnf("Failed to handle existing PVC: %v", err)
+	}
+
 	// If PVC already exists, returns early.
-	if p.isResourceExist(pvc, *input.Restore) {
+	if exists, _ := p.isResourceExist(pvc, *input.Restore); exists {
 		logger.Warnf("PVC already exists. Skip restore this PVC.")
 		return &velero.RestoreItemActionExecuteOutput{
 			UpdatedItem: input.Item,
 		}, nil
 	}
+
+	delete(pvc.Annotations, HarvesterhCiIoOwnedBy)
 
 	// If cross-namespace restore is configured, change the namespace
 	// for PVC object to be restored
@@ -110,7 +148,21 @@ func (p *pvcRestoreItemAction) Execute(
 	additionalItems := []velero.ResourceIdentifier{}
 	if boolptr.IsSetToFalse(input.Restore.Spec.RestorePVs) {
 		logger.Info("Restore did not request for PVs to be restored from snapshot")
-		pvc.Spec.VolumeName = ""
+
+		// If DR volumes are used, then do not reset the volume name.
+		useDrVolumes := false
+		if useDrVolumesStr, ok := input.Restore.Annotations["cloudcasa-use-dr-volumes"]; ok {
+			var err error
+			useDrVolumes, err = strconv.ParseBool(useDrVolumesStr)
+			if err != nil {
+				p.log.Errorf("Failed to convert \"cloudcasa-use-dr-volumes\" annotation to boolean: %v", err)
+				return nil, errors.WithStack(err)
+			}
+		}
+
+		if !useDrVolumes {
+			pvc.Spec.VolumeName = ""
+		}
 		pvc.Spec.DataSource = nil
 		pvc.Spec.DataSourceRef = nil
 	} else {
@@ -164,27 +216,40 @@ func (p *pvcRestoreItemAction) Execute(
 				}, nil
 			}
 
-			//To avoid confilcs, vs and vsc get a new uniq name based in restore UID
-			// and vs name old name
-			newVSName := util.GenerateSha256FromRestoreUIDAndVsName(string(input.Restore.UID), vsName)
+			defer func() {
+				time.Sleep(200 * time.Millisecond) // give some time for the update to be processed
+				deleteSnapshotProgressConfigMap(input.Restore.Name, logger)
+			}()
 
-			p.log.Debugf("Setting PVC source to VolumeSnapshot new name: %s", newVSName)
-			resetPVCSourceToVolumeSnapshot(&pvc, newVSName)
-
-			additionalItems = append(additionalItems, velero.ResourceIdentifier{
-				GroupResource: kuberesource.VolumeSnapshots,
-				Name:          vsName,
-				Namespace:     pvc.Namespace,
-			})
-
-			// Force-restore the VolumeSnapshot even when restore resource filters
-			// would otherwise exclude it (mirrors backup-side must-include).
-			annotations := pvc.GetAnnotations()
-			if annotations == nil {
-				annotations = map[string]string{}
+			azureFiles, err := p.restoreFromVolumeSnapshot(&pvc, newNamespace, vsName, input.Restore, logger)
+			if err != nil {
+				logger.Errorf("Failed to restore PVC from VolumeSnapshot.")
+				relayRestoreProgress(&pvc, "error",
+					fmt.Sprintf("failed to restore PVC %s/%s from the CSI snapshot", pvc.Namespace, pvc.Name),
+					input.Restore.Name, logger)
+				return nil, errors.WithStack(err)
 			}
-			annotations[velerov1api.MustIncludeAdditionalItemRestoreAnnotation] = "true"
-			pvc.SetAnnotations(annotations)
+			relayRestoreProgress(&pvc, "completed",
+				fmt.Sprintf("Successfully created PVC %s/%s from the CSI snapshot", pvc.Namespace, pvc.Name),
+				input.Restore.Name, logger)
+
+			// The Azure Files mover restores without the VolumeSnapshot.
+			if !azureFiles {
+				additionalItems = append(additionalItems, velero.ResourceIdentifier{
+					GroupResource: kuberesource.VolumeSnapshots,
+					Name:          vsName,
+					Namespace:     pvc.Namespace,
+				})
+
+				// Force-restore the VolumeSnapshot even when restore resource filters
+				// would otherwise exclude it (mirrors backup-side must-include).
+				annotations := pvc.GetAnnotations()
+				if annotations == nil {
+					annotations = map[string]string{}
+				}
+				annotations[velerov1api.MustIncludeAdditionalItemRestoreAnnotation] = "true"
+				pvc.SetAnnotations(annotations)
+			}
 		}
 	}
 
@@ -199,6 +264,176 @@ func (p *pvcRestoreItemAction) Execute(
 		OperationID:     operationID,
 		AdditionalItems: additionalItems,
 	}, nil
+}
+
+// restoreFromVolumeSnapshot points the PVC at its VolumeSnapshot as restored,
+// or prepares it for the Azure Files mover, which it then reports. Backups from
+// older engines carry the snapshot size only on the VolumeSnapshot, so the PVC
+// request is raised to it when that is restored.
+func (p *pvcRestoreItemAction) restoreFromVolumeSnapshot(
+	pvc *corev1api.PersistentVolumeClaim,
+	newNamespace, vsName string,
+	restore *velerov1api.Restore,
+	logger logrus.FieldLogger,
+) (bool, error) {
+	// Get CSI Driver name
+	var csiDriverName string
+	if storageClassName := pvc.Spec.StorageClassName; storageClassName != nil {
+		storageClass := new(storagev1api.StorageClass)
+		if err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Name: *storageClassName}, storageClass); err != nil {
+			return false, errors.Wrapf(err, "Failed to get StorageClass %s to check PVC %s/%s provisioner",
+				*storageClassName, pvc.Namespace, pvc.Name)
+		}
+		csiDriverName = storageClass.Provisioner
+		logger.Infof("Found StorageClass %s for PVC %s/%s", csiDriverName, pvc.Namespace, pvc.Name)
+	} else {
+		logger.Infof("StorageClass is not set for PVC %s/%s", pvc.Namespace, pvc.Name)
+	}
+
+	if restoredByAzureFilesMover(restore, csiDriverName) {
+		logger.Infof("Processing Azure Files Restore using CloudCasa method. PVC %s/%s. CSI Driver: %s",
+			pvc.Namespace, pvc.Name, csiDriverName)
+		return true, p.processAzureRestore(pvc, vsName, restore, logger)
+	}
+
+	//To avoid confilcs, vs and vsc get a new uniq name based in restore UID
+	// and vs name old name
+	newVSName := util.GenerateSha256FromRestoreUIDAndVsName(string(restore.UID), vsName)
+
+	vs := new(snapshotv1api.VolumeSnapshot)
+	err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Namespace: newNamespace, Name: newVSName}, vs)
+	switch {
+	case apierrors.IsNotFound(err):
+		logger.Debugf("VolumeSnapshot %s/%s is restored later as an additional item", newNamespace, newVSName)
+	case err != nil:
+		return false, errors.Wrapf(err, "Failed to get Volumesnapshot %s/%s to restore PVC %s/%s",
+			newNamespace, newVSName, newNamespace, pvc.Name)
+	default:
+		if size, exists := vs.Annotations[velerov1api.VolumeSnapshotRestoreSize]; exists {
+			restoreSize, err := resource.ParseQuantity(size)
+			if err != nil {
+				return false, errors.Wrapf(err, "Failed to parse %s from annotation on Volumesnapshot %s/%s into restore size",
+					size, vs.Namespace, vs.Name)
+			}
+			setPVCStorageResourceRequest(pvc, restoreSize, logger)
+		}
+	}
+
+	logger.Debugf("Setting PVC source to VolumeSnapshot new name: %s", newVSName)
+	resetPVCSourceToVolumeSnapshot(pvc, newVSName)
+	return false, nil
+}
+
+// processAzureRestore leaves the PVC's data source alone and annotates it with
+// what the CloudCasa Azure Files mover needs: the driver and the snapshot's
+// VolumeSnapshotContent in the cluster.
+func (p *pvcRestoreItemAction) processAzureRestore(pvc *corev1api.PersistentVolumeClaim, volumeSnapshotName string,
+	restore *velerov1api.Restore, log logrus.FieldLogger) error {
+	// Set annotation that the PVC users Azure File CSI driver
+	kubeutil.AddAnnotations(&pvc.ObjectMeta, map[string]string{
+		"cloudcasa-csi-driver-name": azureFilesDriver,
+	})
+	log.Infof("Found Azure Files CSI driver. PVC data source will not be changed.")
+
+	// Add annotation to the PVC with VolumeSnapshotContent name
+	vscList := new(snapshotv1api.VolumeSnapshotContentList)
+	if err := p.crClient.List(context.TODO(), vscList); err != nil {
+		return errors.Wrapf(err, "Failed to list VolumeSnapshotContents to restore PVC %s/%s", pvc.Namespace, pvc.Name)
+	}
+	volumeSnapshotContentName := azureFilesSnapshotContent(vscList.Items, pvc, volumeSnapshotName, restore.Spec.BackupName)
+	if volumeSnapshotContentName == "" {
+		return errors.Errorf("Failed to get VolumeSnapshotContent for VolumeSnapshot %s/%s", pvc.Namespace, volumeSnapshotName)
+	}
+	kubeutil.AddAnnotations(&pvc.ObjectMeta, map[string]string{
+		"cloudcasa-volume-snapshot-content-name": volumeSnapshotContentName,
+	})
+
+	// If too many Azure Files PVCs are restored at the same time, then it is highly possible
+	// that we will hit Azure throttling errors. Because of that, we sleep for a specified amount of time,
+	// and then we restore the PVC.
+	pvcRestoreWaitTime := DefaultAzureFilesSleepDuration
+	pvcRestoreWaitTimeStr, ok := restore.GetAnnotations()[CCAzureFilesPvcRestoreWaitTimeAnnotation]
+	if !ok {
+		log.Infof(
+			"Restore object %q does not have %q annotation. Using default value: %v",
+			restore.Name, CCAzureFilesPvcRestoreWaitTimeAnnotation, DefaultAzureFilesSleepDuration,
+		)
+	} else {
+		pvcRestoreWaitTimeSec, err := strconv.ParseInt(pvcRestoreWaitTimeStr, 10, 64)
+		if err != nil {
+			log.Errorf(
+				"Failed to convert value %v of the annotation %q to int64. Error: %v. Using default value: %v",
+				pvcRestoreWaitTimeStr, CCAzureFilesPvcRestoreWaitTimeAnnotation, err, DefaultAzureFilesSleepDuration,
+			)
+		} else if pvcRestoreWaitTimeSec == 0 {
+			log.Infof(
+				"Value of %q annotation is set to 0. Using default value: %v",
+				CCAzureFilesPvcRestoreWaitTimeAnnotation, DefaultAzureFilesSleepDuration,
+			)
+		} else {
+			log.Infof(
+				"Value of %q annotation is set to %v. Using this value as the sleep time before returning from restore PVC action plugin",
+				CCAzureFilesPvcRestoreWaitTimeAnnotation, pvcRestoreWaitTimeSec,
+			)
+			pvcRestoreWaitTime = time.Duration(pvcRestoreWaitTimeSec) * time.Second
+		}
+	}
+
+	log.Infof("Azure Files PVC Found %s/%s. Sleeping %v before returning from restore PVC action plugin", pvc.Namespace, pvc.Name, pvcRestoreWaitTime)
+	azureFilesSleep(pvcRestoreWaitTime)
+	return nil
+}
+
+// azureFilesSnapshotContent names the in-cluster VolumeSnapshotContent of the
+// PVC's backed-up VolumeSnapshot. A Delete-policy content is re-created at the
+// end of the backup with a placeholder VolumeSnapshotRef; it keeps its backup
+// label and the cc-pvc-* annotations, which find it.
+func azureFilesSnapshotContent(vscs []snapshotv1api.VolumeSnapshotContent, pvc *corev1api.PersistentVolumeClaim,
+	volumeSnapshotName, backupName string) string {
+	for _, vsc := range vscs {
+		ref := vsc.Spec.VolumeSnapshotRef
+		if strings.HasPrefix(vsc.Name, "snapcontent-") && ref.Namespace == pvc.Namespace && ref.Name == volumeSnapshotName {
+			return vsc.Name
+		}
+	}
+	for _, vsc := range vscs {
+		if strings.HasPrefix(vsc.Name, "snapcontent-") &&
+			vsc.Labels[velerov1api.BackupNameLabel] == label.GetValidName(backupName) &&
+			vsc.Annotations["cc-pvc-namespace"] == pvc.Namespace && vsc.Annotations["cc-pvc-name"] == pvc.Name {
+			return vsc.Name
+		}
+	}
+	return ""
+}
+
+// setPVCStorageResourceRequest raises the PVC's storage request to restoreSize.
+func setPVCStorageResourceRequest(
+	pvc *corev1api.PersistentVolumeClaim,
+	restoreSize resource.Quantity,
+	log logrus.FieldLogger,
+) {
+	if pvc.Spec.Resources.Requests == nil {
+		pvc.Spec.Resources.Requests = corev1api.ResourceList{}
+	}
+
+	storageReq, exists := pvc.Spec.Resources.Requests[corev1api.ResourceStorage]
+	if !exists || storageReq.Cmp(restoreSize) < 0 {
+		pvc.Spec.Resources.Requests[corev1api.ResourceStorage] = restoreSize
+		rs := pvc.Spec.Resources.Requests[corev1api.ResourceStorage]
+		log.Infof("Resetting storage requests for PVC %s/%s to %s",
+			pvc.Namespace, pvc.Name, rs.String())
+	}
+}
+
+// relayRestoreProgress reports the PVC's restore state to kubeagent.
+func relayRestoreProgress(pvc *corev1api.PersistentVolumeClaim, state, message, restoreName string, logger logrus.FieldLogger) {
+	if uErr := updateSnapshotProgress(pvc, nil, nil, state, message, restoreName, logger); uErr != nil {
+		logger.WithError(uErr).Error("<SNAPSHOT PROGRESS UPDATE> Failed to update progress for restoring PVC from CSI snapshot. Continuing...")
+		return
+	}
+	if state == "completed" {
+		logger.Info("< CSI SNAPSHOT PROGRESS UPDATE> Successfully updated progress for restoring PVC from CSI snapshot.")
+	}
 }
 
 func resetPVCSourceToVolumeSnapshot(pvc *corev1api.PersistentVolumeClaim, vsName string) {
@@ -495,7 +730,7 @@ func restoreFromDataUploadResult(
 func (p *pvcRestoreItemAction) isResourceExist(
 	pvc corev1api.PersistentVolumeClaim,
 	restore velerov1api.Restore,
-) bool {
+) (bool, *corev1api.PersistentVolumeClaim) {
 	// get target namespace to restore into, if different from source namespace
 	targetNamespace := pvc.Namespace
 	if target, ok := restore.Spec.NamespaceMapping[pvc.Namespace]; ok {
@@ -511,9 +746,89 @@ func (p *pvcRestoreItemAction) isResourceExist(
 		},
 		tmpPVC,
 	); err == nil {
-		return true
+		return true, tmpPVC
 	}
-	return false
+	return false, nil
+}
+
+// handleExistingPvc checks if target PVC exists and deletes it if the existing resource policy is "update"
+// and the PV has a "Retain" reclaim policy because PVC can't be updated and it will be in "Lost" state after restore.
+// If PVC is attached to a pod we can't delete it.
+func (p *pvcRestoreItemAction) handleExistingPvc(input *velero.RestoreItemActionExecuteInput, pvc *corev1api.PersistentVolumeClaim) error {
+	if input.Restore.Spec.ExistingResourcePolicy != velerov1api.PolicyTypeUpdate {
+		p.log.Info("Skipping check for existing PVC because existing resource policy is not \"update\"")
+		return nil
+	}
+
+	targetNamespace := pvc.Namespace
+	if newTargetNamespace, found := input.Restore.Spec.NamespaceMapping[pvc.Namespace]; found {
+		targetNamespace = newTargetNamespace
+	}
+
+	p.log.Infof("Checking if PVC %s/%s exists", targetNamespace, pvc.Name)
+
+	exists, existingPvc := p.isResourceExist(*pvc, *input.Restore)
+	if !exists {
+		p.log.Infof("PVC %s/%s not found", targetNamespace, pvc.Name)
+		return nil
+	}
+
+	if existingPvc.Spec.VolumeName == "" {
+		p.log.Infof("Existing PVC %s/%s has no associated PV", targetNamespace, pvc.Name)
+		return nil
+	}
+
+	existingPv := new(corev1api.PersistentVolume)
+	if err := p.crClient.Get(context.TODO(), crclient.ObjectKey{Name: existingPvc.Spec.VolumeName}, existingPv); err != nil {
+		p.log.Errorf("Failed to get existing PV %s: %v", existingPvc.Spec.VolumeName, err)
+		return err
+	}
+
+	if existingPv.Spec.PersistentVolumeReclaimPolicy != corev1api.PersistentVolumeReclaimRetain {
+		p.log.Infof("Existing PV %s does not have \"Retain\" reclaim policy", existingPv.Name)
+		return nil
+	}
+
+	podList := new(corev1api.PodList)
+	if err := p.crClient.List(context.TODO(), podList, crclient.InNamespace(targetNamespace)); err != nil {
+		p.log.Errorf("Failed to list pods in namespace %s: %s", targetNamespace, err)
+		return err
+	}
+
+	for _, pod := range podList.Items {
+		for _, vol := range pod.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == pvc.Name {
+				p.log.Infof("PVC %s/%s is attached to pod %s, can't delete it", targetNamespace, pvc.Name, pod.Name)
+				return nil
+			}
+		}
+	}
+
+	p.log.Infof("Deleting existing PVC %s/%s because existing resource policy is \"update\" and PV %s has \"Retain\" reclaim policy",
+		targetNamespace, pvc.Name, existingPv.Name)
+
+	if err := p.crClient.Delete(context.TODO(), existingPvc); err != nil {
+		p.log.Errorf("Failed to delete existing PVC %s/%s: %v", targetNamespace, pvc.Name, err)
+		return err
+	}
+
+	for try := range pvcDeleteTimeoutSeconds {
+		if exists, _ := p.isResourceExist(*pvc, *input.Restore); !exists {
+			p.log.Infof("PVC %s/%s deleted successfully", targetNamespace, pvc.Name)
+			return nil
+		}
+
+		if try%10 == 0 {
+			p.log.Infof("Waiting for PVC %s/%s to be deleted", targetNamespace, pvc.Name)
+		}
+
+		time.Sleep(time.Second)
+	}
+
+	errorMessage := fmt.Sprintf("Failed to delete PVC %s/%s after %d seconds", targetNamespace, pvc.Name, pvcDeleteTimeoutSeconds)
+	p.log.Error(errorMessage)
+
+	return errors.New(errorMessage)
 }
 
 func NewPvcRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {

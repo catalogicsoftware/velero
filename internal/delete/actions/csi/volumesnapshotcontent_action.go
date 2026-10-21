@@ -18,6 +18,8 @@ package csi
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -29,10 +31,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	plugincommon "github.com/vmware-tanzu/velero/pkg/plugin/framework/common"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
+	"github.com/vmware-tanzu/velero/pkg/util/csi"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 )
 
@@ -73,7 +77,7 @@ func (p *volumeSnapshotContentDeleteItemAction) Execute(
 	// So skip deleting VolumeSnapshotContent not have the backup name
 	// in its labels.
 	if !kubeutil.HasBackupLabel(&snapCont.ObjectMeta, input.Backup.Name) {
-		p.log.Info(
+		p.log.Infof(
 			"VolumeSnapshotContent %s was not taken by backup %s, skipping deletion",
 			snapCont.Name,
 			input.Backup.Name,
@@ -81,7 +85,99 @@ func (p *volumeSnapshotContentDeleteItemAction) Execute(
 		return nil
 	}
 
+	if snapCont.Status != nil && snapCont.Status.VolumeGroupSnapshotHandle != nil {
+		return p.deleteGroupMember(snapCont, input.Backup.Name)
+	}
+
 	p.log.Infof("Deleting VolumeSnapshotContent %s", snapCont.Name)
+
+	if _, err := csi.SetVolumeSnapshotContentDeletionPolicy(
+		snapCont.Name,
+		p.crClient,
+		snapshotv1api.VolumeSnapshotContentDelete,
+	); err != nil {
+		if apierrors.IsNotFound(err) {
+			return p.deleteThroughTempVSC(snapCont, input.Backup.Name)
+		}
+		return errors.Wrapf(err,
+			"failed to set DeletionPolicy on volumesnapshotcontent %s. Skipping deletion",
+			snapCont.Name)
+	}
+
+	if err := p.crClient.Delete(
+		context.TODO(),
+		&snapCont,
+	); err != nil && !apierrors.IsNotFound(err) {
+		p.log.Infof("VolumeSnapshotContent %s not found", snapCont.Name)
+		return err
+	}
+
+	return nil
+}
+
+// deleteGroupMember leaves the storage snapshot of a group member to a stub
+// group content, as a member can only be deleted with its whole group, and
+// removes the member's content object as Retain.
+func (p *volumeSnapshotContentDeleteItemAction) deleteGroupMember(
+	snapCont snapshotv1api.VolumeSnapshotContent,
+	backupName string,
+) error {
+	groupHandle := *snapCont.Status.VolumeGroupSnapshotHandle
+	p.log.Infof("VolumeSnapshotContent %s is a member of group snapshot %s, which is deleted as a whole", snapCont.Name, groupHandle)
+
+	var members []string
+	if recorded, ok := snapCont.Annotations[velerov1api.VolumeGroupSnapshotMemberHandlesAnnotation]; ok {
+		if err := json.Unmarshal([]byte(recorded), &members); err != nil {
+			p.log.Warnf("VolumeSnapshotContent %s has unreadable group member handles %q: %v", snapCont.Name, recorded, err)
+			members = nil
+		}
+	}
+	if members == nil {
+		inCluster, err := csi.GroupMemberSnapshotHandles(context.TODO(), p.crClient, groupHandle)
+		if err != nil {
+			return errors.Wrapf(err, "failed to find the members of group snapshot %s", groupHandle)
+		}
+		members = inCluster
+	}
+	if snapCont.Status.SnapshotHandle != nil && !slices.Contains(members, *snapCont.Status.SnapshotHandle) {
+		members = append(members, *snapCont.Status.SnapshotHandle)
+	}
+	if err := csi.EnsureGroupSnapshotDeleteStub(context.TODO(), p.crClient, backupName, &snapCont, members); err != nil {
+		return err
+	}
+
+	if _, err := csi.SetVolumeSnapshotContentDeletionPolicy(
+		snapCont.Name,
+		p.crClient,
+		snapshotv1api.VolumeSnapshotContentRetain,
+	); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return errors.Wrapf(err, "failed to set DeletionPolicy on volumesnapshotcontent %s", snapCont.Name)
+	}
+	if err := p.crClient.Delete(context.TODO(), &snapCont); err != nil && !apierrors.IsNotFound(err) {
+		return errors.Wrapf(err, "failed to delete volumesnapshotcontent %s", snapCont.Name)
+	}
+	return nil
+}
+
+// deleteThroughTempVSC deletes the storage snapshot of a VolumeSnapshotContent
+// that is no longer in the cluster: it re-creates the content from the backup
+// under a new name with policy Delete, then deletes it.
+func (p *volumeSnapshotContentDeleteItemAction) deleteThroughTempVSC(
+	snapCont snapshotv1api.VolumeSnapshotContent,
+	backupName string,
+) error {
+	if snapCont.Status == nil || snapCont.Status.SnapshotHandle == nil {
+		p.log.Warnf(
+			"VolumeSnapshotContent %s of backup %s cannot be found and the backup has no snapshot handle for it. "+
+				"May leave orphan snapshot <unknown> on cloud provider.",
+			snapCont.Name, backupName)
+		return nil
+	}
+	p.log.Infof("VolumeSnapshotContent %s of backup %s cannot be found. Deleting snapshot %s through a temporary VolumeSnapshotContent.",
+		snapCont.Name, backupName, *snapCont.Status.SnapshotHandle)
 
 	uuid, err := uuid.NewRandom()
 	if err != nil {

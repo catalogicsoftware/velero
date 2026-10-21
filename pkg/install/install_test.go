@@ -35,7 +35,7 @@ func TestInstall(t *testing.T) {
 	c := fake.NewClientBuilder().WithObjects(
 		&apiextv1.CustomResourceDefinition{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "backuprepositories.velero.io",
+				Name: "backuprepositories.cloudcasa.io",
 			},
 
 			Status: apiextv1.CustomResourceDefinitionStatus{
@@ -64,7 +64,7 @@ func Test_crdsAreReady(t *testing.T) {
 	c := fake.NewClientBuilder().WithObjects(
 		&apiextv1beta1.CustomResourceDefinition{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "backuprepositories.velero.io",
+				Name: "backuprepositories.cloudcasa.io",
 			},
 
 			Status: apiextv1beta1.CustomResourceDefinitionStatus{
@@ -88,7 +88,7 @@ func Test_crdsAreReady(t *testing.T) {
 			APIVersion: "v1beta1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "backuprepositories.velero.io",
+			Name: "backuprepositories.cloudcasa.io",
 		},
 	}
 	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(crd)

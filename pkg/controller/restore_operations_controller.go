@@ -94,14 +94,15 @@ func (r *restoreOperationsReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Restore{}, builder.WithPredicates(kube.FalsePredicate{})).
 		WatchesRawSource(s).
 		Named(constant.ControllerRestoreOperations).
 		Complete(r)
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=get;list;watch;update
-// +kubebuilder:rbac:groups=velero.io,resources=restores/status,verbs=get
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=restores,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=restores/status,verbs=get
 
 func (r *restoreOperationsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.logger.WithField("restore operations for restore", req.String())
@@ -114,6 +115,9 @@ func (r *restoreOperationsReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting restore %s", req.String())
+	}
+	if skipForeign(log, original) {
+		return ctrl.Result{}, nil
 	}
 	restore := original.DeepCopy()
 	log.Debugf("restore: %s", restore.Name)

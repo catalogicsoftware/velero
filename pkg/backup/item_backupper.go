@@ -53,6 +53,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	csiutil "github.com/vmware-tanzu/velero/pkg/util/csi"
+	kubevirtutil "github.com/vmware-tanzu/velero/pkg/util/kubevirt"
 	"github.com/vmware-tanzu/velero/pkg/util/volumehelper"
 )
 
@@ -76,6 +77,10 @@ type itemBackupper struct {
 	itemHookHandler          hook.ItemHookHandler
 	hookTracker              *hook.HookTracker
 	volumeHelperImpl         volumehelper.VolumeHelper
+
+	// excludedPvcs ("namespace/name") are left out of the backup with their PVs;
+	// kubeagent lists unattached PVCs here.
+	excludedPvcs map[string]bool
 }
 
 type FileForArchive struct {
@@ -90,7 +95,38 @@ type FileForArchive struct {
 // In addition to the error return, backupItem also returns a bool indicating whether the item
 // was actually backed up.
 func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstructured, groupResource schema.GroupResource, preferredGVR schema.GroupVersionResource, mustInclude, finalize bool, itemBlock *BackupItemBlock) (bool, []FileForArchive, error) {
+	metadata, err := meta.Accessor(obj)
+	if err != nil {
+		return false, nil, err
+	}
+	name := metadata.GetName()
+	namespace := metadata.GetNamespace()
+
+	// Check if this is a KubeVirt VM resource
+	isKubeVirtVM := kubevirtutil.IsKubeVirtVMResource(groupResource)
+
+	// Call KubeVirt VM start reporting only if this is a KubeVirt VM resource
+	if isKubeVirtVM {
+		kubevirtutil.KubeVirtVMStartOp(logger, name, namespace, ib.backupRequest.Backup, ib.kbClient)
+	}
+
 	selectedForBackup, files, err := ib.backupItemInternal(logger, obj, groupResource, preferredGVR, mustInclude, finalize, itemBlock)
+
+	// Remember failed items so that a later re-encounter (deduplicated via
+	// BackedUpItems) resurfaces the failure instead of passing for a success.
+	if err != nil {
+		ib.backupRequest.BackedUpItems.RecordFailure(itemKey{
+			resource:  resourceKey(obj),
+			namespace: namespace,
+			name:      name,
+		}, err)
+	}
+
+	// Report result of the primary KubeVirt VM resource backup if it's a KubeVirt VM
+	if isKubeVirtVM {
+		kubevirtutil.KubeVirtVMOpResult(logger, groupResource, name, namespace, ib.backupRequest.Backup, selectedForBackup && err == nil, err, ib.kbClient)
+	}
+
 	// return if not selected, an error occurred, there are no files to add, or for finalize
 	if !selectedForBackup || err != nil || len(files) == 0 || finalize {
 		return selectedForBackup, files, err
@@ -140,6 +176,11 @@ func (ib *itemBackupper) itemInclusionChecks(log logrus.FieldLogger, mustInclude
 		// are not specified in included list.
 		if namespace != "" && !ib.backupRequest.ResourceIncludesExcludes.ShouldInclude(groupResource.String()) {
 			log.Info("Excluding item because resource is excluded")
+			return false
+		}
+
+		if namespace == "" && groupResource == kuberesource.Namespaces && !ib.backupRequest.NamespaceIncludesExcludes.ShouldInclude(metadata.GetName()) {
+			log.Infof("Excluding namespace %s because it is excluded", metadata.GetName())
 			return false
 		}
 
@@ -207,6 +248,36 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 		return false, itemFiles, nil
 	}
 
+	if ib.excludedPvcs != nil { // used only for the purpose of excluding unattached PVCs
+		switch groupResource {
+		case kuberesource.PersistentVolumes:
+			pv := new(corev1api.PersistentVolume)
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pv); err != nil {
+				log.Errorf("Failed to convert unstructured PV %s to PersistentVolume structure: %v", metadata.GetName(), err)
+				return false, itemFiles, err
+			}
+
+			// PV that does not have a ClaimRef is not attached to a PVC so it can't be attached to a pod either
+			if pv.Spec.ClaimRef == nil {
+				log.Infof("Excluding PV %s because it is not bound to a PVC", metadata.GetName())
+				return false, itemFiles, nil
+			}
+
+			pvcPath := pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+			if _, isExcluded := ib.excludedPvcs[pvcPath]; isExcluded {
+				log.Infof("Excluding PV %s for PVC %s because it is excluded from backup", metadata.GetName(), pvcPath)
+				return false, itemFiles, nil
+			}
+
+		case kuberesource.PersistentVolumeClaims:
+			pvcPath := metadata.GetNamespace() + "/" + metadata.GetName()
+			if _, isExcluded := ib.excludedPvcs[pvcPath]; isExcluded {
+				log.Infof("Excluding PVC %s because it is excluded from backup", pvcPath)
+				return false, itemFiles, nil
+			}
+		}
+	}
+
 	key := itemKey{
 		resource:  resourceKey(obj),
 		namespace: namespace,
@@ -214,6 +285,15 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 	}
 
 	if ib.backupRequest.BackedUpItems.Has(key) {
+		// If the earlier attempt failed, resurface that failure so parents that
+		// reference this item (e.g. a KubeVirt VM whose PVC snapshot failed) do
+		// not treat it as successfully backed up.
+		if prevErr, failed := ib.backupRequest.BackedUpItems.Failure(key); failed {
+			log.Info("Item was already processed and its backup failed; returning the previous failure.")
+			return false, itemFiles, errors.Wrapf(
+				prevErr, "item %s failed to back up earlier in this backup", key.name,
+			)
+		}
 		log.Info("Skipping item because it's already been backed up.")
 		// returning true since this item *is* in the backup, even though we're not backing it up here
 		return true, itemFiles, nil
@@ -396,6 +476,10 @@ func (ib *itemBackupper) executeActions(
 	itemBlock *BackupItemBlock,
 ) (runtime.Unstructured, []FileForArchive, error) {
 	var itemFiles []FileForArchive
+
+	// Check if this is a KubeVirt VM resource
+	isKubeVirtVM := kubevirtutil.IsKubeVirtVMResource(groupResource)
+
 	for _, action := range ib.backupRequest.ResolvedActions {
 		if !action.ShouldUse(groupResource, namespace, metadata, log) {
 			continue
@@ -541,7 +625,22 @@ func (ib *itemBackupper) executeActions(
 			}
 
 			for _, item := range itemList {
-				_, additionalItemFiles, err := ib.backupItem(log, item.Item, additionalItem.GroupResource, item.PreferredGVR, mustInclude, finalize, itemBlock)
+				// Back up the additional item and report its result for KubeVirt VM
+				backedUp, additionalItemFiles, err := ib.backupItem(log, item.Item, additionalItem.GroupResource, item.PreferredGVR, mustInclude, finalize, itemBlock)
+				// Record and report the additional item with its backup result for KubeVirt VM
+				if isKubeVirtVM {
+					kubevirtutil.KubeVirtVMAdditionalResourceOpResult(
+						log,
+						item.PreferredGVR.GroupResource(),
+						name, namespace,
+						additionalItem.Name, additionalItem.Namespace,
+						ib.backupRequest.Backup,
+						backedUp && err == nil,
+						err,
+						ib.kbClient,
+					)
+				}
+
 				if err != nil {
 					return nil, itemFiles, err
 				}
