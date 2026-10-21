@@ -56,6 +56,8 @@ type ItemRenames struct {
 	newNames     map[ItemKey][]string
 	keepOriginal map[ItemKey]bool
 	vmItems      map[ItemKey]map[ItemKey]string
+	// takenNames are copies not restored because the name was in use
+	takenNames map[ItemKey]bool
 }
 
 // VMRenamesOf reads the VM renames of a restore. A restore without them gets nil.
@@ -74,6 +76,7 @@ func VMRenamesOf(restore *velerov1api.Restore) (*ItemRenames, error) {
 		newNames:     map[ItemKey][]string{},
 		keepOriginal: map[ItemKey]bool{},
 		vmItems:      map[ItemKey]map[ItemKey]string{},
+		takenNames:   map[ItemKey]bool{},
 	}
 	for _, vm := range vms {
 		if vm.Namespace == "" || vm.Name == "" || vm.NewName == "" || vm.NewName == vm.Name {
@@ -110,6 +113,30 @@ func (r *ItemRenames) NamesFor(resource, namespace, name string) (newNames []str
 	}
 	key := ItemKey{Resource: resource, Namespace: namespace, Name: name}
 	return r.newNames[key], r.keepOriginal[key]
+}
+
+// NameTaken records that the copy newName of an item in the backup namespace
+// was not restored because an object of that name is already in the cluster.
+func (r *ItemRenames) NameTaken(resource, namespace, newName string) {
+	r.takenNames[ItemKey{Resource: resource, Namespace: namespace, Name: newName}] = true
+}
+
+// TakenNamesOf returns the copies of a VM's items that were not restored
+// because their names were in use, as "resource name". The VM is named as in
+// the backup.
+func (r *ItemRenames) TakenNamesOf(vmNamespace, vmName string) []string {
+	if r == nil {
+		return nil
+	}
+	var taken []string
+	vmKey := ItemKey{Resource: kubeVirtVMGroupResource.String(), Namespace: vmNamespace, Name: vmName}
+	for item, newName := range r.vmItems[vmKey] {
+		if r.takenNames[ItemKey{Resource: item.Resource, Namespace: vmNamespace, Name: newName}] {
+			taken = append(taken, item.Resource+" "+newName)
+		}
+	}
+	slices.Sort(taken)
+	return taken
 }
 
 // NameInVM returns the name under which an item that a VM uses is restored

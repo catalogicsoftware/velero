@@ -1696,6 +1696,7 @@ func (ctx *restoreContext) restoreItemAs(obj *unstructured.Unstructured, groupRe
 		restoreLogger = restoreLogger.WithField("new name", newName)
 		restoreLogger.Infof("Restoring %s as %s", resourceID, newName)
 		obj.SetName(newName)
+		resourceID = getResourceID(groupResource, namespace, newName)
 	}
 
 	complete, err := isCompleted(obj, groupResource)
@@ -2059,6 +2060,16 @@ func (ctx *restoreContext) restoreItemAs(obj *unstructured.Unstructured, groupRe
 		}
 	}
 
+	// A VM restored under a new name must not use objects that are not its own.
+	if newName != "" && kubevirtutil.IsKubeVirtVMResource(groupResource) {
+		if taken := ctx.vmRenames.TakenNamesOf(itemFromBackup.GetNamespace(), itemFromBackup.GetName()); len(taken) > 0 {
+			errs.Add(namespace, fmt.Errorf("VirtualMachine %s/%s was not restored as %s: namespace %q already has objects named "+
+				"like its copies (%s). Remove them or restore the VM under another new name",
+				itemFromBackup.GetNamespace(), itemFromBackup.GetName(), newName, namespace, strings.Join(taken, ", ")))
+			return warnings, errs, itemExists
+		}
+	}
+
 	// This comes after running item actions because we have built-in actions that restore
 	// a PVC's associated PV (if applicable). As part of the PV being restored, the 'pvsToProvision'
 	// set may be inserted into, and this needs to happen *before* running the following block of logic.
@@ -2179,6 +2190,15 @@ func (ctx *restoreContext) restoreItemAs(obj *unstructured.Unstructured, groupRe
 	isAlreadyExistsError, err := isAlreadyExistsError(ctx, obj, restoreErr, resourceClient)
 	if err != nil {
 		errs.Add(namespace, err)
+		return warnings, errs, itemExists
+	}
+
+	// A copy must be new: an object already under its name may belong to
+	// another VM, and the renamed VM would then use it.
+	if newName != "" && (fromCluster != nil || isAlreadyExistsError) {
+		ctx.vmRenames.NameTaken(groupResource.String(), originalNamespace, newName)
+		errs.Add(namespace, fmt.Errorf("could not restore %s/%s/%s as %s: namespace %q already has a %s of that name",
+			groupResource.String(), originalNamespace, backupResourceName, newName, namespace, obj.GetKind()))
 		return warnings, errs, itemExists
 	}
 

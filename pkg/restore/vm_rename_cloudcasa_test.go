@@ -150,6 +150,78 @@ func TestRestoreCreatesARenamedVMWithCopiesOfWhatItUses(t *testing.T) {
 	}, reported, "the VM's objects are reported under the names they were restored as")
 }
 
+// A copy whose name is in use, say by the disk of an earlier clone, is not
+// restored over that object, and the renamed VM is not created, so that it
+// never uses an object that is not its own.
+func TestARenamedVMIsNotRestoredWhenTheNameOfACopyIsInUse(t *testing.T) {
+	for _, disableInformerCache := range []bool{true, false} {
+		h := newHarness(t)
+		vms := &test.APIResource{Group: "kubevirt.io", Version: "v1", Name: "virtualmachines", Kind: "VirtualMachine", Namespaced: true}
+		h.DiscoveryClient.WithAPIResource(test.Secrets())
+		h.DiscoveryClient.WithAPIResource(vms)
+		h.AddItems(t, test.PVCs(builder.ForPersistentVolumeClaim("ns-1", "vm-1-clone-disk").
+			ObjectMeta(builder.WithLabels("disk-of", "earlier-clone")).Result()))
+
+		tarball := test.NewTarWriter(t).
+			AddItems("persistentvolumeclaims", builder.ForPersistentVolumeClaim("ns-1", "vm-1-disk").Result()).
+			AddItems("secrets", builder.ForSecret("ns-1", "vm-1-cloudinit").Result()).
+			AddItems("virtualmachines.kubevirt.io", newVirtualMachine("ns-1", "vm-1")).
+			Done()
+		renames, err := json.Marshal([]kubevirtutil.VMRename{{
+			Namespace: "ns-1", Name: "vm-1", NewName: "vm-1-clone",
+			Items: []kubevirtutil.RenamedItem{
+				{Resource: "persistentvolumeclaims", Name: "vm-1-disk", NewName: "vm-1-clone-disk"},
+				{Resource: "secrets", Name: "vm-1-cloudinit", NewName: "vm-1-clone-cloudinit"},
+			},
+		}})
+		require.NoError(t, err)
+		restore := defaultRestore().
+			ObjectMeta(builder.WithAnnotations(kubevirtutil.VMRenamesAnnotation, string(renames))).
+			IncludedNamespaces("ns-1").
+			Result()
+		action := &namesSeenAction{vmRestoreAction: vmRestoreAction{disks: map[string][]velero.ResourceIdentifier{
+			"vm-1-clone": {
+				{GroupResource: kuberesource.PersistentVolumeClaims, Namespace: "ns-1", Name: "vm-1-disk"},
+				{GroupResource: kuberesource.Secrets, Namespace: "ns-1", Name: "vm-1-cloudinit"},
+			},
+		}}}
+
+		_, errs := h.restorer.Restore(&Request{
+			Log:                  h.log,
+			Restore:              restore,
+			Backup:               defaultBackup().Result(),
+			BackupReader:         tarball,
+			DisableInformerCache: disableInformerCache,
+		}, []riav2.RestoreItemAction{action}, nil)
+
+		require.Len(t, errs.Namespaces["ns-1"], 2, "disableInformerCache=%v", disableInformerCache)
+		assert.Contains(t, errs.Namespaces["ns-1"][0], `could not restore persistentvolumeclaims/ns-1/vm-1-disk as vm-1-clone-disk: namespace "ns-1" already has a PersistentVolumeClaim of that name`)
+		assert.Contains(t, errs.Namespaces["ns-1"][1], "VirtualMachine ns-1/vm-1 was not restored as vm-1-clone")
+		assert.Contains(t, errs.Namespaces["ns-1"][1], "(persistentvolumeclaims vm-1-clone-disk)")
+		for _, e := range errs.Namespaces["ns-1"] {
+			assert.NotContains(t, e, "already exists", "KAS hides messages with that phrase")
+		}
+
+		assertAPIContents(t, h, map[*test.APIResource][]string{
+			test.PVCs():    {"ns-1/vm-1-clone-disk"},
+			test.Secrets(): {"ns-1/vm-1-clone-cloudinit"},
+			vms:            {},
+		})
+		disk, err := h.DynamicClient.Resource(test.PVCs().GVR()).Namespace("ns-1").Get(t.Context(), "vm-1-clone-disk", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"disk-of": "earlier-clone"}, disk.GetLabels(), "the disk in use is left alone")
+
+		configMap := &corev1api.ConfigMap{}
+		require.NoError(t, h.restorer.kbClient.Get(t.Context(),
+			crclient.ObjectKey{Namespace: restore.Namespace, Name: "restore-1-cc-vm-progress"}, configMap))
+		var data struct {
+			VMs map[string]kubevirtutil.VMStatus `json:"vms"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(configMap.Data["vmStatusData"]), &data))
+		assert.Equal(t, "FAILED", data.VMs["ns-1/vm-1-clone"].Status)
+	}
+}
+
 // A restore whose VM renames cannot be read fails before it restores anything.
 func TestRestoreWithUnreadableVMRenamesFails(t *testing.T) {
 	h := newHarness(t)
