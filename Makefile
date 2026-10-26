@@ -33,7 +33,7 @@ REGISTRY ?= catalogicsoftware
 #        EOF
 #        docker buildx create --name=velero-builder --driver=docker-container --bootstrap --use --config ./buildkitd.toml
 #      Refer to https://github.com/docker/buildx/issues/1370#issuecomment-1288516840 for more details
-INSECURE_REGISTRY ?= false
+INSECURE_REGISTRY ?= true
 
 # Image name
 IMAGE ?= $(REGISTRY)/$(BIN)
