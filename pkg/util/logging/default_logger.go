@@ -28,6 +28,8 @@ func DefaultHooks() []logrus.Hook {
 	return []logrus.Hook{
 		&LogLocationHook{},
 		&ErrorLocationHook{},
+		// Add Cloudcasa gRPC hook here
+		NewAmdsGrpcHook(),
 	}
 }
 
