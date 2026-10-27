@@ -283,6 +283,11 @@ func (kr *kubernetesRestorer) RestoreWithResolvers(
 		volInfoTracker:          req.RestoreVolumeInfoTracker,
 	}
 
+	itemRenames, err := kubevirtutil.VMOptionsOf(req.Restore)
+	if err != nil {
+		return results.Result{}, results.Result{Velero: []string{err.Error()}}
+	}
+
 	req.RestoredItems = make(map[itemKey]restoredItemStatus)
 
 	restoreCtx := &restoreContext{
@@ -313,6 +318,7 @@ func (kr *kubernetesRestorer) RestoreWithResolvers(
 		resourceTimeout:                kr.resourceTimeout,
 		resourceClients:                make(map[resourceClientKey]client.Dynamic),
 		restoredItems:                  req.RestoredItems,
+		itemRenames:                    itemRenames,
 		renamedPVs:                     make(map[string]string),
 		pvRenamer:                      kr.pvRenamer,
 		discoveryHelper:                kr.discoveryHelper,
@@ -380,6 +386,8 @@ type restoreContext struct {
 	pvListCache                    *v1.PersistentVolumeList
 	storageClassMapping            map[string]string // cached old→new SC mapping from configmap
 	isCrossClusterRestore          bool              // Restore CR has cloudcasa-cross-cluster-restore annotation
+	// itemRenames are the names of the items of VMs restored under new names
+	itemRenames *kubevirtutil.ItemRenames
 }
 
 type resourceClientKey struct {
@@ -1281,9 +1289,34 @@ func (ctx *restoreContext) getResource(groupResource schema.GroupResource, obj *
 	return u, nil
 }
 
+// restoreItem restores a backed up item, or the copies of it when the restore
+// renames it: a VM restored under a new name, and the objects that VM uses.
 func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupResource schema.GroupResource, namespace string,
 	pvcTree map[string][]string) (results.Result, results.Result, bool) {
+	newNames, keepOriginal := ctx.itemRenames.NamesFor(groupResource.String(), obj.GetNamespace(), obj.GetName())
+	if len(newNames) == 0 {
+		return ctx.restoreItemAs(obj, groupResource, namespace, pvcTree, "")
+	}
+	if keepOriginal {
+		newNames = append([]string{""}, newNames...)
+	}
 
+	warnings, errs := results.Result{}, results.Result{}
+	itemExists := false
+	for _, newName := range newNames {
+		w, e, exists := ctx.restoreItemAs(obj.DeepCopy(), groupResource, namespace, pvcTree, newName)
+		warnings.Merge(&w)
+		errs.Merge(&e)
+		itemExists = itemExists || exists
+	}
+	return warnings, errs, itemExists
+}
+
+// restoreItemAs restores a backed up item under newName, or under its own name
+// when newName is empty. Restore item actions get the item under the new name
+// and the item from the backup under its own.
+func (ctx *restoreContext) restoreItemAs(obj *unstructured.Unstructured, groupResource schema.GroupResource, namespace string,
+	pvcTree map[string][]string, newName string) (results.Result, results.Result, bool) {
 	warnings, errs := results.Result{}, results.Result{}
 	// itemExists bool is used to determine whether to include this item in the "wait for additional items" list
 	itemExists := false
@@ -1350,6 +1383,13 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 	//inside restore actions.
 	itemFromBackup := obj.DeepCopy()
 
+	if newName != "" {
+		restoreLogger = restoreLogger.WithField("new name", newName)
+		restoreLogger.Infof("Restoring %s as %s", resourceID, newName)
+		obj.SetName(newName)
+		resourceID = getResourceID(groupResource, namespace, newName)
+	}
+
 	complete, err := isCompleted(obj, groupResource)
 	if err != nil {
 		errs.Add(namespace, fmt.Errorf("error checking completion of %q: %v", resourceID, err))
@@ -1362,7 +1402,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 
 	name := obj.GetName()
 
-	// Check if we've already restored this itemKey.
+	// Check if we've already restored this itemKey. Each copy of a renamed item is its own item.
 	itemKey := itemKey{
 		resource:  resourceKey(obj),
 		namespace: namespace,
@@ -1650,12 +1690,17 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 
 			additionalKey := kubevirtutil.ItemKey{Resource: additionalItem.GroupResource.String(), Namespace: additionalItem.Namespace, Name: additionalItem.Name}
 			if vmKey, ok := ctx.vmRelatedAdditionalItems[additionalKey]; ok {
+				restoredName := additionalItem.Name
+				if kubevirtutil.IsKubeVirtVMResource(groupResource) {
+					restoredName = ctx.itemRenames.NameInVM(itemFromBackup.GetNamespace(), itemFromBackup.GetName(),
+						additionalItem.GroupResource.String(), additionalItem.Name)
+				}
 				kubevirtutil.KubeVirtVMAdditionalResourceOpResult(
 					ctx.log,
 					additionalItem.GroupResource,
 					vmKey.Name,
 					vmKey.Namespace,
-					additionalItem.Name,
+					restoredName,
 					additionalItem.Namespace,
 					ctx.restore,
 					additionalItemExists,
@@ -1673,6 +1718,18 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			errs.Add(namespace, errors.Wrapf(err, "error verifying additional items are ready to use"))
 		} else if !available {
 			errs.Add(namespace, fmt.Errorf("additional items for %s are not ready to use", resourceID))
+		}
+	}
+
+	// A VM restored under a new name must not use objects that are not its own.
+	if newName != "" && kubevirtutil.IsKubeVirtVMResource(groupResource) {
+		if taken := ctx.itemRenames.TakenNamesOf(itemFromBackup.GetNamespace(), itemFromBackup.GetName()); len(taken) > 0 {
+			errs.Add(namespace, fmt.Errorf("VirtualMachine %s/%s was not restored as %s: namespace %q already has objects named "+
+				"like its copies (%s). Remove them or restore the VM under another new name",
+				itemFromBackup.GetNamespace(), itemFromBackup.GetName(), newName, namespace, strings.Join(taken, ", ")))
+			kubevirtutil.KubeVirtVMOpResult(ctx.log, groupResource, obj.GetName(), namespace, ctx.restore, false,
+				kubevirtutil.ToError(errs), ctx.kbClient)
+			return warnings, errs, itemExists
 		}
 	}
 
@@ -1791,6 +1848,19 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 	isAlreadyExistsError, err := isAlreadyExistsError(ctx, obj, restoreErr, resourceClient)
 	if err != nil {
 		errs.Add(namespace, err)
+		return warnings, errs, itemExists
+	}
+
+	// A copy must be new: an object already under its name may belong to
+	// another VM, and the renamed VM would then use it.
+	if newName != "" && (fromCluster != nil || isAlreadyExistsError) {
+		ctx.itemRenames.NameTaken(groupResource.String(), originalNamespace, newName)
+		errs.Add(namespace, fmt.Errorf("could not restore %s/%s/%s as %s: namespace %q already has a %s of that name",
+			groupResource.String(), originalNamespace, itemFromBackup.GetName(), newName, namespace, obj.GetKind()))
+		if kubevirtutil.IsKubeVirtVMResource(groupResource) {
+			kubevirtutil.KubeVirtVMOpResult(ctx.log, groupResource, obj.GetName(), namespace, ctx.restore, false,
+				kubevirtutil.ToError(errs), ctx.kbClient)
+		}
 		return warnings, errs, itemExists
 	}
 
