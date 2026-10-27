@@ -43,12 +43,14 @@ import (
 	serverconfig "github.com/vmware-tanzu/velero/pkg/cmd/server/config"
 	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/itemoperation"
+	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
+	kubevirtutil "github.com/vmware-tanzu/velero/pkg/util/kubevirt"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
 )
 
@@ -173,6 +175,12 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	restoredPVCList := volume.RestoredPVCFromRestoredResourceList(restoredResourceList)
 
+	itemRenames, err := kubevirtutil.VMOptionsOf(restore)
+	if err != nil {
+		// The restore failed on this before it restored anything.
+		log.WithError(err).Warn("Ignoring the VM renames of the restore")
+	}
+
 	restoreItemOperations, err := backupStore.GetRestoreItemOperations(restore.Name)
 	if err != nil {
 		log.WithError(err).Error("error getting itemOperationList")
@@ -185,6 +193,7 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		crClient:         r.crClient,
 		volumeInfo:       volumeInfo,
 		restoredPVCList:  restoredPVCList,
+		itemRenames:      itemRenames,
 		multiHookTracker: r.multiHookTracker,
 		resourceTimeout:  r.resourceTimeout,
 		restoreItemOperationList: restoreItemOperationList{
@@ -310,6 +319,7 @@ type finalizerContext struct {
 	crClient                 client.Client
 	volumeInfo               []*volume.BackupVolumeInfo
 	restoredPVCList          map[string]struct{}
+	itemRenames              *kubevirtutil.ItemRenames
 	restoreItemOperationList restoreItemOperationList
 	multiHookTracker         *hook.MultiHookTracker
 	resourceTimeout          time.Duration
@@ -367,6 +377,25 @@ func (ctx *finalizerContext) reportPVCNotBound(volInfo volume.BackupVolumeInfo, 
 	deletePVCProgressConfigMap(ctx.restore.Name, log)
 }
 
+// restoredVolumeInfo returns the backup's volume info under the names the
+// restore gave the PVCs: a PVC of a VM restored under a new name is restored
+// as its copy, and as itself only when the restore keeps it.
+func (ctx *finalizerContext) restoredVolumeInfo() []*volume.BackupVolumeInfo {
+	var restored []*volume.BackupVolumeInfo
+	for _, volInfo := range ctx.volumeInfo {
+		newNames, keepOriginal := ctx.itemRenames.NamesFor(kuberesource.PersistentVolumeClaims.String(), volInfo.PVCNamespace, volInfo.PVCName)
+		if len(newNames) == 0 || keepOriginal {
+			restored = append(restored, volInfo)
+		}
+		for _, newName := range newNames {
+			renamed := *volInfo
+			renamed.PVCName = newName
+			restored = append(restored, &renamed)
+		}
+	}
+	return restored
+}
+
 // patchDynamicPV patches newly dynamically provisioned PV using volume info
 // in order to restore custom settings that would otherwise be lost during dynamic PV recreation.
 func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result) {
@@ -380,7 +409,7 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 	maxConcurrency := 3
 	semaphore := make(chan struct{}, maxConcurrency)
 
-	for _, volumeItem := range ctx.volumeInfo {
+	for _, volumeItem := range ctx.restoredVolumeInfo() {
 		if (volumeItem.BackupMethod == volume.PodVolumeBackup || volumeItem.BackupMethod == volume.CSISnapshot) && volumeItem.PVInfo != nil {
 			// Determine restored PVC namespace
 			restoredNamespace := volumeItem.PVCNamespace
