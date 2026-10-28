@@ -12,6 +12,11 @@ properties([
             description: "Build and push assembled cloudcasa-velero image"
         ),
         booleanParam(
+            name: "UPDATE_PLUGINS_INI_VELERO_TAG",
+            defaultValue: true,
+            description: "After a successful build, commit the new velero image tag to [velero] in plugins.ini"
+        ),
+        booleanParam(
             name: "PREPARE_REPO_FORCE_MASTER_SCOPE",
             defaultValue: false,
             description: "Run integration prepare-repo stage even when BRANCH_NAME is not a master-equivalent branch"
@@ -63,6 +68,15 @@ node("cloudcasa-build") {
     stage("Checkout") {
         cleanWs()
         checkout scm
+    }
+
+    // Stop the build triggered by our own plugins.ini tag-bump commit (prevents a build loop).
+    def lastCommitMsg = sh(script: "git log -1 --pretty=%s", returnStdout: true).trim()
+    if (lastCommitMsg.startsWith("ci: bump velero image")) {
+        echo "HEAD is the CI velero tag bump ('${lastCommitMsg}'); skipping this build."
+        currentBuild.result = "NOT_BUILT"
+        currentBuild.description = "Skipped: plugins.ini velero tag bump"
+        return
     }
 
     def sourceBranch = env.BRANCH_NAME ?: "unknown"
@@ -267,6 +281,59 @@ node("cloudcasa-build") {
                     """
                 }
             }
+        }
+    }
+
+    stage("Update plugins.ini velero tag in repo") {
+        // Only on these branches, so test branches never commit
+        def pluginsIniUpdateBranches = ["v1.18.4.x"]
+        if (buildCloudcasaVelero && (params.UPDATE_PLUGINS_INI_VELERO_TAG ?: false) && pluginsIniUpdateBranches.contains(sourceBranch)) {
+            withCredentials([usernamePassword(
+                credentialsId: 'github-access-token',
+                usernameVariable: 'GIT_USER',
+                passwordVariable: 'GIT_PASS'
+            )]) {
+                def originUrl = sh(script: "git config --get remote.origin.url", returnStdout: true).trim()
+                def repoHost = originUrl.replaceFirst('https://', '').replaceFirst('^[^@]*@', '')
+
+                sh """
+                    git config user.name 'cloudcasabot'
+                    git config user.email 'cloudcasabot@catalogicsoftware.com'
+                """
+
+                // Start from the latest remote branch (plugin jobs also commit here), discarding
+                // the workspace-only plugins.ini edits made during the build.
+                sh """
+                    set -eu
+                    git fetch https://\${GIT_USER}:\${GIT_PASS}@${repoHost} ${sourceBranch}
+                    git checkout -f -B ${sourceBranch} FETCH_HEAD
+                """
+
+                // Tag-only change inside [velero]; keeps the existing registry/org prefix.
+                withEnv(["NEW_TAG=${veleroTag}"]) {
+                    sh '''
+                        set -eu
+                        sed -i -E "/^\\[velero\\]/,/^\\[/ s|^(image[[:space:]]*=[[:space:]]*[^[:space:]]*velero:)[^[:space:]]+|\\1${NEW_TAG}|" plugins.ini
+                        grep -qF "velero:${NEW_TAG}" plugins.ini || {
+                            echo "Failed to update velero tag in plugins.ini" >&2
+                            exit 1
+                        }
+                    '''
+                }
+
+                sh """
+                    set -eu
+                    if ! git diff --quiet -- plugins.ini; then
+                        git add plugins.ini
+                        git commit -m "ci: bump velero image to ${veleroTag} [skip ci] [${env.JOB_NAME} #${env.BUILD_NUMBER}]"
+                        git push https://\${GIT_USER}:\${GIT_PASS}@${repoHost} HEAD:${sourceBranch}
+                    else
+                        echo "plugins.ini [velero] already at ${veleroTag}"
+                    fi
+                """
+            }
+        } else {
+            echo "Skipping plugins.ini velero tag update"
         }
     }
 
