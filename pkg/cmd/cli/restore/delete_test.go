@@ -79,6 +79,6 @@ func TestDeleteCommand(t *testing.T) {
 	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=1", cmdtest.CaptureFlag))
 	stdout, _, err := veleroexec.RunCommand(cmd)
 	if err != nil {
-		require.Contains(t, stdout, fmt.Sprintf("restores.velero.io \"%s\" not found.", restore2))
+		require.Contains(t, stdout, fmt.Sprintf("restores.cloudcasa.io \"%s\" not found.", restore2))
 	}
 }

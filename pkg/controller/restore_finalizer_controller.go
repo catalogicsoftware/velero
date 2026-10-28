@@ -36,19 +36,28 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/vmware-tanzu/velero/internal/catalogic"
 	"github.com/vmware-tanzu/velero/internal/hook"
 	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	serverconfig "github.com/vmware-tanzu/velero/pkg/cmd/server/config"
 	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/itemoperation"
+	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
+	kubevirtutil "github.com/vmware-tanzu/velero/pkg/util/kubevirt"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
+)
+
+// The progress relay of kubeagent; variables so that tests can replace them.
+var (
+	updatePVCProgress          = catalogic.UpdateSnapshotProgress
+	deletePVCProgressConfigMap = catalogic.DeleteSnapshotProgressConfigMap
 )
 
 type restoreFinalizerReconciler struct {
@@ -91,13 +100,14 @@ func NewRestoreFinalizerReconciler(
 
 func (r *restoreFinalizerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Restore{}).
 		Named(constant.ControllerRestoreFinalizer).
 		Complete(r)
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=get;list;watch;update
-// +kubebuilder:rbac:groups=velero.io,resources=restores/status,verbs=get
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=restores,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=restores/status,verbs=get
 func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.logger.WithField("restore finalizer", req.String())
 	log.Debug("restoreFinalizerReconciler getting restore")
@@ -109,6 +119,9 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting restore %s", req.String())
+	}
+	if skipForeign(log, original) {
+		return ctrl.Result{}, nil
 	}
 	restore := original.DeepCopy()
 	log.Debugf("restore: %s", restore.Name)
@@ -162,6 +175,12 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	restoredPVCList := volume.RestoredPVCFromRestoredResourceList(restoredResourceList)
 
+	itemRenames, err := kubevirtutil.VMOptionsOf(restore)
+	if err != nil {
+		// The restore failed on this before it restored anything.
+		log.WithError(err).Warn("Ignoring the VM renames of the restore")
+	}
+
 	restoreItemOperations, err := backupStore.GetRestoreItemOperations(restore.Name)
 	if err != nil {
 		log.WithError(err).Error("error getting itemOperationList")
@@ -174,6 +193,7 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		crClient:         r.crClient,
 		volumeInfo:       volumeInfo,
 		restoredPVCList:  restoredPVCList,
+		itemRenames:      itemRenames,
 		multiHookTracker: r.multiHookTracker,
 		resourceTimeout:  r.resourceTimeout,
 		restoreItemOperationList: restoreItemOperationList{
@@ -198,10 +218,19 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if warningCnt > 0 || errCnt > 0 {
-		err := r.updateResults(backupStore, restore, &warnings, &errs)
-		if err != nil {
-			log.WithError(err).Error("error updating results")
-			return ctrl.Result{}, errors.Wrap(err, "error updating results")
+		if isBackupStorageLocationReadOnly(info.location) {
+			// The restore controller wrote the results to the local file system.
+			log.WithFields(logrus.Fields{
+				"AccessMode":   "ReadOnly",
+				"WarningCount": warningCnt,
+				"ErrorCount":   errCnt,
+			}).Info("Results are already written to local filesystem for ReadOnly BackupStorageLocation")
+		} else {
+			err := r.updateResults(backupStore, restore, &warnings, &errs)
+			if err != nil {
+				log.WithError(err).Error("error updating results")
+				return ctrl.Result{}, errors.Wrap(err, "error updating results")
+			}
 		}
 	}
 
@@ -290,6 +319,7 @@ type finalizerContext struct {
 	crClient                 client.Client
 	volumeInfo               []*volume.BackupVolumeInfo
 	restoredPVCList          map[string]struct{}
+	itemRenames              *kubevirtutil.ItemRenames
 	restoreItemOperationList restoreItemOperationList
 	multiHookTracker         *hook.MultiHookTracker
 	resourceTimeout          time.Duration
@@ -307,10 +337,63 @@ func (ctx *finalizerContext) execute() (results.Result, results.Result) {
 		warnings.Merge(&vgscWarnings)
 	}
 
+	// Pods on volumes that failed to bind may never run their exec hooks, so
+	// waiting for those hooks would only hold the restore until the timeout.
+	if !pdpErrs.IsEmpty() {
+		ctx.logger.Warn("PV patching failed. Skipping restore exec hook wait.")
+		for _, msg := range pdpErrs.Velero {
+			ctx.logger.Warnf("Velero error: %s", msg)
+		}
+		for _, msg := range pdpErrs.Cluster {
+			ctx.logger.Warnf("Cluster error: %s", msg)
+		}
+		for ns, msgs := range pdpErrs.Namespaces {
+			for _, msg := range msgs {
+				ctx.logger.Warnf("Namespace: %s, error: %s", ns, msg)
+			}
+		}
+		return warnings, errs
+	}
+
 	rehErrs := ctx.WaitRestoreExecHook()
 	errs.Merge(&rehErrs)
 
 	return warnings, errs
+}
+
+// reportPVCNotBound tells kubeagent that a restored PVC never bound. The CSI PVC
+// restore action reported it completed when it wrote the PVC, under the backed-up
+// namespace; the same key is used so that the failure replaces that report.
+func (ctx *finalizerContext) reportPVCNotBound(volInfo volume.BackupVolumeInfo, restoredNamespace string, log logrus.FieldLogger) {
+	pvc := &corev1api.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: volInfo.PVCName, Namespace: volInfo.PVCNamespace},
+	}
+	message := fmt.Sprintf("PVC %s/%s did not bind within %s", restoredNamespace, volInfo.PVCName, ctx.resourceTimeout)
+	if err := updatePVCProgress(pvc, nil, nil, "error", message, ctx.restore.Name, log); err != nil {
+		log.WithError(err).Warn("Failed to report the PVC that did not bind to kubeagent")
+		return
+	}
+	time.Sleep(200 * time.Millisecond) // give kubeagent time to read it
+	deletePVCProgressConfigMap(ctx.restore.Name, log)
+}
+
+// restoredVolumeInfo returns the backup's volume info under the names the
+// restore gave the PVCs: a PVC of a VM restored under a new name is restored
+// as its copy, and as itself only when the restore keeps it.
+func (ctx *finalizerContext) restoredVolumeInfo() []*volume.BackupVolumeInfo {
+	var restored []*volume.BackupVolumeInfo
+	for _, volInfo := range ctx.volumeInfo {
+		newNames, keepOriginal := ctx.itemRenames.NamesFor(kuberesource.PersistentVolumeClaims.String(), volInfo.PVCNamespace, volInfo.PVCName)
+		if len(newNames) == 0 || keepOriginal {
+			restored = append(restored, volInfo)
+		}
+		for _, newName := range newNames {
+			renamed := *volInfo
+			renamed.PVCName = newName
+			restored = append(restored, &renamed)
+		}
+	}
+	return restored
 }
 
 // patchDynamicPV patches newly dynamically provisioned PV using volume info
@@ -320,11 +403,13 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 
 	var pvWaitGroup sync.WaitGroup
 	var resultLock sync.Mutex
+	// All PVCs of a restore share one progress ConfigMap, so reports go out one at a time.
+	var progressLock sync.Mutex
 
 	maxConcurrency := 3
 	semaphore := make(chan struct{}, maxConcurrency)
 
-	for _, volumeItem := range ctx.volumeInfo {
+	for _, volumeItem := range ctx.restoredVolumeInfo() {
 		if (volumeItem.BackupMethod == volume.PodVolumeBackup || volumeItem.BackupMethod == volume.CSISnapshot) && volumeItem.PVInfo != nil {
 			// Determine restored PVC namespace
 			restoredNamespace := volumeItem.PVCNamespace
@@ -347,27 +432,31 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 				log := ctx.logger.WithField("PVC", volInfo.PVCName).WithField("PVCNamespace", restoredNamespace)
 				log.Debug("patching dynamic PV is in progress")
 
+				pvcBound := false
 				err := wait.PollUntilContextTimeout(context.Background(), 10*time.Second, ctx.resourceTimeout, true, func(context.Context) (bool, error) {
 					// wait for PVC to be bound
 					pvc := &corev1api.PersistentVolumeClaim{}
 					err := ctx.crClient.Get(context.Background(), client.ObjectKey{Name: volInfo.PVCName, Namespace: restoredNamespace}, pvc)
 					if apierrors.IsNotFound(err) {
-						log.Debug("error not finding PVC")
+						log.Debug("error not finding PVC. Listing all available PVCs for debugging.")
+
+						// List all PVCs in the cluster for debugging
+						pvcList := &corev1api.PersistentVolumeClaimList{}
+						if listErr := ctx.crClient.List(context.Background(), pvcList); listErr != nil {
+							ctx.logger.WithError(listErr).Error("Failed to list PVCs")
+						} else {
+							for _, p := range pvcList.Items {
+								ctx.logger.Infof("Found PVC: %s in Namespace: %s", p.Name, p.Namespace)
+							}
+						}
+
+						// Log where the function expects the PVC to exist
+						ctx.logger.Warnf("Expected PVC %s to be in namespace %s, but it was not found.", volInfo.PVCName, restoredNamespace)
+
 						return false, nil
 					}
 					if err != nil {
 						return false, err
-					}
-
-					// Check whether the async operation to populate the PVC is successful.  If it's not, will skip patching the PV, instead of waiting.
-					operations := ctx.restoreItemOperationList.SelectByPVC(pvc.Namespace, pvc.Name)
-					for _, op := range operations {
-						if op.Spec.RestoreItemAction == constant.PluginCSIPVCRestoreRIA &&
-							op.Status.Phase != itemoperation.OperationPhaseCompleted {
-							log.Warnf("skipping PV patch, because the operation to restore the PVC is not completed, "+
-								"operation: %s, phase: %s", op.Spec.OperationID, op.Status.Phase)
-							return true, nil
-						}
 					}
 
 					// We are handling a common but specific scenario where a PVC is in a pending state and uses a storage class with
@@ -391,10 +480,22 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 						}
 					}
 
+					// Check whether the async operation to populate the PVC is successful.  If it's not, will skip patching the PV, instead of waiting.
+					operations := ctx.restoreItemOperationList.SelectByPVC(pvc.Namespace, pvc.Name)
+					for _, op := range operations {
+						if op.Spec.RestoreItemAction == constant.PluginCSIPVCRestoreRIA &&
+							op.Status.Phase != itemoperation.OperationPhaseCompleted {
+							log.Warnf("skipping PV patch, because the operation to restore the PVC is not completed, "+
+								"operation: %s, phase: %s", op.Spec.OperationID, op.Status.Phase)
+							return true, nil
+						}
+					}
+
 					if pvc.Status.Phase != corev1api.ClaimBound || pvc.Spec.VolumeName == "" {
 						log.Debugf("PVC: %s not ready", pvc.Name)
 						return false, nil
 					}
+					pvcBound = true
 
 					// wait for PV to be bound
 					pvName := pvc.Spec.VolumeName
@@ -422,7 +523,16 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 					// patch PV's reclaim policy and label using the corresponding data stored in volume info
 					if needPatch(pv, volInfo.PVInfo) {
 						updatedPV := pv.DeepCopy()
-						updatedPV.Labels = volInfo.PVInfo.Labels
+
+						if updatedPV.Labels == nil {
+							updatedPV.Labels = make(map[string]string)
+						}
+						for k, v := range volInfo.PVInfo.Labels {
+							if _, exists := updatedPV.Labels[k]; !exists {
+								updatedPV.Labels[k] = v
+							}
+						}
+
 						updatedPV.Spec.PersistentVolumeReclaimPolicy = corev1api.PersistentVolumeReclaimPolicy(volInfo.PVInfo.ReclaimPolicy)
 						if err := kubeutil.PatchResource(pv, updatedPV, ctx.crClient); err != nil {
 							return false, err
@@ -434,6 +544,11 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 				})
 
 				if err != nil {
+					if !pvcBound && wait.Interrupted(err) {
+						progressLock.Lock()
+						ctx.reportPVCNotBound(volInfo, restoredNamespace, log)
+						progressLock.Unlock()
+					}
 					err = fmt.Errorf("fail to patch dynamic PV, err: %s, PVC: %s, PV: %s", err, volInfo.PVCName, volInfo.PVName)
 					ctx.logger.WithError(errors.WithStack((err))).Error("err patching dynamic PV using volume info")
 					resultLock.Lock()
@@ -554,11 +669,8 @@ func needPatch(newPV *corev1api.PersistentVolume, pvInfo *volume.PVInfo) bool {
 	}
 
 	newPVLabels, pvLabels := newPV.Labels, pvInfo.Labels
-	for k, v := range pvLabels {
+	for k := range pvLabels {
 		if _, ok := newPVLabels[k]; !ok {
-			return true
-		}
-		if newPVLabels[k] != v {
 			return true
 		}
 	}

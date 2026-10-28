@@ -24,9 +24,12 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
@@ -352,4 +355,30 @@ func TestNewVolumeSnapshotBackupItemAction(t *testing.T) {
 	plugin1 := NewVolumeSnapshotBackupItemAction(f1)
 	_, err1 := plugin1(logger)
 	require.NoError(t, err1)
+}
+
+// At finalize the VolumeSnapshot goes away but its content stays as Retain (D1).
+func TestVolumeSnapshotFinalizeKeepsContent(t *testing.T) {
+	handle := "snap-handle-1"
+	vs := builder.ForVolumeSnapshot("velero", "vs").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup")).
+		Status().BoundVolumeSnapshotContentName("vsc").Result()
+	vsc := builder.ForVolumeSnapshotContent("vsc").
+		ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup")).
+		DeletionPolicy(snapshotv1api.VolumeSnapshotContentDelete).
+		VolumeSnapshotRef("velero", "vs", "uid").
+		Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: &handle}).Result()
+	client := velerotest.NewFakeControllerRuntimeClient(t, vs, vsc)
+	vsBIA := volumeSnapshotBackupItemAction{log: logrus.New(), crClient: client}
+	item, err := runtime.DefaultUnstructuredConverter.ToUnstructured(vs)
+	require.NoError(t, err)
+
+	_, _, _, _, err = vsBIA.Execute(&unstructured.UnstructuredList{Object: item},
+		builder.ForBackup("velero", "backup").Phase(velerov1api.BackupPhaseFinalizing).Result())
+	require.NoError(t, err)
+
+	require.True(t, apierrors.IsNotFound(client.Get(t.Context(), crclient.ObjectKeyFromObject(vs), &snapshotv1api.VolumeSnapshot{})))
+	kept := &snapshotv1api.VolumeSnapshotContent{}
+	require.NoError(t, client.Get(t.Context(), crclient.ObjectKey{Name: "vsc"}, kept))
+	assert.Equal(t, snapshotv1api.VolumeSnapshotContentRetain, kept.Spec.DeletionPolicy)
 }

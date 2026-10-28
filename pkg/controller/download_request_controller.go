@@ -79,8 +79,8 @@ func NewDownloadRequestReconciler(
 	}
 }
 
-// +kubebuilder:rbac:groups=velero.io,resources=downloadrequests,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=velero.io,resources=downloadrequests/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=downloadrequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=downloadrequests/status,verbs=get;update;patch
 
 func (r *downloadRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.log.WithFields(logrus.Fields{
@@ -99,6 +99,9 @@ func (r *downloadRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 		log.WithError(err).Error("Error getting DownloadRequest")
 		return ctrl.Result{}, errors.WithStack(err)
+	}
+	if skipForeign(log, downloadRequest) {
+		return ctrl.Result{}, nil
 	}
 
 	if downloadRequest.Status != (velerov1api.DownloadRequestStatus{}) && downloadRequest.Status.Expiration != nil {
@@ -232,6 +235,7 @@ func (r *downloadRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		})
 
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.DownloadRequest{}).
 		WatchesRawSource(downloadRequestSource).
 		Complete(r)

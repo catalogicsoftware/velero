@@ -91,6 +91,9 @@ func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		return ctrl.Result{}, errors.Wrapf(err, "error getting BackupStorageLocation %s", req.String())
 	}
+	if skipForeign(log, location) {
+		return ctrl.Result{}, nil
+	}
 	if !veleroutil.BSLIsAvailable(*location) {
 		log.Errorf("BackupStorageLocation is in unavailable state, skip syncing backup from it.")
 		return ctrl.Result{}, nil
@@ -323,6 +326,7 @@ func (b *backupSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	)
 
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		// Filter all BSL events, because this controller is supposed to run periodically, not by event.
 		For(&velerov1api.BackupStorageLocation{}, builder.WithPredicates(kube.FalsePredicate{})).
 		WatchesRawSource(backupSyncSource).

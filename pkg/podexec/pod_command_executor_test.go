@@ -176,6 +176,33 @@ func TestExecutePodCommand(t *testing.T) {
 			hookError:             errors.New("hook error"),
 			expectedError:         "hook error",
 		},
+		{
+			name:                  "stream deadline exceeded before local timeout",
+			command:               []string{"some", "command"},
+			expectedContainerName: "foo",
+			expectedErrorMode:     v1.HookErrorModeFail,
+			expectedTimeout:       defaultTimeout,
+			hookError:             context.DeadlineExceeded,
+			expectedError:         context.DeadlineExceeded.Error(),
+		},
+		{
+			// Timeouts from pod annotations go through time.ParseDuration, which accepts
+			// negative values. Without clamping, the hook would run with no timeout at all.
+			name:                  "negative timeout falls back to the default",
+			command:               []string{"some", "command"},
+			expectedContainerName: "foo",
+			expectedErrorMode:     v1.HookErrorModeFail,
+			timeout:               -1 * time.Second,
+			expectedTimeout:       30 * time.Second,
+		},
+		{
+			name:                  "a long timeout is kept",
+			command:               []string{"some", "command"},
+			expectedContainerName: "foo",
+			expectedErrorMode:     v1.HookErrorModeFail,
+			timeout:               6 * time.Hour,
+			expectedTimeout:       6 * time.Hour,
+		},
 	}
 
 	for _, test := range tests {
@@ -241,6 +268,54 @@ func TestExecutePodCommand(t *testing.T) {
 			}
 
 			require.NoError(t, err)
+		})
+	}
+}
+
+func TestNormalizeExecHookError(t *testing.T) {
+	hookErr := errors.New("hook error")
+	tests := []struct {
+		name              string
+		streamErr         error
+		contextErr        error
+		expectedError     string
+		preserveStreamErr bool
+	}{
+		{
+			name:          "local context deadline exceeded",
+			streamErr:     context.DeadlineExceeded,
+			contextErr:    context.DeadlineExceeded,
+			expectedError: "timed out after 30s",
+		},
+		{
+			name:              "stream deadline exceeded before local timeout",
+			streamErr:         context.DeadlineExceeded,
+			expectedError:     context.DeadlineExceeded.Error(),
+			preserveStreamErr: true,
+		},
+		{
+			name:              "ordinary hook error",
+			streamErr:         hookErr,
+			expectedError:     hookErr.Error(),
+			preserveStreamErr: true,
+		},
+		{
+			name: "no errors",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := normalizeExecHookError(test.streamErr, test.contextErr, defaultTimeout)
+			if test.expectedError == "" {
+				require.NoError(t, err)
+				return
+			}
+
+			require.EqualError(t, err, test.expectedError)
+			if test.preserveStreamErr && err != test.streamErr {
+				t.Fatalf("expected stream error to be returned unchanged")
+			}
 		})
 	}
 }

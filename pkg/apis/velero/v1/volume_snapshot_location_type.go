@@ -44,7 +44,7 @@ type VolumeSnapshotLocation struct {
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
-// +kubebuilder:rbac:groups=velero.io,resources=volumesnapshotlocations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudcasa.io,resources=volumesnapshotlocations,verbs=get;list;watch;create;update;patch;delete
 
 // VolumeSnapshotLocationList is a list of VolumeSnapshotLocations.
 type VolumeSnapshotLocationList struct {

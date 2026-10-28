@@ -17,6 +17,7 @@ limitations under the License.
 package volume
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -481,6 +482,8 @@ func TestGenerateVolumeInfoForCSIVolumeSnapshot(t *testing.T) {
 						SnapshotHandle: "testSnapshotHandle",
 						Size:           107374182400,
 						VSCName:        "testContent",
+						VSName:         "testVS",
+						VSCLSName:      "testClass",
 						OperationID:    "testID",
 						ReadyToUse:     &readyToUse,
 					},
@@ -817,7 +820,7 @@ func TestGenerateVolumeInfoFromDataUpload(t *testing.T) {
 					PostOperationItems: []velero.ResourceIdentifier{
 						{
 							GroupResource: schema.GroupResource{
-								Group:    "velero.io",
+								Group:    "cloudcasa.io",
 								Resource: "datauploads",
 							},
 							Namespace: "velero",
@@ -856,7 +859,7 @@ func TestGenerateVolumeInfoFromDataUpload(t *testing.T) {
 					PostOperationItems: []velero.ResourceIdentifier{
 						{
 							GroupResource: schema.GroupResource{
-								Group:    "velero.io",
+								Group:    "cloudcasa.io",
 								Resource: "datauploads",
 							},
 							Namespace: "velero",
@@ -1246,6 +1249,85 @@ func int64Ptr(val int) *int64 {
 	return &i
 }
 
+func TestInsertPVMapConcurrent(t *testing.T) {
+	// Velero backs up ItemBlocks on a pool of worker goroutines that all share
+	// the same BackupVolumesInformation, so InsertPVMap must be safe for
+	// concurrent use. Before the pvcPvMap lock was added this test reproduced
+	// the "fatal error: concurrent map writes" crash reported in #10634.
+	const (
+		workers    = 10
+		pvsPerWork = 50
+	)
+
+	volumesInfo := new(BackupVolumesInformation)
+	volumesInfo.Init()
+
+	wg := new(sync.WaitGroup)
+	start := make(chan struct{})
+
+	for i := range workers {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			for j := range pvsPerWork {
+				pvName := fmt.Sprintf("pv-%d-%d", worker, j)
+				volumesInfo.InsertPVMap(
+					*builder.ForPersistentVolume(pvName).ClaimRef("ns", "pvc-"+pvName).Result(),
+					"pvc-"+pvName,
+					"ns",
+				)
+				// Read concurrently as well, to exercise the RLock path.
+				volumesInfo.pvMap.retrieve(pvName, "", "")
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	require.Len(t, volumesInfo.pvMap.data, workers*pvsPerWork)
+	for i := range workers {
+		for j := range pvsPerWork {
+			pvName := fmt.Sprintf("pv-%d-%d", i, j)
+			info := volumesInfo.pvMap.retrieve(pvName, "", "")
+			require.NotNil(t, info, "PV %s missing from the map", pvName)
+			require.Equal(t, "pvc-"+pvName, info.PVCName)
+			require.Equal(t, "ns", info.PVCNamespace)
+		}
+	}
+}
+
+func TestInsertPVMapLazyInitConcurrent(t *testing.T) {
+	// InsertPVMap lazily initializes pvMap when Init has not been called.
+	// Concurrent callers must not each install their own map and lose entries.
+	const workers = 20
+
+	volumesInfo := new(BackupVolumesInformation)
+
+	wg := new(sync.WaitGroup)
+	start := make(chan struct{})
+
+	for i := range workers {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			pvName := fmt.Sprintf("pv-%d", worker)
+			volumesInfo.InsertPVMap(
+				*builder.ForPersistentVolume(pvName).ClaimRef("ns", "pvc-"+pvName).Result(),
+				"pvc-"+pvName,
+				"ns",
+			)
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	require.Len(t, volumesInfo.pvMap.data, workers)
+}
+
 func TestGetVolumeSnapshotClasses(t *testing.T) {
 	class := &snapshotv1api.VolumeSnapshotClass{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1261,4 +1343,45 @@ func TestGetVolumeSnapshotClasses(t *testing.T) {
 	result, err := volumesInfo.getVolumeSnapshotClasses()
 	require.NoError(t, err)
 	require.Equal(t, []snapshotv1api.VolumeSnapshotClass{*class}, result)
+}
+
+// A VolumeSnapshot may name no class (the CSI default class is used, or it was
+// created by a VolumeGroupSnapshot); its volume info must still be generated.
+func TestGenerateVolumeInfoForCSIVolumeSnapshotWithoutClass(t *testing.T) {
+	now := metav1.Now()
+	readyToUse := true
+	volumesInfo := BackupVolumesInformation{}
+	volumesInfo.Init()
+	volumesInfo.pvMap.insert(corev1api.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "testPV"}}, "testPVC", "velero")
+	volumesInfo.BackupOperations = append(volumesInfo.BackupOperations, &itemoperation.BackupOperation{
+		Spec: itemoperation.BackupOperationSpec{
+			OperationID: "testID",
+			ResourceIdentifier: velero.ResourceIdentifier{
+				GroupResource: schema.GroupResource{Group: "snapshot.storage.k8s.io", Resource: "volumesnapshots"},
+				Namespace:     "velero",
+				Name:          "testVS",
+			},
+		},
+	})
+	volumesInfo.volumeSnapshots = []snapshotv1api.VolumeSnapshot{{
+		ObjectMeta: metav1.ObjectMeta{Name: "testVS", Namespace: "velero", CreationTimestamp: now},
+		Spec: snapshotv1api.VolumeSnapshotSpec{
+			Source: snapshotv1api.VolumeSnapshotSource{PersistentVolumeClaimName: stringPtr("testPVC")},
+		},
+		Status: &snapshotv1api.VolumeSnapshotStatus{
+			BoundVolumeSnapshotContentName: stringPtr("testContent"),
+			CreationTime:                   &now,
+			ReadyToUse:                     &readyToUse,
+		},
+	}}
+	volumesInfo.volumeSnapshotContents = []snapshotv1api.VolumeSnapshotContent{
+		*builder.ForVolumeSnapshotContent("testContent").Driver("pd.csi.storage.gke.io").
+			Status(&snapshotv1api.VolumeSnapshotContentStatus{SnapshotHandle: stringPtr("testSnapshotHandle")}).Result(),
+	}
+	volumesInfo.logger = logging.DefaultLogger(logrus.DebugLevel, logging.FormatJSON)
+
+	require.NotPanics(t, volumesInfo.generateVolumeInfoForCSIVolumeSnapshot)
+	require.Len(t, volumesInfo.volumeInfos, 1)
+	assert.Equal(t, "testVS", volumesInfo.volumeInfos[0].CSISnapshotInfo.VSName)
+	assert.Empty(t, volumesInfo.volumeInfos[0].CSISnapshotInfo.VSCLSName)
 }

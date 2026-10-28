@@ -193,7 +193,7 @@ func TestCreateCommand(t *testing.T) {
 
 		require.NoError(t, o.Complete(nil, f))
 		err := o.Validate(c, []string{}, f)
-		require.Equal(t, "backups.velero.io \"not-exist\" not found", err.Error())
+		require.Equal(t, "backups.cloudcasa.io \"not-exist\" not found", err.Error())
 	})
 
 	t.Run("create a restore with resource policies configmap", func(t *testing.T) {

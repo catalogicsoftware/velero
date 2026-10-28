@@ -101,6 +101,7 @@ func (r *backupQueueReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Backup{}, builder.WithPredicates(predicate.Funcs{
 			UpdateFunc: func(ue event.UpdateEvent) bool {
 				backup := ue.ObjectNew.(*velerov1api.Backup)
@@ -244,6 +245,9 @@ func (r *backupQueueReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Get(ctx, req.NamespacedName, backup); err != nil {
 		log.WithError(err).Error("unable to get backup")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if skipForeign(log, backup) {
+		return ctrl.Result{}, nil
 	}
 	switch backup.Status.Phase {
 	case "", velerov1api.BackupPhaseNew:

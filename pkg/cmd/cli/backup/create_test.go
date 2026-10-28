@@ -341,7 +341,7 @@ func TestCreateCommand(t *testing.T) {
 
 		// Validate
 		e = o.Validate(cmd, args, f)
-		assert.ErrorContains(t, e, fmt.Sprintf("backupstoragelocations.velero.io \"%s\" not found", bsl))
+		assert.ErrorContains(t, e, fmt.Sprintf("backupstoragelocations.cloudcasa.io \"%s\" not found", bsl))
 	})
 
 	t.Run("create a backup create command with specific volume-snapshot-locations setting", func(t *testing.T) {

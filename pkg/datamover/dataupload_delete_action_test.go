@@ -78,7 +78,7 @@ func TestDataUploadDeleteActionAppliesTo(t *testing.T) {
 	a := NewDataUploadDeleteAction(logrus.StandardLogger(), nil)
 	selector, err := a.AppliesTo()
 	require.NoError(t, err)
-	require.Equal(t, velero.ResourceSelector{IncludedResources: []string{"datauploads.velero.io"}}, selector)
+	require.Equal(t, velero.ResourceSelector{IncludedResources: []string{"datauploads.cloudcasa.io"}}, selector)
 }
 
 func TestDataUploadDeleteActionExecute(t *testing.T) {

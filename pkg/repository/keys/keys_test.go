@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestRepoKeySelector(t *testing.T) {
@@ -27,4 +28,13 @@ func TestRepoKeySelector(t *testing.T) {
 
 	require.Equal(t, credentialsSecretName, selector.Name)
 	require.Equal(t, credentialsKey, selector.Key)
+}
+
+// No velero-repo-credentials secret is created, existing or not.
+func TestEnsureCommonRepositoryKeyCreatesNothing(t *testing.T) {
+	client := fake.NewSimpleClientset()
+
+	require.NoError(t, EnsureCommonRepositoryKey(client.CoreV1(), "cloudcasa-io"))
+
+	require.Empty(t, client.Actions())
 }

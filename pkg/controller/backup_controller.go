@@ -62,7 +62,6 @@ import (
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
-	veleroutil "github.com/vmware-tanzu/velero/pkg/util/velero"
 )
 
 const (
@@ -176,6 +175,7 @@ func NewBackupReconciler(
 
 func (b *backupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithEventFilter(instancePredicate()).
 		For(&velerov1api.Backup{}, builder.WithPredicates(predicate.Funcs{
 			UpdateFunc: func(ue event.UpdateEvent) bool {
 				backup := ue.ObjectNew.(*velerov1api.Backup)
@@ -268,6 +268,9 @@ func (b *backupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		log.WithError(err).Error("error getting backup")
 		return ctrl.Result{}, err
+	}
+	if skipForeign(log, original) {
+		return ctrl.Result{}, nil
 	}
 
 	// Double-check we have the correct phase. In the unlikely event that multiple controller
@@ -456,9 +459,9 @@ func (b *backupReconciler) prepareBackupRequest(ctx context.Context, backup *vel
 		if apierrors.IsNotFound(err) {
 			if serverSpecified {
 				// TODO(2.0) remove this. For now, without mentioning "server default" it could be confusing trying to grasp where the default came from.
-				request.Status.ValidationErrors = append(request.Status.ValidationErrors, fmt.Sprintf("an existing backup storage location was not specified at backup creation time and the server default %s does not exist. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: %v", request.Spec.StorageLocation, err))
+				request.Status.ValidationErrors = append(request.Status.ValidationErrors, fmt.Sprintf("an existing backup storage location wasn't specified at backup creation time and the server default '%s' doesn't exist. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: %v", request.Spec.StorageLocation, err))
 			} else {
-				request.Status.ValidationErrors = append(request.Status.ValidationErrors, fmt.Sprintf("an existing backup storage location was not specified at backup creation time and the default %s was not found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: %v", request.Spec.StorageLocation, err))
+				request.Status.ValidationErrors = append(request.Status.ValidationErrors, fmt.Sprintf("an existing backup storage location wasn't specified at backup creation time and the default '%s' wasn't found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: %v", request.Spec.StorageLocation, err))
 			}
 		} else {
 			request.Status.ValidationErrors = append(request.Status.ValidationErrors, fmt.Sprintf("error getting backup storage location: %v", err))
@@ -471,12 +474,8 @@ func (b *backupReconciler) prepareBackupRequest(ctx context.Context, backup *vel
 				fmt.Sprintf("backup can't be created because backup storage location %s is currently in read-only mode", request.StorageLocation.Name))
 		}
 
-		if !veleroutil.BSLIsAvailable(*request.StorageLocation) {
-			request.Status.ValidationErrors = append(
-				request.Status.ValidationErrors,
-				fmt.Sprintf("backup can't be created because BackupStorageLocation %s is in Unavailable status.", request.StorageLocation.Name),
-			)
-		}
+		// The location's phase is not checked: a per-job engine never
+		// validates the shared, unlabeled location, so it has no phase.
 	}
 
 	// add the storage location as a label for easy filtering later.
@@ -890,7 +889,7 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 		serverMetrics.SetBackupTarballSizeBytesGauge(backupScheduleName, backupSizeBytes)
 	}
 
-	if backup.Status.CompletionTimestamp != nil {
+	if backup.Status.CompletionTimestamp != nil && backup.Status.StartTimestamp != nil {
 		backupDuration := backup.Status.CompletionTimestamp.Time.Sub(backup.Status.StartTimestamp.Time)
 		backupDurationSeconds := float64(backupDuration / time.Second)
 		serverMetrics.RegisterBackupDuration(backupScheduleName, backupDurationSeconds)
@@ -899,7 +898,11 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 	if !finalize {
 		serverMetrics.RegisterVolumeSnapshotAttempts(backupScheduleName, backup.Status.VolumeSnapshotsAttempted)
 		serverMetrics.RegisterVolumeSnapshotSuccesses(backupScheduleName, backup.Status.VolumeSnapshotsCompleted)
-		serverMetrics.RegisterVolumeSnapshotFailures(backupScheduleName, backup.Status.VolumeSnapshotsAttempted-backup.Status.VolumeSnapshotsCompleted)
+		nativeSnapshotFailures := backup.Status.VolumeSnapshotsAttempted - backup.Status.VolumeSnapshotsCompleted
+		if nativeSnapshotFailures < 0 {
+			nativeSnapshotFailures = 0
+		}
+		serverMetrics.RegisterVolumeSnapshotFailures(backupScheduleName, nativeSnapshotFailures)
 
 		if features.IsEnabled(velerov1api.CSIFeatureFlag) {
 			serverMetrics.RegisterCSISnapshotAttempts(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsAttempted)
@@ -915,7 +918,11 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 		}
 	} else if features.IsEnabled(velerov1api.CSIFeatureFlag) {
 		serverMetrics.RegisterCSISnapshotSuccesses(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsCompleted)
-		serverMetrics.RegisterCSISnapshotFailures(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsAttempted-backup.Status.CSIVolumeSnapshotsCompleted)
+		csiSnapshotFailures := backup.Status.CSIVolumeSnapshotsAttempted - backup.Status.CSIVolumeSnapshotsCompleted
+		if csiSnapshotFailures < 0 {
+			csiSnapshotFailures = 0
+		}
+		serverMetrics.RegisterCSISnapshotFailures(backupScheduleName, backup.Name, csiSnapshotFailures)
 	}
 }
 
@@ -949,6 +956,16 @@ func persistBackup(backup *pkgbackup.Request,
 	}
 
 	podVolumeBackups, errs := encode.ToJSONGzip(backup.PodVolumeBackups, "pod volume backups list")
+	if errs != nil {
+		persistErrs = append(persistErrs, errs...)
+	}
+
+	csiSnapshotJSON, errs := encode.ToJSONGzip(csiVolumeSnapshots, "csi volume snapshots list")
+	if errs != nil {
+		persistErrs = append(persistErrs, errs...)
+	}
+
+	csiSnapshotContentsJSON, errs := encode.ToJSONGzip(csiVolumeSnapshotContents, "csi volume snapshot contents list")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
@@ -988,23 +1005,27 @@ func persistBackup(backup *pkgbackup.Request,
 		nativeVolumeSnapshots = nil
 		backupItemOperations = nil
 		backupResourceList = nil
+		csiSnapshotJSON = nil
+		csiSnapshotContentsJSON = nil
 		csiSnapshotClassesJSON = nil
 		backupResult = nil
 		volumeInfoJSON = nil
 	}
 
 	backupInfo := persistence.BackupInfo{
-		Name:                     backup.Name,
-		Metadata:                 backupJSON,
-		Contents:                 backupContents,
-		Log:                      backupLog,
-		BackupResults:            backupResult,
-		PodVolumeBackups:         podVolumeBackups,
-		VolumeSnapshots:          nativeVolumeSnapshots,
-		BackupItemOperations:     backupItemOperations,
-		BackupResourceList:       backupResourceList,
-		CSIVolumeSnapshotClasses: csiSnapshotClassesJSON,
-		BackupVolumeInfo:         volumeInfoJSON,
+		Name:                      backup.Name,
+		Metadata:                  backupJSON,
+		Contents:                  backupContents,
+		Log:                       backupLog,
+		BackupResults:             backupResult,
+		PodVolumeBackups:          podVolumeBackups,
+		VolumeSnapshots:           nativeVolumeSnapshots,
+		BackupItemOperations:      backupItemOperations,
+		BackupResourceList:        backupResourceList,
+		CSIVolumeSnapshots:        csiSnapshotJSON,
+		CSIVolumeSnapshotContents: csiSnapshotContentsJSON,
+		CSIVolumeSnapshotClasses:  csiSnapshotClassesJSON,
+		BackupVolumeInfo:          volumeInfoJSON,
 	}
 	if err := backupStore.PutBackup(backupInfo); err != nil {
 		persistErrs = append(persistErrs, err)

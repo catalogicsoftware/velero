@@ -18,6 +18,8 @@ package kuberesource
 
 import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	velerov2alpha1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 )
 
 var (
@@ -36,6 +38,6 @@ var (
 	VolumeGroupSnapshots      = schema.GroupResource{Group: "snapshot.storage.k8s.io", Resource: "volumegroupsnapshots"}
 	VolumeSnapshotContents    = schema.GroupResource{Group: "snapshot.storage.k8s.io", Resource: "volumesnapshotcontents"}
 	PriorityClasses           = schema.GroupResource{Group: "scheduling.k8s.io", Resource: "priorityclasses"}
-	DataUploads               = schema.GroupResource{Group: "velero.io", Resource: "datauploads"}
+	DataUploads               = velerov2alpha1api.Resource("datauploads")
 	VGSKind                   = "VolumeGroupSnapshot"
 )

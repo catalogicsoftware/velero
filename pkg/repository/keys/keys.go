@@ -18,12 +18,7 @@ limitations under the License.
 package keys
 
 import (
-	"context"
-
-	"github.com/cockroachdb/errors"
 	corev1api "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/vmware-tanzu/velero/pkg/builder"
@@ -32,36 +27,11 @@ import (
 const (
 	credentialsSecretName = "velero-repo-credentials"
 	credentialsKey        = "repository-password"
-
-	encryptionKey = "static-passw0rd"
 )
 
-func EnsureCommonRepositoryKey(secretClient corev1client.SecretsGetter, namespace string) error {
-	_, err := secretClient.Secrets(namespace).Get(context.TODO(), credentialsSecretName, metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return errors.WithStack(err)
-	}
-	if err == nil {
-		return nil
-	}
-
-	// if we got here, we got an IsNotFound error, so we need to create the key
-
-	secret := &corev1api.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      credentialsSecretName,
-		},
-		Type: corev1api.SecretTypeOpaque,
-		Data: map[string][]byte{
-			credentialsKey: []byte(encryptionKey),
-		},
-	}
-
-	if _, err = secretClient.Secrets(namespace).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil {
-		return errors.Wrapf(err, "error creating %s secret", credentialsSecretName)
-	}
-
+// EnsureCommonRepositoryKey does nothing: CloudCasa does not use Velero's
+// backup repositories, so their shared key secret is never created.
+func EnsureCommonRepositoryKey(_ corev1client.SecretsGetter, _ string) error {
 	return nil
 }
 
