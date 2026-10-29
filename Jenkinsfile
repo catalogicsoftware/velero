@@ -80,14 +80,14 @@ node("cloudcasa-build") {
     }
 
     def sourceBranch = env.BRANCH_NAME ?: "unknown"
-    def masterEquivalentBranches = ["master", "v1.14.0.x", "jg-KUBEDR-7845"]
+    def masterEquivalentBranches = ["master", "v1.14.0.x", "v1.18.4.x", "jg-KUBEDR-7845"]
     def isMasterFlow = masterEquivalentBranches.contains(sourceBranch)
     def isProductionFlow = sourceBranch == "production"
     // production builds/pushes just like the master-equivalent branches, but tags
     // and deployment-repo targets differ (see branchTag and Prepare deployment repo below).
     def isReleaseFlow = isMasterFlow || isProductionFlow
     // Use "master"/"prod" as the tag segment for release branches so the tag stays
-    // clean (e.g. 1.14.0-master.12, 1.14.0-prod.12) regardless of the actual branch name.
+    // clean (e.g. 1.18.4-master.12, 1.18.4-prod.12) regardless of the actual branch name.
     def branchTag = isMasterFlow ? "master" : (isProductionFlow ? "prod" : sourceBranch.replaceAll('[^0-9A-Za-z-]', '-'))
 
     // Keep tags cloudcasa-like while preserving velero version context.
@@ -457,7 +457,7 @@ node("cloudcasa-build") {
                     // k8s-prepare-repo.sh targets. Match the full ACR-prefixed reference so
                     // other registries (e.g. OpenShift) are not accidentally patched.
                     // production has its own overlay (archimedes/prod/*) and must not touch
-                    // the base/local/integration files that the v1.14.0.x flow updates.
+                    // the base/local/integration files that the master flow updates.
                     def acrImage = "cloudcasaAgent.azurecr.io/catalogicsoftware/cloudcasa-velero"
                     def patchTargets = isProductionFlow ?
                         [
