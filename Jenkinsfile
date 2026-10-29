@@ -22,6 +22,11 @@ properties([
             description: "Run integration prepare-repo stage even when BRANCH_NAME is not a master-equivalent branch"
         ),
         booleanParam(
+            name: "SKIP_PREPARE_DEPLOYMENT_REPO",
+            defaultValue: true,
+            description: "Skip the Prepare deployment repo stage"
+        ),
+        booleanParam(
             name: "PREPARE_REPO_DRY_RUN",
             defaultValue: false,
             description: "Do not commit/push deployment repo changes; show and archive diff only"
@@ -433,7 +438,8 @@ node("cloudcasa-build") {
     }
 
     stage("Prepare deployment repo") {
-        if (buildCloudcasaVelero && runPrepareRepo) {
+        //if (buildCloudcasaVelero && runPrepareRepo) {
+        if (buildCloudcasaVelero && runPrepareRepo && !(params.SKIP_PREPARE_DEPLOYMENT_REPO ?: false)) {
             withCredentials([
                 usernamePassword(
                     credentialsId: 'github-access-token',
