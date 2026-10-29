@@ -80,7 +80,7 @@ node("cloudcasa-build") {
     }
 
     def sourceBranch = env.BRANCH_NAME ?: "unknown"
-    def masterEquivalentBranches = ["master", "v1.14.0.x", "jg-KUBEDR-7845"]
+    def masterEquivalentBranches = ["master", "v1.14.0.x", "v1.18.4.x", "jg-KUBEDR-7845"]
     def isMasterFlow = masterEquivalentBranches.contains(sourceBranch)
     def isProductionFlow = sourceBranch == "production"
     // production builds/pushes just like the master-equivalent branches, but tags
