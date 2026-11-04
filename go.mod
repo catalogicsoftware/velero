@@ -3,6 +3,7 @@ module github.com/vmware-tanzu/velero
 go 1.26.0
 
 require (
+	catalogicsoftware.com/archimedes/kubeagentproto/protogen v0.0.0-00010101000000-000000000000
 	cloud.google.com/go/storage v1.40.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.11.1
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.5.2
@@ -176,3 +177,5 @@ require (
 )
 
 replace github.com/kopia/kopia => github.com/project-velero/kopia v0.0.0-20240417031915-e07d5b7de567
+
+replace catalogicsoftware.com/archimedes/kubeagentproto/protogen => ./pkg/vendor/catalogicsoftware.com/archimedes/kubeagentproto/protogen
