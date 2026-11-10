@@ -9,7 +9,7 @@ properties([
         booleanParam(
             name: "${buildParamPrefix}CLOUDCASA_VELERO",
             defaultValue: true,
-            description: "Build and push assembled cloudcasa-velero image"
+            description: "Build and push assembled cloudcasa-backup-helper image"
         ),
         booleanParam(
             name: "UPDATE_PLUGINS_INI_VELERO_TAG",
@@ -34,7 +34,7 @@ properties([
         string(
             name: "VELEROPLUGIN_IMAGE_NAME",
             defaultValue: "amds-veleroplugin",
-            description: "Plugin image name used in plugins.ini for cloudcasa-velero"
+            description: "Plugin image name used in plugins.ini for cloudcasa-backup-helper"
         ),
         string(
             name: "VELEROPLUGIN_VERSION",
@@ -148,7 +148,7 @@ node("cloudcasa-build") {
         }
     }
 
-    stage("Build cloudcasa-velero image") {
+    stage("Build cloudcasa-backup-helper image") {
         if (buildCloudcasaVelero) {
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
 
@@ -240,7 +240,7 @@ node("cloudcasa-build") {
                     set -eu
                     bash build-plugins.sh \
                         --config plugins.ini \
-                        ${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag} \
+                        ${dockerPrefixInternal}/cloudcasa-backup-helper:${cloudcasaVeleroTag} \
                         --platform linux/amd64,linux/arm64 \
                         --push
                 """
@@ -250,7 +250,7 @@ node("cloudcasa-build") {
         }
     }
 
-    stage("Push cloudcasa-velero image to external registry") {
+    stage("Push cloudcasa-backup-helper image to external registry") {
         if (buildCloudcasaVelero) {
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
             docker.withRegistry("https://${dockerRegistryInternal}", dockerRegistryCredsInternal) {
@@ -258,15 +258,15 @@ node("cloudcasa-build") {
                     sh """
                         set -eu
                         docker buildx imagetools create \
-                            --tag ${dockerPrefixExternal}/cloudcasa-velero:${cloudcasaVeleroTag} \
-                            ${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}
+                            --tag ${dockerPrefixExternal}/cloudcasa-backup-helper:${cloudcasaVeleroTag} \
+                            ${dockerPrefixInternal}/cloudcasa-backup-helper:${cloudcasaVeleroTag}
                     """
                 }
             }
         }
     }
 
-    stage("Push cloudcasa-velero to ACR") {
+    stage("Push cloudcasa-backup-helper to ACR") {
         if (buildCloudcasaVelero) {
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
             def acrRegistry = env.CLOUDCASA_ACR_REGISTRY ?: "cloudcasaAgent.azurecr.io"
@@ -281,8 +281,8 @@ node("cloudcasa-build") {
                         set -eu
                         docker login -u \$ACR_USER -p \$ACR_PASS ${acrRegistry}
                         docker buildx imagetools create \
-                            --tag ${acrRegistry}/catalogicsoftware/cloudcasa-velero:${cloudcasaVeleroTag} \
-                            ${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}
+                            --tag ${acrRegistry}/catalogicsoftware/cloudcasa-backup-helper:${cloudcasaVeleroTag} \
+                            ${dockerPrefixInternal}/cloudcasa-backup-helper:${cloudcasaVeleroTag}
                     """
                 }
             }
@@ -342,7 +342,7 @@ node("cloudcasa-build") {
         }
     }
 
-    // Point the selfhosted helmchart at the cloudcasa-velero image just pushed to the agent ACR
+    // Point the selfhosted helmchart at the cloudcasa-backup-helper image just pushed to the agent ACR
     // (images.agentRegistry). Only the top-level images.veleroTag; images.openshift.veleroTag
     // tracks the Red Hat certified production image and is managed separately.
     stage("Update selfhosted helmchart veleroTag") {
@@ -380,7 +380,7 @@ node("cloudcasa-build") {
                                 git push https://\${GIT_USER}:\${GIT_PASS}@github.com/catalogicsoftware/cloudcasa-server-helmchart.git ${helmchartRepoBranch}
                             fi
                         else
-                            echo "No helmchart veleroTag changes for cloudcasa-velero"
+                            echo "No helmchart veleroTag changes for cloudcasa-backup-helper"
                         fi
                     """
                 }
@@ -388,9 +388,9 @@ node("cloudcasa-build") {
         }
     }
 
-    stage("Red Hat certification (cloudcasa-velero)") {
+    stage("Red Hat certification (cloudcasa-backup-helper)") {
         if (buildCloudcasaVelero && isProductionFlow) {
-            def sourceImage = "${dockerPrefixInternal}/cloudcasa-velero:${cloudcasaVeleroTag}"
+            def sourceImage = "${dockerPrefixInternal}/cloudcasa-backup-helper:${cloudcasaVeleroTag}"
 
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
             withCredentials([
@@ -459,12 +459,12 @@ node("cloudcasa-build") {
                         git config user.email 'cloudcasabot@catalogicsoftware.com'
                     """
 
-                    // Patch cloudcasa-velero image tag in the specific files that Concourse
+                    // Patch cloudcasa-backup-helper image tag in the specific files that Concourse
                     // k8s-prepare-repo.sh targets. Match the full ACR-prefixed reference so
                     // other registries (e.g. OpenShift) are not accidentally patched.
                     // production has its own overlay (archimedes/prod/*) and must not touch
                     // the base/local/integration files that the v1.14.0.x flow updates.
-                    def acrImage = "cloudcasaAgent.azurecr.io/catalogicsoftware/cloudcasa-velero"
+                    def acrImage = "cloudcasaAgent.azurecr.io/catalogicsoftware/cloudcasa-backup-helper"
                     def patchTargets = isProductionFlow ?
                         [
                             [file: "archimedes/prod/kas/deployment_kas_image_spec.yaml", pattern: acrImage],
@@ -501,11 +501,11 @@ node("cloudcasa-build") {
                                 git diff --patch > deployment-repo-dry-run.patch
                             else
                                 git add -A
-                                git commit -m "ci: update cloudcasa-velero to ${cloudcasaVeleroTag} from ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+                                git commit -m "ci: update cloudcasa-backup-helper to ${cloudcasaVeleroTag} from ${env.JOB_NAME} #${env.BUILD_NUMBER}"
                                 git push https://${GIT_USER}:${GIT_PASS}@${deploymentRepoHost} master
                             fi
                         else
-                            echo "No deployment repo changes for cloudcasa-velero"
+                            echo "No deployment repo changes for cloudcasa-backup-helper"
                         fi
                     """
 
