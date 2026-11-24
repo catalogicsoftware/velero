@@ -65,6 +65,11 @@ properties([
             name: "AMDS_PLUGIN_IMAGE_OVERRIDE",
             defaultValue: "",
             description: "Optional full image override for [plugin:amds] in plugins.ini (for example, registry/repo:tag)"
+        ),
+        booleanParam(
+            name: "FORCE_SBOM_SIGNING",
+            defaultValue: false,
+            description: "Generate SBOM, sign and attest the ACR image even on non-release branches (for testing)"
         )
     ])
 ])
@@ -88,12 +93,15 @@ node("cloudcasa-build") {
     def masterEquivalentBranches = ["master", "v1.14.0.x", "v1.18.4.x", "jg-KUBEDR-7845"]
     def isMasterFlow = masterEquivalentBranches.contains(sourceBranch)
     def isProductionFlow = sourceBranch == "production"
+    // prod-sh follows the production rules (release build, SBOM signing, Red Hat certification) but is tagged
+    // "prod-sh" and never updates the selfhosted helmchart or the deployment repo.
+    def isProdShFlow = sourceBranch == "prod-sh"
     // production builds/pushes just like the master-equivalent branches, but tags
     // and deployment-repo targets differ (see branchTag and Prepare deployment repo below).
-    def isReleaseFlow = isMasterFlow || isProductionFlow
-    // Use "master"/"prod" as the tag segment for release branches so the tag stays
-    // clean (e.g. 1.14.0-master.12, 1.14.0-prod.12) regardless of the actual branch name.
-    def branchTag = isMasterFlow ? "master" : (isProductionFlow ? "prod" : sourceBranch.replaceAll('[^0-9A-Za-z-]', '-'))
+    def isReleaseFlow = isMasterFlow || isProductionFlow || isProdShFlow
+    // Use "master"/"prod"/"prod-sh" as the tag segment for release branches so the tag stays
+    // clean (e.g. 1.14.0-master.12, 1.14.0-prod.12, 1.18.4-prod-sh.12) regardless of the actual branch name.
+    def branchTag = isMasterFlow ? "master" : (isProductionFlow ? "prod" : (isProdShFlow ? "prod-sh" : sourceBranch.replaceAll('[^0-9A-Za-z-]', '-')))
 
     // Keep tags cloudcasa-like while preserving velero version context.
     def baseVersion = "1.18.4"
@@ -111,8 +119,11 @@ node("cloudcasa-build") {
     // deployment repo below, gated separately via runPrepareRepo.
     def buildVelero = (params["${buildParamPrefix}VELERO"] ?: false)
     def buildCloudcasaVelero = (params["${buildParamPrefix}CLOUDCASA_VELERO"] ?: false)
-    def runPrepareRepo = isReleaseFlow || (params.PREPARE_REPO_FORCE_MASTER_SCOPE ? params.PREPARE_REPO_FORCE_MASTER_SCOPE.toBoolean() : false)
+    // prod-sh is a release flow but must not touch the deployment repo
+    def runPrepareRepo = (isReleaseFlow && !isProdShFlow) || (params.PREPARE_REPO_FORCE_MASTER_SCOPE ? params.PREPARE_REPO_FORCE_MASTER_SCOPE.toBoolean() : false)
     def prepareRepoDryRun = params.PREPARE_REPO_DRY_RUN ? params.PREPARE_REPO_DRY_RUN.toBoolean() : false
+    // SBOM + signing runs on master-equivalent and production builds; FORCE_SBOM_SIGNING is for testing elsewhere.
+    def signSbom = isReleaseFlow || (params.FORCE_SBOM_SIGNING ? params.FORCE_SBOM_SIGNING.toBoolean() : false)
 
     stage("Build velero image") {
         if (buildVelero) {
@@ -286,6 +297,18 @@ node("cloudcasa-build") {
                     """
                 }
             }
+
+            // SBOM + sign + attest the image just pushed to ACR
+            if (signSbom) {
+                signAndAttestSbom(
+                    imageRef: "${acrRegistry}/catalogicsoftware/cloudcasa-backup-helper:${cloudcasaVeleroTag}",
+                    registry: acrRegistry,
+                    registryCredentialsId: acrCredentialsId,
+                    sbomName: "${acrRegistry}-cloudcasa-backup-helper-${cloudcasaVeleroTag}"
+                )
+            } else {
+                echo "Skipping SBOM signing (not a release branch and FORCE_SBOM_SIGNING is off)"
+            }
         }
     }
 
@@ -389,7 +412,7 @@ node("cloudcasa-build") {
     }
 
     stage("Red Hat certification (cloudcasa-backup-helper)") {
-        if (buildCloudcasaVelero && isProductionFlow) {
+        if (buildCloudcasaVelero && (isProductionFlow || isProdShFlow)) {
             def sourceImage = "${dockerPrefixInternal}/cloudcasa-backup-helper:${cloudcasaVeleroTag}"
 
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
@@ -516,4 +539,63 @@ node("cloudcasa-build") {
             }
         }
     }
+}
+// imageRef = "<registry-host>/<repo>:<tag>" (no scheme). Resolves the digest in the registry, generates a
+// CycloneDX SBOM with syft, sets Catalogic as author/manufacturer/supplier, signs the image with cosign,
+// attaches the SBOM as a signed attestation, then verifies both. Needs syft, cosign 2.x and jq on the node.
+// Jenkins credentials: cosign-key (Secret file), cosign-password (Secret text), cosign-pub (Secret file = cosign.pub).
+def signAndAttestSbom(Map args = [:]) {
+    def sbomFile = "sbom-${args.sbomName}.cdx.json".replaceAll('[^0-9A-Za-z._-]', '-')
+
+    withCredentials([
+        usernamePassword(credentialsId: args.registryCredentialsId, usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS'),
+        file(credentialsId: 'cosign-key', variable: 'COSIGN_KEY'),
+        string(credentialsId: 'cosign-password', variable: 'COSIGN_PASSWORD'),
+        file(credentialsId: 'cosign-pub', variable: 'COSIGN_PUB')
+    ]) {
+        withEnv([
+            "IMAGE_REF=${args.imageRef}",
+            "REGISTRY=${args.registry}",
+            "SBOM_FILE=${sbomFile}",
+            "SBOM_VENDOR_NAME=Catalogic Software",
+            "SBOM_VENDOR_URL=https://www.catalogicsoftware.com",
+            "COSIGN_YES=true"
+        ]) {
+            sh '''#!/bin/bash
+                set -euo pipefail
+                echo "$REG_PASS" | docker login -u "$REG_USER" --password-stdin "$REGISTRY"
+
+                # Resolve the digest from the registry (imagetools create never pulls the image locally)
+                DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')
+                [ -n "$DIGEST" ] || { echo "Could not resolve digest for $IMAGE_REF"; exit 1; }
+                REF="${IMAGE_REF%:*}@${DIGEST}"
+                echo "Signing $REF"
+
+                # 1. SBOM
+                syft scan "$REF" -o cyclonedx-json="$SBOM_FILE"
+
+                # 1b. Set Catalogic as author, manufacturer and supplier (Syft stays in metadata.tools)
+                jq --arg name "$SBOM_VENDOR_NAME" --arg url "$SBOM_VENDOR_URL" '
+                    .metadata.authors = [{"name": $name}]
+                    | .metadata.component.manufacturer = {"name": $name, "url": [$url]}
+                    | .metadata.component.supplier     = {"name": $name, "url": [$url]}
+                ' "$SBOM_FILE" > "$SBOM_FILE.tmp"
+                mv "$SBOM_FILE.tmp" "$SBOM_FILE"
+                jq -e '.metadata.authors[0].name and .metadata.component.manufacturer.name' "$SBOM_FILE" > /dev/null
+
+                # 2. Sign the image
+                cosign sign --key "$COSIGN_KEY" --tlog-upload=false "$REF"
+
+                # 3. Attach the SBOM as a signed attestation
+                cosign attest --key "$COSIGN_KEY" --tlog-upload=false \
+                    --type cyclonedx --predicate "$SBOM_FILE" "$REF"
+
+                # 4. Verify both
+                cosign verify --key "$COSIGN_PUB" --insecure-ignore-tlog=true "$REF" > /dev/null
+                cosign verify-attestation --key "$COSIGN_PUB" --insecure-ignore-tlog=true \
+                    --type cyclonedx "$REF" > /dev/null
+            '''
+        }
+    }
+    archiveArtifacts artifacts: sbomFile, allowEmptyArchive: false
 }
