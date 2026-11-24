@@ -93,12 +93,15 @@ node("cloudcasa-build") {
     def masterEquivalentBranches = ["master", "v1.14.0.x", "v1.18.4.x", "jg-KUBEDR-7845"]
     def isMasterFlow = masterEquivalentBranches.contains(sourceBranch)
     def isProductionFlow = sourceBranch == "production"
+    // prod-sh follows the production rules (release build, SBOM signing, Red Hat certification) but is tagged
+    // "prod-sh" and never updates the selfhosted helmchart or the deployment repo.
+    def isProdShFlow = sourceBranch == "prod-sh"
     // production builds/pushes just like the master-equivalent branches, but tags
     // and deployment-repo targets differ (see branchTag and Prepare deployment repo below).
-    def isReleaseFlow = isMasterFlow || isProductionFlow
-    // Use "master"/"prod" as the tag segment for release branches so the tag stays
-    // clean (e.g. 1.14.0-master.12, 1.14.0-prod.12) regardless of the actual branch name.
-    def branchTag = isMasterFlow ? "master" : (isProductionFlow ? "prod" : sourceBranch.replaceAll('[^0-9A-Za-z-]', '-'))
+    def isReleaseFlow = isMasterFlow || isProductionFlow || isProdShFlow
+    // Use "master"/"prod"/"prod-sh" as the tag segment for release branches so the tag stays
+    // clean (e.g. 1.14.0-master.12, 1.14.0-prod.12, 1.18.4-prod-sh.12) regardless of the actual branch name.
+    def branchTag = isMasterFlow ? "master" : (isProductionFlow ? "prod" : (isProdShFlow ? "prod-sh" : sourceBranch.replaceAll('[^0-9A-Za-z-]', '-')))
 
     // Keep tags cloudcasa-like while preserving velero version context.
     def baseVersion = "1.18.4"
@@ -116,7 +119,8 @@ node("cloudcasa-build") {
     // deployment repo below, gated separately via runPrepareRepo.
     def buildVelero = (params["${buildParamPrefix}VELERO"] ?: false)
     def buildCloudcasaVelero = (params["${buildParamPrefix}CLOUDCASA_VELERO"] ?: false)
-    def runPrepareRepo = isReleaseFlow || (params.PREPARE_REPO_FORCE_MASTER_SCOPE ? params.PREPARE_REPO_FORCE_MASTER_SCOPE.toBoolean() : false)
+    // prod-sh is a release flow but must not touch the deployment repo
+    def runPrepareRepo = (isReleaseFlow && !isProdShFlow) || (params.PREPARE_REPO_FORCE_MASTER_SCOPE ? params.PREPARE_REPO_FORCE_MASTER_SCOPE.toBoolean() : false)
     def prepareRepoDryRun = params.PREPARE_REPO_DRY_RUN ? params.PREPARE_REPO_DRY_RUN.toBoolean() : false
     // SBOM + signing runs on master-equivalent and production builds; FORCE_SBOM_SIGNING is for testing elsewhere.
     def signSbom = isReleaseFlow || (params.FORCE_SBOM_SIGNING ? params.FORCE_SBOM_SIGNING.toBoolean() : false)
@@ -408,7 +412,7 @@ node("cloudcasa-build") {
     }
 
     stage("Red Hat certification (cloudcasa-backup-helper)") {
-        if (buildCloudcasaVelero && isProductionFlow) {
+        if (buildCloudcasaVelero && (isProductionFlow || isProdShFlow)) {
             def sourceImage = "${dockerPrefixInternal}/cloudcasa-backup-helper:${cloudcasaVeleroTag}"
 
             env.BUILDX_CONFIG = "${env.HOME}/.docker/buildx"
